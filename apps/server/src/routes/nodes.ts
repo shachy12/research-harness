@@ -13,6 +13,8 @@ import { streamSSE } from 'hono/streaming';
 import type { AppDeps } from '../app.ts';
 import { inheritedItems } from '../dag/context.ts';
 import { DRAFT_RESULT_INSTRUCTION, buildChatRequest } from '../dag/prompt.ts';
+import { planSession } from '../dag/session.ts';
+import type { ReplyContext } from '../llm/index.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
 export function nodeRoutes({ repo, llm }: AppDeps) {
@@ -55,8 +57,12 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
       const node = requireOpen(c.req.param('nodeId'));
       if (streaming.has(node.id)) throw conflict('A reply is already being generated for this node.');
 
-      const userMessage = repo.addMessage(node.id, 'user', c.req.valid('json').content);
+      const content = c.req.valid('json').content;
+      // Plan the provider session before saving the message (it depends on what the node had so far).
+      const session = planSession(repo.snapshot(node.projectId), node.id);
+      const userMessage = repo.addMessage(node.id, 'user', content);
       const request = buildChatRequest(repo.snapshot(node.projectId), node.id);
+      const ctx: ReplyContext = { nodeId: node.id, request, message: content, session };
       streaming.add(node.id);
 
       return streamSSE(c, async (stream) => {
@@ -68,8 +74,10 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
         const toolCalls = new Map<string, ToolCall>();
         try {
           await send({ type: 'user', message: userMessage });
-          for await (const event of llm.streamReply(request, abort.signal)) {
-            if (event.type === 'thinking') {
+          for await (const event of llm.streamReply(ctx, abort.signal)) {
+            if (event.type === 'session') {
+              repo.setSessionId(node.id, event.sessionId);
+            } else if (event.type === 'thinking') {
               await send({ type: 'thinking' });
             } else if (event.type === 'tool') {
               toolCalls.set(event.call.id, event.call);
@@ -105,6 +113,7 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
           repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id] }),
         );
       });
+      llm.release?.(parent.id); // the parent receives no more messages
       return c.json(children, 201);
     })
 
@@ -117,9 +126,19 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
         throw new HttpError(400, 'This branch has no replies yet.');
       }
 
-      const request = buildChatRequest(graph, node.id, [{ role: 'user', content: DRAFT_RESULT_INSTRUCTION }]);
-      const draft = await llm.draftResult(request, c.req.raw.signal);
-      return c.json(draft);
+      const ctx: ReplyContext = {
+        nodeId: node.id,
+        request: buildChatRequest(graph, node.id, [{ role: 'user', content: DRAFT_RESULT_INSTRUCTION }]),
+        message: DRAFT_RESULT_INSTRUCTION,
+        session: planSession(graph, node.id),
+      };
+      try {
+        return c.json(await llm.draftResult(ctx, c.req.raw.signal));
+      } catch (err) {
+        console.error(`[draft] node ${node.id}:`, err);
+        // The dialog shows this and offers to write the result by hand.
+        throw new HttpError(502, err instanceof Error ? err.message : 'Drafting the result failed');
+      }
     })
 
     // Approve (or edit) the result. This finishes the branch.
@@ -130,6 +149,7 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
       if (streaming.has(node.id)) throw conflict('Wait for the current reply to finish.');
 
       repo.setResult(node.id, c.req.valid('json'));
+      llm.release?.(node.id); // a finished branch receives no more messages
       return c.json(repo.getNode(node.id)!);
     });
 }

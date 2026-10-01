@@ -47,7 +47,7 @@ export function withSources(m: Message): string {
   return `${m.content}\n\n[Sources consulted for this reply:\n${list}]`;
 }
 
-function segmentTurns(seg: Segment): ChatTurn[] {
+export function segmentTurns(seg: Segment): ChatTurn[] {
   switch (seg.kind) {
     case 'messages':
       return seg.messages.map((m) => ({ role: m.role, content: withSources(m) }));

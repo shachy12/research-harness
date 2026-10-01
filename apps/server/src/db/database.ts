@@ -34,6 +34,8 @@ const MIGRATIONS: string[] = [
   `,
   // 2: web search / fetch calls made while writing a reply (JSON ToolCall[])
   `ALTER TABLE messages ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]';`,
+  // 3: Claude Code session id per node (claude-code provider)
+  `ALTER TABLE nodes ADD COLUMN session_id TEXT;`,
 ];
 
 /** Open (or create) the database and bring its schema up to date. Pass ':memory:' for tests. */

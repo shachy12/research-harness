@@ -1,8 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { type BranchResult, type ToolCall, branchResultSchema } from '@harness/shared';
-import type { ChatRequest, ChatTurn } from '../dag/prompt.ts';
-import type { LLMProvider, ReplyEvent } from './provider.ts';
+import type { ChatTurn } from '../dag/prompt.ts';
+import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -94,7 +94,7 @@ export class AnthropicProvider implements LLMProvider {
     this.label = `anthropic:${options.model}`;
   }
 
-  async *streamReply(request: ChatRequest, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  async *streamReply({ request }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     const messages = toMessages(request.turns);
     const calls = new Map<string, ToolCall>();
     let wroteText = false;
@@ -147,7 +147,7 @@ export class AnthropicProvider implements LLMProvider {
     yield { type: 'text', text: '\n\n[The research loop ran too long and was stopped. Ask a narrower question.]' };
   }
 
-  async draftResult(request: ChatRequest, signal: AbortSignal): Promise<BranchResult> {
+  async draftResult({ request }: ReplyContext, signal: AbortSignal): Promise<BranchResult> {
     const response = await this.client.beta.messages.parse(
       {
         model: this.options.model,

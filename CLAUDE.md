@@ -36,7 +36,21 @@ Changed during the MVP (2026-10-01):
 - **Vercel AI SDK → own provider interface + official SDKs.** Claude is called through the official Anthropic SDK (direct access to prompt caching, structured outputs, refusal fallbacks). Providers stay pluggable through `LLMProvider`.
 - **Drizzle + better-sqlite3 → `node:sqlite`.** No native module to rebuild for Electron, and npm 12 blocks install scripts by default. Four tables and simple queries don't need an ORM. Verify `node:sqlite` is available in Electron's bundled Node when we get there; the repository module is the only place to change if not.
 
-## Model settings
+## Providers
+Chosen with `HARNESS_PROVIDER` in `.env`: `claude-code` (the user's choice for their own research: runs on their Claude subscription), `anthropic` (API key, pay per token), or `placeholder`.
+
+Why Claude Code: Anthropic's terms don't allow Claude.ai subscription logins in third-party apps (no "Sign in with Claude", no reusing OAuth tokens). Running the official Claude Code CLI on your own machine is allowed; background runs (`claude -p`) count against a separate monthly credit included with Pro/Max (since 2026-06-15). The API stays available as a provider.
+
+### Claude Code provider (`apps/server/src/llm/claude-code.ts`)
+- Each node gets one long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages` process; user messages go to stdin as `{"type":"user","message":{"role":"user","content":...}}` lines, each turn ends with a `result` event. The process is stopped after 10 minutes idle, on Stop (abort), and when the node is forked or finished (`release`). The next message restarts it with `--resume`.
+- A node's Claude Code session id is stored in `nodes.session_id` (from the `system:init` event). `dag/session.ts` `planSession` decides how a node's first message starts: `resume` its own session, `fork` the parent's (merge: the base's) session with `--resume X --fork-session`, or `new`. The branch note / merge results go in front of the first message. If there is no session to fork from (e.g. nodes made with another provider), the earlier context is sent as a rendered transcript.
+- Tools: only `WebSearch,WebFetch` (`--tools` + `--allowedTools`). Our `SYSTEM_PROMPT` replaces Claude Code's default (`--system-prompt`); `--setting-sources ''` and `--strict-mcp-config` ignore the user's own Claude Code settings, memory and MCP servers. Runs happen in `data/claude-sessions/` so these sessions stay separate from the user's normal Claude Code history.
+- Result drafts: a one-shot run with `--resume <node session> --fork-session --no-session-persistence --output-format json --json-schema …`; the answer is in `structured_output`. The CLI rejects the `$schema` line zod adds to JSON Schemas, so it is stripped.
+- Tool calls come from `assistant`/`tool_use` (WebSearch `input.query`, WebFetch `input.url`) and `user`/`tool_result` blocks; search result links are parsed from the `Links: [...]` JSON in the result text.
+- Windows notes: the npm package's postinstall (which places `claude.exe`) is blocked by npm 12; run `node install.cjs` in the package folder once. `findClaudeExecutable` uses `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe` directly (the `claude.ps1` shim is blocked by the PowerShell policy). Windows PowerShell drops empty-string arguments to native programs, so test the CLI from Node, not PowerShell.
+- Tests use `llm/fake-claude.mjs`, a fake CLI speaking the same protocol.
+
+## Model settings (anthropic provider)
 - Default model `claude-opus-5-5`, effort `high` (Opus 5.5's own default is `medium`, so it is set explicitly). Override with `HARNESS_MODEL` / `HARNESS_EFFORT`.
 - Requests use the server-side refusal fallback (`fallbacks: 'default'`, beta `server-side-fallback-2026-07-01`).
 - Thinking is always on for Opus 5.5 and its text is not shown; the chat stream sends a `thinking` event so the UI can show a "Thinking…" state.
@@ -73,7 +87,7 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - The merge dialog navigates to the new node with `state.autoSend` (the first message); the chat sends it once.
 - React runs effects twice in development: guard effects that trigger paid model calls with a ref (see `ResultDialog`).
 - Dark mode: `lib/theme.ts` toggles the `dark` class from the OS setting. Status colors are Tailwind tokens: `open`, `done`, `merge`, `frozen` (+ `-soft`), `canvas`, `edge`.
-- The browser-pane preview (`.claude/launch.json`) uses `data/preview.db`, so testing never touches the real `data/harness.db`.
+- The browser-pane preview (`.claude/launch.json`) uses `data/preview.db` and the placeholder provider, so testing never touches the real `data/harness.db` or spends model credit. (Variables set by the launcher win over `.env`.)
 
 ## Commands (run from the repo root)
 - `npm run dev`: starts the server (http://localhost:8787) and the web UI (http://localhost:5173, which proxies `/api` to the server)

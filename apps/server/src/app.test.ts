@@ -4,15 +4,16 @@ import { createApp } from './app.ts';
 import type { ChatRequest } from './dag/prompt.ts';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
-import type { LLMProvider, ReplyEvent } from './llm/index.ts';
+import type { LLMProvider, ReplyContext, ReplyEvent } from './llm/index.ts';
 
 /** Records the requests it receives and replies with fixed text. */
 class FakeProvider implements LLMProvider {
   readonly label = 'fake';
   requests: ChatRequest[] = [];
 
-  async *streamReply(request: ChatRequest): AsyncIterable<ReplyEvent> {
+  async *streamReply({ request }: ReplyContext): AsyncIterable<ReplyEvent> {
     this.requests.push(request);
+    yield { type: 'session', sessionId: 'session-1' };
     yield { type: 'thinking' };
     if (request.turns.at(-1)?.content.includes('search')) {
       const call = { id: 'call-1', name: 'web_search', input: 'memory papers', status: 'running' as const, results: [] };
@@ -23,7 +24,7 @@ class FakeProvider implements LLMProvider {
     yield { type: 'text', text: 'there' };
   }
 
-  async draftResult(request: ChatRequest): Promise<BranchResult> {
+  async draftResult({ request }: ReplyContext): Promise<BranchResult> {
     this.requests.push(request);
     return { findings: 'drafted', evidence: '', openQuestions: '', confidence: 'medium' };
   }
@@ -91,6 +92,7 @@ describe('API', () => {
     expect(events.at(-1)).toMatchObject({ type: 'done', message: { role: 'assistant', content: 'Hello there' } });
 
     const { data } = await call<NodeDetail>('GET', `/nodes/${rootId}`);
+    expect(data.node.sessionId).toBe('session-1'); // stored from the provider's session event
     expect(data.messages.map((m) => [m.role, m.content])).toEqual([
       ['user', 'Hi'],
       ['assistant', 'Hello there'],

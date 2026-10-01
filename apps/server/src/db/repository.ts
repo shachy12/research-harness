@@ -7,7 +7,7 @@ import { transaction } from './database.ts';
 interface ProjectRow { id: string; name: string; created_at: string }
 interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
-  status: NodeStatus; result: string | null; created_at: string;
+  status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; created_at: string;
@@ -21,6 +21,7 @@ const toNode = (r: NodeRow): DagNode => ({
   parentIds: JSON.parse(r.parent_ids) as string[],
   status: r.status,
   result: r.result ? (JSON.parse(r.result) as BranchResult) : null,
+  sessionId: r.session_id,
   createdAt: r.created_at,
 });
 const toMessage = (r: MessageRow): Message => ({
@@ -90,6 +91,10 @@ export class Repository {
 
   setStatus(id: string, status: NodeStatus): void {
     this.db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(status, id);
+  }
+
+  setSessionId(id: string, sessionId: string): void {
+    this.db.prepare('UPDATE nodes SET session_id = ? WHERE id = ?').run(sessionId, id);
   }
 
   setResult(id: string, result: BranchResult): void {

@@ -1,6 +1,5 @@
 import type { BranchResult } from '@harness/shared';
-import type { ChatRequest } from '../dag/prompt.ts';
-import type { LLMProvider, ReplyEvent } from './provider.ts';
+import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -12,7 +11,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export class PlaceholderProvider implements LLMProvider {
   readonly label = 'placeholder (no API key)';
 
-  async *streamReply(request: ChatRequest, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  async *streamReply({ request }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     const question = request.turns.at(-1)?.content ?? '';
     if (/search/i.test(question)) {
       const call = { id: `sample-${Date.now()}`, name: 'web_search', input: question.slice(0, 80), status: 'running' as const, results: [] };
@@ -35,7 +34,7 @@ export class PlaceholderProvider implements LLMProvider {
     }
   }
 
-  async draftResult(request: ChatRequest): Promise<BranchResult> {
+  async draftResult({ request }: ReplyContext): Promise<BranchResult> {
     const lastReply = request.turns.findLast((t) => t.role === 'assistant')?.content ?? '';
     return {
       findings: lastReply.slice(0, 500) || 'No findings yet.',

@@ -31,6 +31,8 @@ export interface DagNode {
   parentIds: string[];
   status: NodeStatus;
   result: BranchResult | null;
+  /** The Claude Code session holding this node's conversation (claude-code provider only). */
+  sessionId: string | null;
   createdAt: string;
 }
 

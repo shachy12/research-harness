@@ -6,7 +6,7 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
       "port": 5173,
-      "env": { "HARNESS_DB": "../../data/preview.db" }
+      "env": { "HARNESS_DB": "../../data/preview.db", "HARNESS_PROVIDER": "placeholder" }
     }
   ]
 }
