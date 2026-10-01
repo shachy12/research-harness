@@ -43,3 +43,44 @@ export interface Message {
   content: string;
   createdAt: string;
 }
+
+/** One entry of what a node inherits: an ancestor's message, or a merged branch's result. */
+export type ContextItem =
+  | { kind: 'message'; nodeId: string; nodeTitle: string; message: Message }
+  | { kind: 'result'; nodeId: string; nodeTitle: string; result: BranchResult };
+
+// ---- API responses ----
+
+/** A node as shown on a graph card. */
+export interface NodeSummary extends DagNode {
+  messageCount: number;
+  lastMessage: string | null;
+}
+
+export interface GraphResponse {
+  project: Project;
+  nodes: NodeSummary[];
+}
+
+export interface NodeDetail {
+  node: DagNode;
+  messages: Message[];
+  /** Everything the node inherits, in prompt order. */
+  inherited: ContextItem[];
+  childIds: string[];
+}
+
+/**
+ * Server-sent events from POST /api/nodes/:id/messages.
+ * `thinking` marks that the model started reasoning (its text is not shown).
+ */
+export type ChatStreamEvent =
+  | { type: 'user'; message: Message }
+  | { type: 'thinking' }
+  | { type: 'delta'; text: string }
+  | { type: 'done'; message: Message }
+  | { type: 'error'; error: string };
+
+export interface ApiError {
+  error: string;
+}

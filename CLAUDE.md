@@ -27,10 +27,25 @@ TypeScript end to end, on Node. Chosen over Python + FastAPI because Electron is
 | Layer | Choice |
 |---|---|
 | Language | TypeScript everywhere |
-| Backend | Node with Hono or Fastify (local server first, later moved into the Electron main process) |
-| LLM providers | Vercel AI SDK (provider abstraction, unified tool-calling loop, streaming, structured output) |
+| Backend | Node with Hono (local server first, later moved into the Electron main process) |
+| LLM providers | Our own `LLMProvider` interface (`apps/server/src/llm/provider.ts`); each provider is an adapter on its official SDK. Claude: `@anthropic-ai/sdk` |
 | Tools | MCP client; tools are MCP servers (any language, so Python tools are fine as MCP servers) |
-| Storage | SQLite via Drizzle ORM + better-sqlite3 |
+| Storage | SQLite via Node's built-in `node:sqlite`, plain SQL in one repository module |
+
+Changed during the MVP (2026-10-01):
+- **Vercel AI SDK → own provider interface + official SDKs.** Claude is called through the official Anthropic SDK (direct access to prompt caching, structured outputs, refusal fallbacks). Providers stay pluggable through `LLMProvider`.
+- **Drizzle + better-sqlite3 → `node:sqlite`.** No native module to rebuild for Electron, and npm 12 blocks install scripts by default. Four tables and simple queries don't need an ORM. Verify `node:sqlite` is available in Electron's bundled Node when we get there; the repository module is the only place to change if not.
+
+## Model settings
+- Default model `claude-opus-5-5`, effort `high` (Opus 5.5's own default is `medium`, so it is set explicitly). Override with `HARNESS_MODEL` / `HARNESS_EFFORT`.
+- Requests use the server-side refusal fallback (`fallbacks: 'default'`, beta `server-side-fallback-2026-07-01`).
+- Thinking is always on for Opus 5.5 and its text is not shown; the chat stream sends a `thinking` event so the UI can show a "Thinking…" state.
+- Without `ANTHROPIC_API_KEY`, the server uses `PlaceholderProvider`, which streams an explanation instead of failing.
+
+## Prompt construction (apps/server/src/dag)
+- One fixed system prompt for every node. Node-specific framing goes into the conversation: a `[A new branch starts here: …]` user turn where a branch begins, and a `[Merge node …]` user turn carrying the branch results.
+- Cache breakpoint on the last inherited turn (siblings share it) plus top-level automatic caching for the growing conversation.
+- Merge base = lowest common ancestor of the merged branches. Merged branches contribute only `formatResult(...)` text.
 | Frontend | React + Vite |
 | Graph view | React Flow |
 | UI components | shadcn/ui + Tailwind |
@@ -55,10 +70,10 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - Add a shadcn component: `npx shadcn@latest add <name>` from `apps/web`. Generated files in `src/components/ui` are not linted. Base UI buttons rendered as links need `nativeButton={false}`.
 - Server env: `.env` at the repo root (see `.env.example`). The server port variable is `HARNESS_SERVER_PORT`, not `PORT`.
 
-## Project structure (planned)
+## Project structure
 npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Requires Node 24 LTS.
 - `apps/web`: React UI. `src/app` (router, AppShell with a sidebar slot), `src/features/*` (graph, chat, fork, result, merge; later projects, settings), `src/components/ui` (shadcn), `src/api` (typed server client).
-- `apps/server`: Hono backend. `routes/`, `dag/` (core context-assembly logic: pure functions, heavily tested with Vitest), `llm/` (provider registry on the Vercel AI SDK), `tools/` (MCP, later), `db/` (Drizzle + SQLite).
+- `apps/server`: Hono backend. `routes/` (projects: graph, merge; nodes: detail, rename, chat stream, fork, draft/approve result), `dag/` (core context-assembly logic: pure functions, heavily tested with Vitest), `llm/` (provider interface, Anthropic adapter, placeholder), `tools/` (MCP, later), `db/` (`node:sqlite`, migrations via `PRAGMA user_version`, `Repository`). `createApp({ repo, llm })` takes its dependencies so tests use `:memory:` and a fake provider.
 - `apps/desktop`: Electron (later).
 - `packages/shared`: types/schemas shared by web and server.
 - `data/`: local SQLite file (gitignored).
