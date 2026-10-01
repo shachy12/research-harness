@@ -12,7 +12,9 @@ export function useGraph(projectId: string) {
   return useQuery({
     queryKey: keys.graph(projectId),
     queryFn: ({ signal }) => api.get<GraphResponse>(`/projects/${projectId}/graph`, signal),
-    // While any node is working, refresh so the cards' "Working…" / "Your turn" stay current.
+    // Always reload when the graph opens (a reply may have started meanwhile), and while any node
+    // is working, keep refreshing so the cards' "Working…" / "Your turn" stay current.
+    staleTime: 0,
     refetchInterval: (query) => (query.state.data?.nodes.some((n) => n.running) ? 1500 : false),
   })
 }
