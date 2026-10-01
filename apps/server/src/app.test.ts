@@ -181,6 +181,19 @@ describe('API', () => {
     expect(prompt).not.toContain('secret transcript of A');
   });
 
+  it('reset deletes all nodes and messages and leaves a fresh root', async () => {
+    await chat(rootId, 'Scope it');
+    await fork(rootId, ['A', 'B']);
+
+    const { status, data: newRoot } = await call<DagNode>('POST', '/projects/default/reset');
+    expect(status).toBe(200);
+    expect(newRoot).toMatchObject({ title: 'Main thread', status: 'open', parentIds: [], sessionId: null });
+
+    const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+    expect(graph.nodes.map((n) => [n.id, n.messageCount])).toEqual([[newRoot.id, 0]]);
+    expect((await call('GET', `/nodes/${rootId}`)).status).toBe(404);
+  });
+
   it('renames a node', async () => {
     const { data } = await call<DagNode>('PATCH', `/nodes/${rootId}`, { title: 'Renamed' });
     expect(data.title).toBe('Renamed');

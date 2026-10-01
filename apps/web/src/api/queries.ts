@@ -63,6 +63,14 @@ export function useMerge(projectId: string) {
   })
 }
 
+export function useResetProject(projectId: string) {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: () => api.post<DagNode>(`/projects/${projectId}/reset`),
+    onSuccess: refresh,
+  })
+}
+
 export function useRename() {
   const refresh = useRefreshAll()
   return useMutation({

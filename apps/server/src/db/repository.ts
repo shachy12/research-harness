@@ -63,6 +63,14 @@ export class Repository {
     });
   }
 
+  /** Delete every node and message in the project and start again from an empty root. */
+  resetProject(projectId: string, rootTitle: string): DagNode {
+    return this.transaction(() => {
+      this.db.prepare('DELETE FROM nodes WHERE project_id = ?').run(projectId); // messages cascade
+      return this.createNode({ projectId, title: rootTitle, parentIds: [] });
+    });
+  }
+
   // ---- nodes ----
 
   getNode(id: string): DagNode | null {

@@ -14,10 +14,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { useGraph } from '@/api/queries'
 import { Button } from '@/components/ui/button'
+import { RotateCcwIcon } from 'lucide-react'
 import { MergeDialog } from '@/features/merge/MergeDialog'
 import { useMergeSelection } from '@/features/merge/selection'
 import { layoutGraph } from './layout'
 import { type CardNode, NodeCard } from './NodeCard'
+import { ResetDialog } from './ResetDialog'
 
 const nodeTypes = { card: NodeCard }
 
@@ -40,6 +42,7 @@ function GraphView({ projectId }: { projectId: string }) {
   const [shake, setShake] = useState<{ id: string; key: number } | null>(null)
   const [hint, setHint] = useState<string | null>(null)
   const [mergeOpen, setMergeOpen] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
   const flow = useReactFlow()
 
   const summaries = useMemo(() => graph.data?.nodes ?? [], [graph.data])
@@ -103,7 +106,8 @@ function GraphView({ projectId }: { projectId: string }) {
       >
         <Background gap={20} size={1.2} color="var(--edge)" />
         <Controls showInteractive={false} position="top-right" />
-        <Panel position="top-left" className="pointer-events-none flex flex-col gap-1 rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground">
+        <Panel position="top-left" className="flex flex-col items-start gap-2">
+          <div className="pointer-events-none flex flex-col gap-1 rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-2">
             <svg width="26" height="8" aria-hidden="true"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--edge)" strokeWidth="2" /></svg>
             inherits full context
@@ -112,6 +116,10 @@ function GraphView({ projectId }: { projectId: string }) {
             <svg width="26" height="8" aria-hidden="true"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--status-merge)" strokeWidth="2" strokeDasharray="5 4" /></svg>
             passes only its result
           </span>
+          </div>
+          <Button variant="outline" size="sm" className="bg-card" onClick={() => setResetOpen(true)}>
+            <RotateCcwIcon /> Start over
+          </Button>
         </Panel>
         <Panel position="bottom-left" className="flex flex-wrap items-center gap-2">
           <Button
@@ -129,6 +137,19 @@ function GraphView({ projectId }: { projectId: string }) {
           </span>
         </Panel>
       </ReactFlow>
+
+      {resetOpen && (
+        <ResetDialog
+          projectId={projectId}
+          nodeCount={summaries.length}
+          onDone={() => {
+            selection.clear()
+            setHint(null)
+            viewMemory.delete(projectId) // re-fit the view to the new, single root
+          }}
+          onClose={() => setResetOpen(false)}
+        />
+      )}
 
       {mergeOpen && (
         <MergeDialog

@@ -90,8 +90,11 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
           const reply = repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
           await send({ type: 'done', message: reply });
         } catch (err) {
-          // Keep whatever arrived before the failure, so the user doesn't lose it.
-          if (text || toolCalls.size) repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
+          // Keep whatever arrived before the failure, so the user doesn't lose it
+          // (unless the node itself is gone, e.g. the project was reset mid-reply).
+          if ((text || toolCalls.size) && repo.getNode(node.id)) {
+            repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
+          }
           if (!abort.signal.aborted) {
             console.error(`[chat] node ${node.id}:`, err);
             await send({ type: 'error', error: err instanceof Error ? err.message : 'The model request failed' });

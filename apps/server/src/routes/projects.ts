@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 import type { AppDeps } from '../app.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
-export function projectRoutes({ repo }: AppDeps) {
+export function projectRoutes({ repo, llm }: AppDeps) {
   return new Hono()
     .get('/:projectId/graph', (c) => {
       const project = repo.getProject(c.req.param('projectId'));
@@ -32,5 +32,14 @@ export function projectRoutes({ repo }: AppDeps) {
       }
       const node = repo.createNode({ projectId, title, parentIds });
       return c.json(node, 201);
+    })
+
+    // Start over: delete all nodes and messages, keep the project with a fresh root.
+    .post('/:projectId/reset', (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      for (const node of repo.listNodes(project.id)) llm.release?.(node.id); // stop running model processes
+      const root = repo.resetProject(project.id, 'Main thread');
+      return c.json(root);
     });
 }
