@@ -40,7 +40,9 @@ Changed during the MVP (2026-10-01):
 - Default model `claude-opus-5-5`, effort `high` (Opus 5.5's own default is `medium`, so it is set explicitly). Override with `HARNESS_MODEL` / `HARNESS_EFFORT`.
 - Requests use the server-side refusal fallback (`fallbacks: 'default'`, beta `server-side-fallback-2026-07-01`).
 - Thinking is always on for Opus 5.5 and its text is not shown; the chat stream sends a `thinking` event so the UI can show a "Thinking…" state.
-- Without `ANTHROPIC_API_KEY`, the server uses `PlaceholderProvider`, which streams an explanation instead of failing.
+- Without `ANTHROPIC_API_KEY`, the server uses `PlaceholderProvider`, which streams an explanation instead of failing. A message containing "search" makes it show a sample search, to test the tool display.
+- Web research: every chat request includes Anthropic's server-side tools `web_search_20260209` and `web_fetch_20260209` (max 10 uses each per reply; they include dynamic filtering, so don't add a separate `code_execution` tool). `pause_turn` is resumed by sending the paused assistant content back unchanged (up to 5 times). Result drafts run without tools.
+- Tool calls are stored per message (`messages.tool_calls`, JSON `ToolCall[]`: query or URL, status, result titles/URLs) and streamed as `tool` events. Raw search results are not kept in history; instead each assistant turn in later prompts ends with a `[Sources consulted for this reply: …]` list (`withSources` in `dag/prompt.ts`), so follow-ups and result drafts can cite them.
 
 ## Prompt construction (apps/server/src/dag)
 - One fixed system prompt for every node. Node-specific framing goes into the conversation: a `[A new branch starts here: …]` user turn where a branch begins, and a `[Merge node …]` user turn carrying the branch results.

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { BranchResult, DagNode, Message, NodeStatus, Project, Role } from '@harness/shared';
+import type { BranchResult, DagNode, Message, NodeStatus, Project, Role, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
@@ -9,7 +9,9 @@ interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; created_at: string;
 }
-interface MessageRow { id: string; node_id: string; role: Role; content: string; created_at: string }
+interface MessageRow {
+  id: string; node_id: string; role: Role; content: string; tool_calls: string; created_at: string;
+}
 
 const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, createdAt: r.created_at });
 const toNode = (r: NodeRow): DagNode => ({
@@ -22,7 +24,12 @@ const toNode = (r: NodeRow): DagNode => ({
   createdAt: r.created_at,
 });
 const toMessage = (r: MessageRow): Message => ({
-  id: r.id, nodeId: r.node_id, role: r.role, content: r.content, createdAt: r.created_at,
+  id: r.id,
+  nodeId: r.node_id,
+  role: r.role,
+  content: r.content,
+  toolCalls: JSON.parse(r.tool_calls) as ToolCall[],
+  createdAt: r.created_at,
 });
 
 const now = () => new Date().toISOString();
@@ -93,11 +100,11 @@ export class Repository {
 
   // ---- messages ----
 
-  addMessage(nodeId: string, role: Role, content: string): Message {
+  addMessage(nodeId: string, role: Role, content: string, toolCalls: ToolCall[] = []): Message {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO messages (id, node_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(id, nodeId, role, content, now());
+      .prepare('INSERT INTO messages (id, node_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, nodeId, role, content, JSON.stringify(toolCalls), now());
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as unknown as MessageRow;
     return toMessage(row);
   }

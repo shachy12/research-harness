@@ -32,6 +32,8 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX messages_by_node ON messages(node_id, seq);
   `,
+  // 2: web search / fetch calls made while writing a reply (JSON ToolCall[])
+  `ALTER TABLE messages ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 /** Open (or create) the database and bring its schema up to date. Pass ':memory:' for tests. */

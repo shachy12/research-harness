@@ -2,6 +2,7 @@ import { zValidator } from '@hono/zod-validator';
 import {
   type ChatStreamEvent,
   type NodeDetail,
+  type ToolCall,
   branchResultSchema,
   forkSchema,
   renameNodeSchema,
@@ -64,21 +65,25 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
         stream.onAbort(() => abort.abort());
 
         let text = '';
+        const toolCalls = new Map<string, ToolCall>();
         try {
           await send({ type: 'user', message: userMessage });
           for await (const event of llm.streamReply(request, abort.signal)) {
             if (event.type === 'thinking') {
               await send({ type: 'thinking' });
+            } else if (event.type === 'tool') {
+              toolCalls.set(event.call.id, event.call);
+              await send({ type: 'tool', call: event.call });
             } else {
               text += event.text;
               await send({ type: 'delta', text: event.text });
             }
           }
-          const reply = repo.addMessage(node.id, 'assistant', text);
+          const reply = repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
           await send({ type: 'done', message: reply });
         } catch (err) {
           // Keep whatever arrived before the failure, so the user doesn't lose it.
-          if (text) repo.addMessage(node.id, 'assistant', text);
+          if (text || toolCalls.size) repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
           if (!abort.signal.aborted) {
             console.error(`[chat] node ${node.id}:`, err);
             await send({ type: 'error', error: err instanceof Error ? err.message : 'The model request failed' });

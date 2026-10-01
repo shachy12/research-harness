@@ -14,6 +14,11 @@ class FakeProvider implements LLMProvider {
   async *streamReply(request: ChatRequest): AsyncIterable<ReplyEvent> {
     this.requests.push(request);
     yield { type: 'thinking' };
+    if (request.turns.at(-1)?.content.includes('search')) {
+      const call = { id: 'call-1', name: 'web_search', input: 'memory papers', status: 'running' as const, results: [] };
+      yield { type: 'tool', call };
+      yield { type: 'tool', call: { ...call, status: 'done', results: [{ title: 'A paper', url: 'https://example.org/paper' }] } };
+    }
     yield { type: 'text', text: 'Hello ' };
     yield { type: 'text', text: 'there' };
   }
@@ -90,6 +95,20 @@ describe('API', () => {
       ['user', 'Hi'],
       ['assistant', 'Hello there'],
     ]);
+  });
+
+  it('streams tool calls, saves them, and passes their sources to later prompts', async () => {
+    const events = await chat(rootId, 'Please search for memory papers');
+    expect(events.map((e) => e.type)).toEqual(['user', 'thinking', 'tool', 'tool', 'delta', 'delta', 'done']);
+
+    const done = events.at(-1) as Extract<ChatStreamEvent, { type: 'done' }>;
+    expect(done.message.toolCalls).toEqual([
+      { id: 'call-1', name: 'web_search', input: 'memory papers', status: 'done', results: [{ title: 'A paper', url: 'https://example.org/paper' }] },
+    ]);
+
+    await chat(rootId, 'Thanks');
+    const history = llm.requests.at(-1)!.turns.map((t) => t.content).join('\n');
+    expect(history).toContain('A paper (https://example.org/paper)');
   });
 
   it('rejects empty messages', async () => {

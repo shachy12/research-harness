@@ -1,3 +1,4 @@
+import type { ToolCall } from '@harness/shared'
 import { useRef, useState } from 'react'
 import { streamChat } from '@/api/client'
 import { useRefreshAll } from '@/api/queries'
@@ -7,13 +8,18 @@ export interface StreamState {
   userText: string | null
   /** The reply so far. */
   replyText: string
+  /** Searches and fetches so far, in the order they started. */
+  toolCalls: ToolCall[]
   /** The model is reasoning and hasn't produced text yet. */
   thinking: boolean
   active: boolean
   error: string | null
 }
 
-const IDLE: StreamState = { userText: null, replyText: '', thinking: false, active: false, error: null }
+const IDLE: StreamState = { userText: null, replyText: '', toolCalls: [], thinking: false, active: false, error: null }
+
+const upsert = (calls: ToolCall[], call: ToolCall) =>
+  calls.some((c) => c.id === call.id) ? calls.map((c) => (c.id === call.id ? call : c)) : [...calls, call]
 
 /**
  * Sends a message to one node and tracks the streaming reply.
@@ -35,6 +41,7 @@ export function useChatStream(nodeId: string) {
         (event) => {
           if (event.type === 'thinking') setState((s) => ({ ...s, thinking: true }))
           else if (event.type === 'delta') setState((s) => ({ ...s, thinking: false, replyText: s.replyText + event.text }))
+          else if (event.type === 'tool') setState((s) => ({ ...s, thinking: false, toolCalls: upsert(s.toolCalls, event.call) }))
           else if (event.type === 'error') setState((s) => ({ ...s, error: event.error }))
         },
         abort.signal,

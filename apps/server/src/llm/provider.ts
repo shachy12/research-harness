@@ -1,7 +1,11 @@
-import type { BranchResult } from '@harness/shared';
+import type { BranchResult, ToolCall } from '@harness/shared';
 import type { ChatRequest } from '../dag/prompt.ts';
 
-export type ReplyEvent = { type: 'thinking' } | { type: 'text'; text: string };
+export type ReplyEvent =
+  | { type: 'thinking' }
+  | { type: 'text'; text: string }
+  /** A tool call started (status 'running') or finished; later events replace earlier ones with the same id. */
+  | { type: 'tool'; call: ToolCall };
 
 /**
  * What the app needs from a model provider. Each provider (Claude, and later others)

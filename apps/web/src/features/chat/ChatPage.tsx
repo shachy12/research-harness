@@ -103,7 +103,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   // Keep the newest content in view.
   useLayoutEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' })
-  }, [messages.length, stream.replyText, stream.userText])
+  }, [messages.length, stream.replyText, stream.userText, stream.toolCalls.length])
 
   const submit = () => {
     const text = draft.trim()
@@ -136,12 +136,20 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           )}
 
           {messages.map((m) => (
-            <MessageView key={m.id} role={m.role} text={m.content} />
+            <MessageView key={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} />
           ))}
           {showStreamed && stream.userText && <MessageView role="user" text={stream.userText} />}
-          {showStreamed && stream.replyText && <MessageView role="assistant" text={stream.replyText} streaming />}
+          {showStreamed && (stream.replyText || stream.toolCalls.length > 0) && (
+            <MessageView role="assistant" text={stream.replyText} toolCalls={stream.toolCalls} streaming />
+          )}
           {showStreamed && !stream.replyText && (
-            <p className="animate-pulse text-sm text-muted-foreground">{stream.thinking ? 'Thinking…' : 'Waiting for the model…'}</p>
+            <p className="animate-pulse text-sm text-muted-foreground">
+              {stream.toolCalls.some((c) => c.status === 'running')
+                ? 'Researching…'
+                : stream.thinking || stream.toolCalls.length > 0
+                  ? 'Thinking…'
+                  : 'Waiting for the model…'}
+            </p>
           )}
           {stream.error && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{stream.error}</p>}
 

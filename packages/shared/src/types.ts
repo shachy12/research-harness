@@ -41,7 +41,21 @@ export interface Message {
   nodeId: string;
   role: Role;
   content: string;
+  /** Searches and fetches the model ran while writing this reply (empty for user messages). */
+  toolCalls: ToolCall[];
   createdAt: string;
+}
+
+/** A web search or page fetch run by the model (server-side tools). */
+export interface ToolCall {
+  id: string;
+  /** 'web_search' or 'web_fetch'. */
+  name: string;
+  /** The search query or the fetched URL. */
+  input: string;
+  status: 'running' | 'done' | 'error';
+  results: { title: string; url: string }[];
+  error?: string;
 }
 
 /** One entry of what a node inherits: an ancestor's message, or a merged branch's result. */
@@ -78,6 +92,8 @@ export type ChatStreamEvent =
   | { type: 'user'; message: Message }
   | { type: 'thinking' }
   | { type: 'delta'; text: string }
+  /** A tool call started or got its results; replaces any earlier event with the same call id. */
+  | { type: 'tool'; call: ToolCall }
   | { type: 'done'; message: Message }
   | { type: 'error'; error: string };
 
