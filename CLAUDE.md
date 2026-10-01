@@ -63,6 +63,16 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - Edges: solid = inherits full context; dashed with a "result" label = merge edge that passes only the result.
 - Considered and dropped: a split view (graph + side chat), and a canvas where every node is an inline chat.
 
+### Web implementation notes
+- Server data goes through TanStack Query hooks in `apps/web/src/api/queries.ts`; after any change `useRefreshAll()` refetches the graph and node details.
+- Chat streaming: `streamChat()` in `api/client.ts` reads the server-sent events; `features/chat/useChatStream.ts` holds the live state. Leaving the page does not stop a reply (the server finishes and saves it); the Stop button aborts.
+- Graph: React Flow with fixed-size cards (`CARD_WIDTH`/`CARD_HEIGHT`) laid out by dagre, not draggable. Pan/zoom per project is remembered in memory; the view re-fits when the node count changes. `colorMode="system"`.
+- Merge selection lives in a small external store (`features/merge/selection.ts`) so it survives opening a chat. Its actions read the store's current value, never a render-time copy.
+- The merge dialog navigates to the new node with `state.autoSend` (the first message); the chat sends it once.
+- React runs effects twice in development: guard effects that trigger paid model calls with a ref (see `ResultDialog`).
+- Dark mode: `lib/theme.ts` toggles the `dark` class from the OS setting. Status colors are Tailwind tokens: `open`, `done`, `merge`, `frozen` (+ `-soft`), `canvas`, `edge`.
+- The browser-pane preview (`.claude/launch.json`) uses `data/preview.db`, so testing never touches the real `data/harness.db`.
+
 ## Commands (run from the repo root)
 - `npm run dev`: starts the server (http://localhost:8787) and the web UI (http://localhost:5173, which proxies `/api` to the server)
 - `npm run typecheck`, `npm test`, `npm run lint`
@@ -80,7 +90,7 @@ npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Re
 - Routes: `/projects/:id` (graph), `/projects/:id/nodes/:nodeId` (full-window chat), `/settings` (later).
 
 ## Roadmap
-1. MVP: one project, graph view, full-window chat with real streaming (Claude through the provider registry), fork / finish / merge, SQLite persistence. API key from `.env`.
+1. MVP (done 2026-10-01): one project, graph view, full-window chat with real streaming (Claude through the provider interface), fork / finish / merge, SQLite persistence. API key from `.env`.
 2. MCP tools in all branches (explicitly deferred out of the MVP), more providers.
 3. Wrap in Electron.
 4. Later ideas: autonomous (subagent) branches the user can step into, merge templates (synthesize / compare / pick best), a per-node context-budget display.

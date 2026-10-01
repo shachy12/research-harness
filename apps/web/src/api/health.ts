@@ -1,21 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from './client'
 
-/** null while checking, then whether GET /api/health answered. */
-export function useServerHealth(): boolean | null {
-  const [ok, setOk] = useState<boolean | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    fetch('/api/health')
-      .then((res) => res.ok)
-      .catch(() => false)
-      .then((result) => {
-        if (!cancelled) setOk(result)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  return ok
+/** Whether the server answers, and which model it uses. */
+export function useServerHealth() {
+  return useQuery({
+    queryKey: ['health'],
+    queryFn: ({ signal }) => api.get<{ ok: boolean; model: string }>('/health', signal),
+    refetchInterval: 30_000,
+  })
 }

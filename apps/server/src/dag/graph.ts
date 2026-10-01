@@ -1,4 +1,4 @@
-import type { DagNode, Message } from '@harness/shared';
+import { type DagNode, type Message, lowestCommonAncestor as lcaOf } from '@harness/shared';
 
 /** Read access to one project's graph. The context logic only needs these two lookups. */
 export interface GraphReader {
@@ -40,30 +40,6 @@ export class GraphSnapshot implements GraphReader {
   }
 }
 
-/** Length of the longest path from a root to this node. */
-export function depth(graph: GraphReader, id: string): number {
-  const { parentIds } = graph.node(id);
-  return parentIds.length ? Math.max(...parentIds.map((p) => depth(graph, p))) + 1 : 0;
-}
-
-export function ancestors(graph: GraphReader, id: string, acc = new Set<string>()): Set<string> {
-  for (const p of graph.node(id).parentIds) {
-    if (!acc.has(p)) {
-      acc.add(p);
-      ancestors(graph, p, acc);
-    }
-  }
-  return acc;
-}
-
-/**
- * Lowest common ancestor of several nodes: the deepest node that is a strict ancestor of all of them.
- * This is the base context a merge node starts from. Null if they share no ancestor.
- */
 export function lowestCommonAncestor(graph: GraphReader, ids: string[]): string | null {
-  if (ids.length === 0) return null;
-  const sets = ids.map((id) => ancestors(graph, id));
-  const common = [...sets[0]].filter((a) => sets.every((s) => s.has(a)));
-  if (common.length === 0) return null;
-  return common.reduce((best, a) => (depth(graph, a) > depth(graph, best) ? a : best));
+  return lcaOf((id) => graph.node(id), ids);
 }

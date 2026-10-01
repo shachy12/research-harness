@@ -2,8 +2,35 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@xyflow/react/dist/style.css";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
+
+/* Node status colors (from the GUI mockup): open, finished, merge, frozen; plus the graph canvas. */
+@theme inline {
+    --color-open: var(--status-open);
+    --color-open-soft: var(--status-open-soft);
+    --color-done: var(--status-done);
+    --color-done-soft: var(--status-done-soft);
+    --color-merge: var(--status-merge);
+    --color-merge-soft: var(--status-merge-soft);
+    --color-frozen: var(--status-frozen);
+    --color-canvas: var(--canvas);
+    --color-edge: var(--edge);
+}
+
+/* Shake: feedback when right-clicking a node that can't be merged. */
+@theme {
+    --animate-shake: shake 0.3s ease-in-out;
+    @keyframes shake {
+        25% { transform: translateX(-4px); }
+        75% { transform: translateX(4px); }
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .animate-shake { animation: none; }
+}
 
 @theme inline {
     --font-heading: var(--font-sans);
@@ -81,6 +108,19 @@
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
+
+    --primary: oklch(0.52 0.19 265);
+    --primary-foreground: oklch(0.985 0 0);
+    --ring: oklch(0.52 0.19 265 / 60%);
+    --status-open: oklch(0.52 0.19 265);
+    --status-open-soft: oklch(0.94 0.03 265);
+    --status-done: oklch(0.52 0.12 160);
+    --status-done-soft: oklch(0.95 0.04 160);
+    --status-merge: oklch(0.58 0.14 55);
+    --status-merge-soft: oklch(0.95 0.04 70);
+    --status-frozen: oklch(0.55 0.02 265);
+    --canvas: oklch(0.98 0.003 265);
+    --edge: oklch(0.72 0.02 265);
 }
 
 .dark {
@@ -115,6 +155,19 @@
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+
+    --primary: oklch(0.72 0.13 265);
+    --primary-foreground: oklch(0.18 0.03 265);
+    --ring: oklch(0.72 0.13 265 / 60%);
+    --status-open: oklch(0.74 0.12 265);
+    --status-open-soft: oklch(0.28 0.05 265);
+    --status-done: oklch(0.76 0.13 160);
+    --status-done-soft: oklch(0.28 0.04 160);
+    --status-merge: oklch(0.76 0.12 65);
+    --status-merge-soft: oklch(0.29 0.04 65);
+    --status-frozen: oklch(0.65 0.02 265);
+    --canvas: oklch(0.17 0.005 265);
+    --edge: oklch(0.45 0.02 265);
 }
 
 @layer base {
