@@ -1,0 +1,693 @@
+<title>Research DAG Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: app shell = top bar + one main view: the graph fills the window; opening a node swaps in its chat full-window */
+:root {
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --surface-2: #eceff5;
+  --canvas: #f7f8fb;
+  --line: #d8dce6;
+  --fg: #1a1f2e;
+  --muted: #5b6377;
+  --accent: #2f5bd3;
+  --on-accent: #ffffff;
+  --accent-soft: #e2e8fb;
+  --done: #1b7a50;
+  --done-soft: #ddf1e6;
+  --merge: #a5560f;
+  --merge-soft: #f8ead8;
+  --frozen: #6f778b;
+  --edge: #9aa3b8;
+  --grid: #d9dde7;
+  --shadow: rgba(26, 31, 46, 0.08);
+  --scrim: rgba(16, 19, 28, 0.42);
+  --font-ui: "Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10131a; --surface: #181c26; --surface-2: #212634; --canvas: #13161e; --line: #2d3344;
+    --fg: #e6e8ef; --muted: #9ba3b6; --accent: #84a0f6; --on-accent: #0f1530; --accent-soft: #222b48;
+    --done: #55c792; --done-soft: #16302a; --merge: #e3a05a; --merge-soft: #352718; --frozen: #8d94a6;
+    --edge: #4c5468; --grid: #232836; --shadow: rgba(0, 0, 0, 0.35); --scrim: rgba(0, 0, 0, 0.6);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10131a; --surface: #181c26; --surface-2: #212634; --canvas: #13161e; --line: #2d3344;
+  --fg: #e6e8ef; --muted: #9ba3b6; --accent: #84a0f6; --on-accent: #0f1530; --accent-soft: #222b48;
+  --done: #55c792; --done-soft: #16302a; --merge: #e3a05a; --merge-soft: #352718; --frozen: #8d94a6;
+  --edge: #4c5468; --grid: #232836; --shadow: rgba(0, 0, 0, 0.35); --scrim: rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.45; }
+* { box-sizing: border-box; }
+button, input, textarea, select { font: inherit; color: inherit; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
+
+.app { height: 100%; display: flex; flex-direction: column; }
+
+/* Top bar */
+.topbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.logo { width: 28px; height: 28px; border-radius: 7px; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font-size: 16px; font-weight: 700; flex: none; }
+.brand-name { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tag { font-family: var(--font-mono); font-size: 11px; color: var(--muted); border: 1px solid var(--line); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.topright { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.pill { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; background: var(--surface); white-space: nowrap; }
+
+/* Main area */
+.main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.main[data-view="graph"] .chat-pane { display: none; }
+.main[data-view="chat"] .graph-pane { display: none; }
+.graph-pane { position: relative; min-height: 0; min-width: 0; }
+.viewport { position: absolute; inset: 0; overflow: hidden; cursor: grab; background-color: var(--canvas); background-image: radial-gradient(var(--grid) 1.2px, transparent 1.4px); background-size: 20px 20px; touch-action: none; user-select: none; -webkit-user-select: none; }
+.viewport.panning { cursor: grabbing; }
+#world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; }
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.8; }
+.edge.merge { stroke: var(--merge); stroke-dasharray: 6 5; }
+.edge-dot { fill: var(--edge); }
+.edge-dot.merge { fill: var(--merge); }
+.edge-label { fill: var(--merge); font-family: var(--font-mono); font-size: 11px; paint-order: stroke; stroke: var(--canvas); stroke-width: 4px; }
+
+.legend { position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; pointer-events: none; user-select: none; }
+.graph-toolbar { user-select: none; }
+.legend svg { vertical-align: middle; margin-right: 6px; }
+.graph-toolbar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; pointer-events: none; }
+.graph-toolbar > * { pointer-events: auto; }
+.zoom-group { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.zoom-group button { border: 0; background: transparent; padding: 6px 11px; cursor: pointer; font-weight: 500; }
+.zoom-group button + button { border-left: 1px solid var(--line); }
+.zoom-group button:hover { background: var(--surface-2); }
+.hint { font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+
+/* Buttons */
+.btn { font-size: 13px; font-weight: 500; border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 7px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+.btn:hover:not(:disabled) { background: var(--surface-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+.btn.merge-btn { background: var(--merge); border-color: var(--merge); color: var(--surface); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.small { font-size: 12px; padding: 4px 9px; }
+.btn:focus-visible, .icon-btn:focus-visible, .linkbtn:focus-visible, .zoom-group button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.icon-btn { border: 1px solid transparent; background: transparent; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; display: grid; place-items: center; color: var(--muted); font-size: 15px; flex: none; }
+.icon-btn:hover { background: var(--surface); border-color: var(--line); color: var(--fg); }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+
+/* Status chips */
+.chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
+.st-open { background: var(--accent-soft); color: var(--accent); }
+.st-frozen { background: var(--surface-2); color: var(--frozen); }
+.st-finished { background: var(--done-soft); color: var(--done); }
+.st-merge { background: var(--merge-soft); color: var(--merge); }
+
+/* Graph cards */
+.gnode { position: absolute; }
+.card { width: 236px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 1px 3px var(--shadow); }
+.card:hover { border-color: var(--edge); }
+.card-top { display: flex; align-items: center; gap: 6px; }
+.card-top .meta { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.card-title { font-weight: 600; font-size: 14px; text-wrap: balance; }
+.card-preview { font-size: 12px; color: var(--muted); }
+.card-result { font-size: 12px; color: var(--fg); background: var(--done-soft); border-radius: 6px; padding: 6px 8px; }
+.card-result b { color: var(--done); }
+.msel-badge { display: none; align-self: flex-start; font-size: 11px; font-weight: 600; color: var(--merge); background: var(--merge-soft); border-radius: 999px; padding: 2px 8px; }
+.gnode.msel-on .msel-badge { display: block; }
+.gnode.msel-on .card, .gnode.sel.msel-on .card { border-color: var(--merge); box-shadow: 0 0 0 3px var(--merge-soft); }
+.gnode.shake .card { animation: shake 0.3s; }
+@keyframes shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+@media (prefers-reduced-motion: reduce) { .gnode.shake .card { animation: none; } }
+.gnode.sel .card { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* Full-window chat: content column centered, max ~880px wide */
+.chat-pane { min-height: 0; min-width: 0; background: var(--surface); display: flex; flex-direction: column; }
+.chat { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--surface); padding-inline: max(0px, calc((100% - 880px) / 2)); }
+.chat-head { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.chat-topline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.crumbs { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
+.chat-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-title h2 { margin: 0; font-size: 18px; font-weight: 600; text-wrap: balance; }
+.ctx { margin: 10px 14px 0; border: 1px dashed var(--line); border-radius: 8px; background: var(--bg); }
+.ctx summary { cursor: pointer; padding: 7px 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.ctx summary:focus-visible { outline: 2px solid var(--accent); border-radius: 8px; }
+.ctx-meta { font-family: var(--font-mono); font-weight: 400; margin-left: 4px; }
+.ctx-body { max-height: 220px; overflow: auto; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.ctx-item { font-size: 12px; color: var(--muted); }
+.ctx-item p { margin: 2px 0 0; color: var(--fg); opacity: 0.8; }
+.ctx-who { font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.ctx-src { font-family: var(--font-mono); font-size: 10px; margin-left: 6px; }
+.ctx-res { background: var(--done-soft); border-radius: 6px; padding: 6px 8px; }
+.ctx-res b { color: var(--fg); }
+
+.chat-log { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+.empty { color: var(--muted); font-size: 13px; text-align: center; padding: 24px 12px; border: 1px dashed var(--line); border-radius: 8px; }
+.msg { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.who { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+.bubble { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.user .bubble { background: var(--accent-soft); border-radius: 8px; padding: 8px 10px; }
+.msg.ai.streaming .bubble::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.tool { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-size: 12px; }
+.tool summary { cursor: pointer; padding: 6px 10px; display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.tool summary .tool-name { font-family: var(--font-mono); color: var(--accent); flex: none; }
+.tool summary .tool-in { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tool pre { margin: 0; padding: 0 10px 8px; white-space: pre-wrap; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+
+.result-block { border: 1px solid var(--done); background: var(--done-soft); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.result-h { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.result-h .btn { margin-left: auto; }
+.result-block dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; font-size: 13px; }
+.result-block dt { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--done); padding-top: 2px; }
+.result-block dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.composer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); align-items: flex-end; }
+.composer textarea { flex: 1; min-width: 0; resize: none; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.composer textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.notice { margin: 10px 14px 0; font-size: 13px; color: var(--muted); background: var(--surface-2); border-radius: 8px; padding: 9px 12px; }
+.chat-actions { display: flex; gap: 8px; padding: 10px 14px 12px; flex-wrap: wrap; }
+
+/* Modal */
+.modal-back { position: fixed; inset: 0; z-index: 50; background: var(--scrim); display: grid; place-items: center; padding: 16px; }
+.modal { background: var(--surface); border-radius: 12px; width: min(580px, 100%); max-height: 90vh; overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 20px 60px var(--shadow); }
+.modal h2 { margin: 0; font-size: 18px; text-wrap: balance; }
+.lede { margin: 0; color: var(--muted); }
+.modal label { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 4px; }
+.modal input[type="text"], .modal textarea, .modal select { width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+.modal textarea { resize: vertical; }
+.modal input:focus, .modal textarea:focus, .modal select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.fork-row { display: flex; flex-direction: column; gap: 4px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.mp { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.mp-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 10px; padding: 9px 12px; align-items: start; font-size: 13px; }
+.mp-row + .mp-row { border-top: 1px solid var(--line); }
+.mp-row.res { background: var(--done-soft); }
+.mp-k { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding-top: 2px; }
+.mp-row small { color: var(--muted); }
+.tokline { font-size: 12px; color: var(--muted); margin: 0; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 760px) {
+  .topright, .legend { display: none; }
+  .hint { display: none; }
+  .mp-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .mp-k { grid-column: 1 / -1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg.ai.streaming .bubble::after { animation: none; }
+}
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">⑂</span>
+      <span class="brand-name">LLM long-term memory</span>
+      <span class="tag">mockup · sample data</span>
+    </div>
+    <div class="topright">
+      <span class="pill">Model: Claude Sonnet 5.5</span>
+      <span class="pill">Tools: web_search, fetch</span>
+    </div>
+  </header>
+  <main class="main" id="main" data-view="graph">
+    <section class="graph-pane" aria-label="Research graph">
+      <div class="viewport" id="viewport">
+        <div id="world"><svg id="edges" aria-hidden="true"></svg></div>
+      </div>
+      <div class="legend" aria-hidden="true">
+        <span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--edge)" stroke-width="2"/></svg>inherits full context</span>
+        <span><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--merge)" stroke-width="2" stroke-dasharray="5 4"/></svg>passes only its result</span>
+      </div>
+      <div class="graph-toolbar" id="toolbar"></div>
+    </section>
+    <section class="chat-pane" id="chatPane" aria-label="Selected node chat"></section>
+  </main>
+</div>
+<div class="modal-back" id="modalBack" hidden><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const trunc = (s, n) => (s && s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s || '');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const S = {
+    nodes: {}, order: [], selected: 'B', open: null, mergeSel: new Set(),
+    view: { x: 0, y: 0, k: 1 }, drafts: {}, openCtx: new Set(), openTools: new Set(),
+    streaming: null, modal: null, pos: {}, sizes: {}, layout: null, replyN: 0
+  };
+  const nodes = S.nodes;
+  let nseq = 0, mseq = 0;
+  const M = (role, text, tool) => ({ id: 'm' + (++mseq), role, text, tool });
+  function addNode(n) {
+    n.id = n.id || 'n' + (++nseq);
+    n.parents = n.parents || []; n.messages = n.messages || []; n.status = n.status || 'open';
+    nodes[n.id] = n; S.order.push(n.id); return n;
+  }
+
+  /* ---------- Sample data ---------- */
+  addNode({ id: 'root', title: 'LLM long-term memory', status: 'frozen', messages: [
+    M('user', "I'm researching how LLM agents keep useful memory across long sessions. Help me scope it."),
+    M('assistant', 'Most of the problem falls into three areas: retrieval over past turns (RAG-style memory), relying on very long context windows, and how agent frameworks structure memory (running summaries, scratchpads, files). Each is a self-contained question, so they split well.'),
+    M('user', "Good. Let's look at each one separately and bring the conclusions back here.")
+  ] });
+  addNode({ id: 'A', title: 'Survey retrieval methods', parents: ['root'], status: 'finished', messages: [
+    M('user', 'Survey retrieval approaches for conversational memory. What works best for recalling older turns?'),
+    M('tool', '', { name: 'web_search', input: 'hybrid retrieval conversational memory benchmark', output: '5 results (sample data): hybrid dense + keyword comparisons, re-ranking studies, a long-term memory benchmark for chat assistants.' }),
+    M('assistant', 'Hybrid retrieval (dense embeddings plus keyword search) recalls older turns more reliably than either alone. Re-ranking the top few dozen candidates adds the most quality per unit of cost. The weak spot is deciding what to store in the first place.')
+  ], result: {
+    findings: 'Hybrid retrieval (dense + keyword) recalls older turns better than either method alone. Re-ranking the top 20–50 candidates gives the biggest quality gain for the cost.',
+    evidence: 'web_search: hybrid retrieval comparisons, re-ranking studies, a long-term memory benchmark for chat assistants (sample data).',
+    questions: 'What should be written to memory, and what discarded?',
+    confidence: 'Medium'
+  } });
+  addNode({ id: 'B', title: 'Benchmark long-context models', parents: ['root'], messages: [
+    M('user', 'Which benchmarks test whether models actually use their long context, not just retrieve one fact?'),
+    M('tool', '', { name: 'web_search', input: 'long context benchmark beyond needle in a haystack', output: '4 results (sample data): needle-in-a-haystack variants, multi-hop tracing tasks, aggregation tasks, long-document QA suites.' }),
+    M('assistant', 'Single-fact "needle" tests are close to saturated. Harder suites add multi-hop tracing and aggregation over the whole input, and there most models degrade well before their advertised context length. Want me to collect reported numbers for a few models?')
+  ] });
+  addNode({ id: 'C', title: 'Memory in agent frameworks', parents: ['root'] });
+
+  /* ---------- Graph logic ---------- */
+  const children = id => S.order.filter(x => nodes[x].parents.includes(id));
+  const depth = id => { const n = nodes[id]; return n.parents.length ? Math.max(...n.parents.map(depth)) + 1 : 0; };
+  function ancestors(id, acc = new Set()) { nodes[id].parents.forEach(p => { acc.add(p); ancestors(p, acc); }); return acc; }
+  function lca(ids) {
+    const sets = ids.map(i => ancestors(i));
+    const common = [...sets[0]].filter(a => sets.every(s => s.has(a)));
+    return common.sort((a, b) => depth(b) - depth(a))[0] || null;
+  }
+  // What a node "knows" before its own messages: the parent's full context, or for a merge, the base context + results.
+  function inherited(id) {
+    const n = nodes[id];
+    if (!n.parents.length) return [];
+    if (n.parents.length === 1) return full(n.parents[0]);
+    const base = lca(n.parents);
+    return [...(base ? full(base) : []), ...n.parents.map(p => ({ kind: 'result', node: nodes[p] }))];
+  }
+  const full = id => [...inherited(id), ...nodes[id].messages.map(m => ({ kind: 'msg', msg: m, node: nodes[id] }))];
+  const resultText = r => (r ? [r.findings, r.evidence, r.questions, r.confidence].join(' ') : '');
+  const itemText = it => (it.kind === 'msg' ? it.msg.text + (it.msg.tool ? it.msg.tool.input + it.msg.tool.output : '') : resultText(it.node.result));
+  const tok = items => Math.ceil(items.reduce((s, i) => s + itemText(i).length, 0) / 4);
+  const fmtTok = t => (t >= 1000 ? (t / 1000).toFixed(1) + 'k' : String(t));
+
+  /* ---------- HTML pieces ---------- */
+  const ST = { open: ['○', 'Open'], frozen: ['◆', 'Forked'], finished: ['✓', 'Finished'] };
+  function chips(n) {
+    const [i, l] = ST[n.status];
+    return `<span class="chip st-${n.status}">${i} ${l}</span>` + (n.parents.length > 1 ? '<span class="chip st-merge">⑃ Merge</span>' : '');
+  }
+  const visibleCount = n => n.messages.filter(m => m.role !== 'tool').length;
+  const link = id => `<button class="linkbtn" data-goto="${id}">${esc(nodes[id].title)}</button>`;
+
+  function crumbsHTML(n) {
+    const path = []; let c = n;
+    while (c) { path.unshift(c); c = c.parents.length === 1 ? nodes[c.parents[0]] : null; }
+    let pre = path[0].parents.length > 1 ? path[0].parents.map(link).join(' + ') + ' <span>→</span> ' : '';
+    return pre + path.map((p, i) => (i === path.length - 1 ? `<span>${esc(p.title)}</span>` : link(p.id) + ' <span>›</span>')).join(' ');
+  }
+
+  function ctxItemHTML(it) {
+    if (it.kind === 'result') {
+      return `<div class="ctx-item ctx-res"><span class="ctx-who">Result</span><span class="ctx-src">from</span> <b>${esc(it.node.title)}</b><p>${esc(trunc(it.node.result.findings, 220))}</p></div>`;
+    }
+    const m = it.msg;
+    if (m.role === 'tool') return `<div class="ctx-item"><span class="ctx-who">Tool</span><span class="ctx-src">${esc(it.node.title)}</span><p class="mono">${esc(m.tool.name)}: ${esc(m.tool.input)}</p></div>`;
+    return `<div class="ctx-item"><span class="ctx-who">${m.role === 'user' ? 'You' : 'Assistant'}</span><span class="ctx-src">${esc(it.node.title)}</span><p>${esc(trunc(m.text, 220))}</p></div>`;
+  }
+
+  function msgHTML(m) {
+    if (m.role === 'tool') {
+      return `<details class="tool" data-tool="${m.id}" ${S.openTools.has(m.id) ? 'open' : ''}><summary><span class="tool-name">tool · ${esc(m.tool.name)}</span><span class="tool-in">${esc(m.tool.input)}</span></summary><pre>${esc(m.tool.output)}</pre></details>`;
+    }
+    const user = m.role === 'user';
+    return `<div class="msg ${user ? 'user' : 'ai'}${S.streaming === m.id ? ' streaming' : ''}" data-msg="${m.id}"><div class="who">${user ? 'You' : 'Assistant'}</div><div class="bubble msg-text">${esc(m.text)}</div></div>`;
+  }
+
+  function resultHTML(n) {
+    const r = n.result;
+    return `<section class="result-block" aria-label="Branch result">
+      <div class="result-h"><span class="chip st-finished">✓ Result</span><span>This is what a merge receives</span><button class="btn small" data-act="edit-result">Edit</button></div>
+      <dl><dt>Findings</dt><dd>${esc(r.findings)}</dd><dt>Evidence</dt><dd>${esc(r.evidence)}</dd><dt>Open</dt><dd>${esc(r.questions || '—')}</dd><dt>Confidence</dt><dd>${esc(r.confidence)}</dd></dl>
+    </section>`;
+  }
+
+  function chatHTML(n, { head = false } = {}) {
+    const ctx = inherited(n.id);
+    const streaming = S.streaming && n.messages.some(m => m.id === S.streaming);
+    let h = `<div class="chat" data-node="${n.id}">`;
+    if (head) h += `<div class="chat-head"><div class="chat-topline"><button class="btn small" data-act="back">← Graph</button><div class="crumbs">${crumbsHTML(n)}</div></div><div class="chat-title"><h2>${esc(n.title)}</h2>${chips(n)}</div></div>`;
+    if (ctx.length) {
+      const msgs = ctx.filter(i => i.kind === 'msg').length, res = ctx.filter(i => i.kind === 'result').length;
+      h += `<details class="ctx" data-ctx="${n.id}" ${S.openCtx.has(n.id) ? 'open' : ''}><summary>Inherited context<span class="ctx-meta">${msgs} msgs${res ? ` · ${res} results` : ''} · ~${fmtTok(tok(ctx))} tokens</span></summary><div class="ctx-body">${ctx.map(ctxItemHTML).join('')}</div></details>`;
+    }
+    h += '<div class="chat-log" data-log>';
+    if (!n.messages.length) h += '<div class="empty">This branch already has the full context above.<br>Ask its sub-question to start.</div>';
+    h += n.messages.map(msgHTML).join('');
+    if (n.result) h += resultHTML(n);
+    h += '</div>';
+    if (n.status === 'open') {
+      h += `<div class="composer"><textarea data-input rows="2" aria-label="Message" placeholder="Message this node… (try asking it to search)" ${streaming ? 'disabled' : ''}>${esc(S.drafts[n.id] || '')}</textarea><button class="btn primary" data-act="send" ${streaming ? 'disabled' : ''}>Send</button></div>`;
+    } else if (n.status === 'frozen') {
+      h += `<div class="notice">Forked, so this node is frozen. Continue in a branch: ${children(n.id).map(link).join(', ')}</div>`;
+    } else {
+      h += '<div class="notice">Finished. Right-click it in the graph to include its result in a merge.</div>';
+    }
+    const canFinish = n.status === 'open' && n.parents.length;
+    const hasReply = n.messages.some(m => m.role === 'assistant' && m.text);
+    h += `<div class="chat-actions"><button class="btn" data-act="fork">⑂ Fork</button>${canFinish ? `<button class="btn" data-act="finish" ${hasReply && !streaming ? '' : 'disabled'}>✓ Finish branch</button>` : ''}</div>`;
+    return h + '</div>';
+  }
+
+  function cardHTML(n) {
+    const last = [...n.messages].reverse().find(m => m.role !== 'tool' && m.text);
+    const body = n.result
+      ? `<div class="card-result"><b>Result:</b> ${esc(trunc(n.result.findings, 120))}</div>`
+      : `<div class="card-preview">${last ? esc(trunc(last.text, 90)) : 'No messages yet'}</div>`;
+    return `<div class="card">
+      <div class="card-top">${chips(n)}<span class="meta">${visibleCount(n)} msg</span></div>
+      <div class="card-title">${esc(n.title)}</div>${body}
+      <div class="msel-badge">⑃ Selected for merge</div>
+    </div>`;
+  }
+
+  /* ---------- Rendering ---------- */
+  function layout() {
+    const levels = {};
+    S.order.forEach(id => { (levels[depth(id)] ||= []).push(id); });
+    const pos = {}, sz = S.sizes, HG = 30, VG = 76;
+    let y = 0;
+    Object.keys(levels).map(Number).sort((a, b) => a - b).forEach(d => {
+      const groups = [], gm = {};
+      levels[d].forEach(id => {
+        const key = nodes[id].parents.join(',') || '_';
+        if (!gm[key]) { gm[key] = { ids: [] }; groups.push(gm[key]); }
+        gm[key].ids.push(id);
+      });
+      groups.forEach(g => {
+        const ps = nodes[g.ids[0]].parents;
+        g.ctr = ps.length ? ps.reduce((s, p) => s + pos[p].x + sz[p].w / 2, 0) / ps.length : 0;
+        g.w = g.ids.reduce((s, i) => s + sz[i].w, 0) + HG * (g.ids.length - 1);
+        g.x = g.ctr - g.w / 2;
+      });
+      groups.sort((a, b) => a.ctr - b.ctr);
+      for (let i = 1; i < groups.length; i++) {
+        const min = groups[i - 1].x + groups[i - 1].w + HG * 2;
+        if (groups[i].x < min) groups[i].x = min;
+      }
+      groups.forEach(g => { let x = g.x; g.ids.forEach(id => { pos[id] = { x, y }; x += sz[id].w + HG; }); });
+      y += Math.max(...levels[d].map(id => sz[id].h)) + VG;
+    });
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    S.order.forEach(id => {
+      minx = Math.min(minx, pos[id].x); miny = Math.min(miny, pos[id].y);
+      maxx = Math.max(maxx, pos[id].x + sz[id].w); maxy = Math.max(maxy, pos[id].y + sz[id].h);
+    });
+    S.pos = pos; S.layout = { minx, miny, w: maxx - minx, h: maxy - miny };
+  }
+
+  function renderGraph() {
+    const world = $('#world');
+    $$('.gnode', world).forEach(e => e.remove());
+    S.order.forEach(id => {
+      const n = nodes[id], el = document.createElement('div');
+      el.className = 'gnode' + (id === S.selected ? ' sel' : '') + (S.mergeSel.has(id) ? ' msel-on' : '');
+      el.dataset.id = id;
+      el.innerHTML = cardHTML(n);
+      world.appendChild(el);
+      S.sizes[id] = { w: el.offsetWidth, h: el.offsetHeight };
+    });
+    layout();
+    $$('.gnode', world).forEach(el => { const p = S.pos[el.dataset.id]; el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; });
+    let svg = '';
+    S.order.forEach(id => {
+      const n = nodes[id], b = S.pos[id], sb = S.sizes[id], merge = n.parents.length > 1;
+      n.parents.forEach(p => {
+        const a = S.pos[p], sa = S.sizes[p];
+        const x1 = a.x + sa.w / 2, y1 = a.y + sa.h, x2 = b.x + sb.w / 2, y2 = b.y, dy = (y2 - y1) / 2;
+        svg += `<path class="edge${merge ? ' merge' : ''}" d="M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}"/>`;
+        svg += `<circle class="edge-dot${merge ? ' merge' : ''}" cx="${x2}" cy="${y2}" r="3"/>`;
+        if (merge) svg += `<text class="edge-label" x="${(x1 + x2) / 2 + 6}" y="${(y1 + y2) / 2}">result</text>`;
+      });
+    });
+    $('#edges').innerHTML = svg;
+  }
+
+  function renderToolbar() {
+    const n = [...S.mergeSel].filter(i => nodes[i].status === 'finished').length;
+    const hint = hintMsg || 'Click a node to open its chat. Right-click finished nodes to select them for merge. Scroll to zoom, drag to pan.';
+    $('#toolbar').innerHTML = `
+      <div class="zoom-group"><button data-act="zoom-out" aria-label="Zoom out">−</button><button data-act="fit">Fit</button><button data-act="zoom-in" aria-label="Zoom in">+</button></div>
+      <button class="btn merge-btn" data-act="merge" ${n >= 2 ? '' : 'disabled'}>⑃ Merge ${n ? n + ' ' : ''}selected</button>
+      <span class="hint">${!hintMsg && n === 1 ? 'Select at least one more finished branch to merge.' : hint}</span>`;
+  }
+
+  function scrollLogs() { $$('[data-log]').forEach(l => { l.scrollTop = l.scrollHeight; }); }
+
+  // One view at a time: the graph, or the open node's chat covering the whole window.
+  // The graph is only rendered while visible, since card sizes can't be measured when hidden.
+  function renderAll() {
+    const a = document.activeElement;
+    const keepFocus = a && a.matches && a.matches('textarea[data-input]');
+    $('#main').dataset.view = S.open ? 'chat' : 'graph';
+    if (S.open) {
+      $('#chatPane').innerHTML = chatHTML(nodes[S.open], { head: true });
+      scrollLogs();
+      const ta = $('#chatPane textarea[data-input]');
+      if (ta && !ta.disabled && (keepFocus || !S.modal)) { ta.focus(); ta.selectionStart = ta.selectionEnd = ta.value.length; }
+    } else {
+      $('#chatPane').innerHTML = '';
+      renderGraph(); renderToolbar(); applyView();
+    }
+  }
+
+  /* ---------- View (pan / zoom) ---------- */
+  const vp = $('#viewport');
+  function applyView() {
+    const { x, y, k } = S.view;
+    $('#world').style.transform = `translate(${x}px, ${y}px) scale(${k})`;
+    vp.style.backgroundSize = `${20 * k}px ${20 * k}px`;
+    vp.style.backgroundPosition = `${x}px ${y}px`;
+  }
+  function fitView() {
+    const L = S.layout; if (!L) return;
+    const vw = vp.clientWidth, vh = vp.clientHeight, top = 70, bottom = 64, side = 32;
+    const k = Math.max(0.2, Math.min(1, (vw - side * 2) / L.w, (vh - top - bottom) / L.h));
+    S.view = { k, x: (vw - L.w * k) / 2 - L.minx * k, y: top - L.miny * k + Math.max(0, (vh - top - bottom - L.h * k) / 2) };
+    applyView();
+  }
+  function zoomAt(mx, my, f) {
+    const k = S.view.k, nk = Math.min(1.6, Math.max(0.2, k * f));
+    S.view.x = mx - (mx - S.view.x) * nk / k; S.view.y = my - (my - S.view.y) * nk / k; S.view.k = nk;
+    applyView();
+  }
+  let pan = null;
+  vp.addEventListener('pointerdown', e => {
+    if (e.target.closest('.gnode') || e.button !== 0) return;
+    e.preventDefault(); // don't start a text selection while dragging
+    window.getSelection()?.removeAllRanges();
+    pan = { x: e.clientX, y: e.clientY, vx: S.view.x, vy: S.view.y };
+    vp.setPointerCapture(e.pointerId); vp.classList.add('panning');
+  });
+  vp.addEventListener('pointermove', e => {
+    if (!pan) return;
+    S.view.x = pan.vx + e.clientX - pan.x; S.view.y = pan.vy + e.clientY - pan.y; applyView();
+  });
+  const endPan = () => { pan = null; vp.classList.remove('panning'); };
+  vp.addEventListener('pointerup', endPan); vp.addEventListener('pointercancel', endPan);
+  vp.addEventListener('wheel', e => {
+    if (!e.ctrlKey && e.target.closest('.chat-log, .ctx-body, textarea')) return;
+    e.preventDefault();
+    const r = vp.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+  }, { passive: false });
+
+  /* ---------- Actions ---------- */
+  function openNode(id) { S.open = id; S.selected = id; renderAll(); }
+  function backToGraph() { S.open = null; renderAll(); }
+
+  const replies = [
+    t => `Working from the shared context, here's a first pass on "${t}": the strongest sources disagree mostly on how they evaluate, not on their conclusions. I'd compare them on the same criteria so the result is easy to merge back.`,
+    t => `Short answer: it depends on how much of the earlier context still matters. For "${t}" I'd separate what's well established from what rests on a single report, and reflect that in the result's confidence.`,
+    t => `That's a fair point. I'd record it as an open question in the result for "${t}" rather than chase it here, since it's outside this branch's scope.`
+  ];
+  function mergeReply(n) {
+    const titles = n.parents.map(p => `"${nodes[p].title}"`).join(' and ');
+    return `I have the results from ${titles}, plus the original scope. Where they agree: no single mechanism is enough, and a layered design (recent turns in context, older material retrieved on demand) is the safest default. Where they differ: how much to store up front and what it costs. Next step: fork again and test the two leading designs side by side.`;
+  }
+
+  function stream(id, text) {
+    const n = nodes[id], m = M('assistant', '');
+    n.messages.push(m); S.streaming = m.id; renderAll();
+    const done = () => { m.text = text; S.streaming = null; renderAll(); };
+    if (reduceMotion) { setTimeout(done, 300); return; }
+    let i = 0;
+    const tick = () => {
+      i = Math.min(text.length, i + 3 + Math.floor(Math.random() * 5));
+      m.text = text.slice(0, i);
+      $$(`[data-msg="${m.id}"] .msg-text`).forEach(e => { e.textContent = m.text; });
+      scrollLogs();
+      if (i < text.length) setTimeout(tick, 22); else done();
+    };
+    setTimeout(tick, 350);
+  }
+
+  function send(id) {
+    const n = nodes[id], text = (S.drafts[id] || '').trim();
+    if (!text || S.streaming || n.status !== 'open') return;
+    n.messages.push(M('user', text)); S.drafts[id] = '';
+    if (/search|find|look up|source/i.test(text)) {
+      n.messages.push(M('tool', '', { name: 'web_search', input: trunc(text, 70), output: '3 results (sample data). In the real app this is a live MCP tool call.' }));
+    }
+    const firstMergeTurn = n.parents.length > 1 && n.messages.filter(m => m.role === 'user').length === 1;
+    stream(id, firstMergeTurn ? mergeReply(n) : replies[S.replyN++ % replies.length](n.title));
+  }
+
+  /* ---------- Modals ---------- */
+  function openModal(m) { S.modal = m; renderModal(); }
+  function closeModal() { S.modal = null; renderModal(); }
+  function renderModal() {
+    const back = $('#modalBack'), m = S.modal, box = $('#modal');
+    back.hidden = !m;
+    if (!m) { box.innerHTML = ''; return; }
+    const n = nodes[m.id];
+    let h = '';
+    if (m.type === 'fork') {
+      h = `<h2>Fork "${esc(n.title)}"</h2>
+        <p class="lede">Each branch starts with this node's full context (~${fmtTok(tok(full(n.id)))} tokens).${n.status === 'open' ? ' After forking, this node is frozen.' : ''}</p>
+        ${m.rows.map((v, i) => `<div class="fork-row"><label for="fork-row-${i}">Branch ${i + 1}</label><input type="text" id="fork-row-${i}" data-forkrow value="${esc(v)}" placeholder="Sub-question, e.g. Compare storage costs"></div>`).join('')}
+        <div><button class="btn small" data-act="fork-add">+ Add branch</button></div>
+        <div class="modal-foot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="fork-create">Create branches</button></div>`;
+    } else if (m.type === 'result') {
+      const r = m.r;
+      h = `<h2>${m.edit ? 'Edit result' : 'Finish branch'}: "${esc(n.title)}"</h2>
+        <p class="lede">${m.edit ? '' : 'The model drafted this from the branch. '}Edit it, then approve. Only this result goes back when you merge, not the transcript.</p>
+        <label for="res-findings">Findings</label><textarea id="res-findings" rows="4">${esc(r.findings)}</textarea>
+        <label for="res-evidence">Evidence and sources</label><textarea id="res-evidence" rows="3">${esc(r.evidence)}</textarea>
+        <label for="res-questions">Open questions</label><textarea id="res-questions" rows="2">${esc(r.questions)}</textarea>
+        <label for="res-conf">Confidence</label><select id="res-conf">${['Low', 'Medium', 'High'].map(c => `<option ${c === r.confidence ? 'selected' : ''}>${c}</option>`).join('')}</select>
+        <div class="modal-foot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="result-save">${m.edit ? 'Save result' : 'Approve result'}</button></div>`;
+    } else if (m.type === 'merge') {
+      const base = m.base ? nodes[m.base] : null, baseItems = base ? full(base.id) : [];
+      const resItems = m.ids.map(i => ({ kind: 'result', node: nodes[i] }));
+      const transcripts = tok(m.ids.flatMap(i => nodes[i].messages.map(msg => ({ kind: 'msg', msg }))));
+      h = `<h2>Merge ${m.ids.length} branches</h2>
+        <p class="lede">The new node starts with the base context plus each branch's result. Branch transcripts are left out.</p>
+        <div class="mp">
+          <div class="mp-row"><span class="mp-k">Base</span><span>${base ? esc(base.title) : 'None'}</span><span class="mono">~${fmtTok(tok(baseItems))} tok</span></div>
+          ${m.ids.map(i => `<div class="mp-row res"><span class="mp-k">+ Result</span><span><b>${esc(nodes[i].title)}</b><br><small>${esc(trunc(nodes[i].result.findings, 150))}</small></span><span class="mono">~${fmtTok(tok([{ kind: 'result', node: nodes[i] }]))} tok</span></div>`).join('')}
+        </div>
+        <p class="tokline">Results add ~${fmtTok(tok(resItems))} tokens. The full branch transcripts would have added ~${fmtTok(transcripts)}.</p>
+        <label for="merge-title">Node title</label><input type="text" id="merge-title" value="${esc(trunc('Synthesis: ' + m.ids.map(i => nodes[i].title).join(' + '), 70))}">
+        <label for="merge-framing">Framing prompt</label><textarea id="merge-framing" rows="3">Synthesize these results into a recommendation and list what still needs research.</textarea>
+        <div class="modal-foot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="merge-create">Create merged node</button></div>`;
+    }
+    box.innerHTML = h;
+    const first = box.querySelector('input, textarea'); if (first) first.focus();
+  }
+
+  function draftResult(n) {
+    const lastAI = [...n.messages].reverse().find(m => m.role === 'assistant' && m.text);
+    const tools = n.messages.filter(m => m.tool).map(m => `${m.tool.name}: ${m.tool.input}`);
+    return { findings: trunc(lastAI ? lastAI.text : '', 280), evidence: tools.length ? tools.join('\n') : 'No sources cited in this branch.', questions: '', confidence: 'Medium' };
+  }
+
+  function act(name, id) {
+    switch (name) {
+      case 'send': send(id); break;
+      case 'fork': openModal({ type: 'fork', id, rows: ['', ''] }); break;
+      case 'finish': openModal({ type: 'result', id, edit: false, r: draftResult(nodes[id]) }); break;
+      case 'edit-result': openModal({ type: 'result', id, edit: true, r: { ...nodes[id].result } }); break;
+      case 'back': backToGraph(); break;
+      case 'fit': fitView(); break;
+      case 'zoom-in': zoomAt(vp.clientWidth / 2, vp.clientHeight / 2, 1.2); break;
+      case 'zoom-out': zoomAt(vp.clientWidth / 2, vp.clientHeight / 2, 1 / 1.2); break;
+      case 'merge': {
+        const ids = [...S.mergeSel].filter(i => nodes[i].status === 'finished');
+        if (ids.length >= 2) openModal({ type: 'merge', id: ids[0], ids, base: lca(ids) });
+        break;
+      }
+      case 'modal-close': closeModal(); break;
+      case 'fork-add': S.modal.rows = $$('[data-forkrow]').map(i => i.value).concat(''); renderModal(); $$('[data-forkrow]').pop().focus(); break;
+      case 'fork-create': {
+        const p = nodes[S.modal.id];
+        const titles = $$('[data-forkrow]').map(i => i.value.trim()).filter(Boolean);
+        const kids = (titles.length ? titles : ['Branch 1', 'Branch 2']).map(t => addNode({ title: t, parents: [p.id] }));
+        if (p.status === 'open') p.status = 'frozen';
+        // Show the graph so the new branches are visible; the user picks which one to open.
+        closeModal();
+        S.selected = kids[0].id; S.open = null;
+        renderAll(); fitView();
+        break;
+      }
+      case 'result-save': {
+        const n = nodes[S.modal.id];
+        n.result = { findings: $('#res-findings').value.trim(), evidence: $('#res-evidence').value.trim(), questions: $('#res-questions').value.trim(), confidence: $('#res-conf').value };
+        n.status = 'finished';
+        closeModal(); renderAll();
+        break;
+      }
+      case 'merge-create': {
+        const m = S.modal;
+        const n = addNode({ title: $('#merge-title').value.trim() || 'Synthesis', parents: m.ids });
+        S.drafts[n.id] = $('#merge-framing').value.trim() || 'Synthesize these results.';
+        S.mergeSel.clear();
+        closeModal();
+        renderAll(); fitView();
+        openNode(n.id);
+        send(n.id);
+        break;
+      }
+    }
+  }
+
+  const nodeOf = el => el.closest('[data-node]')?.dataset.node || el.closest('.gnode')?.dataset.id || S.selected;
+
+  document.addEventListener('click', e => {
+    const t = e.target;
+    if (t.id === 'modalBack') { closeModal(); return; }
+    const g = t.closest('[data-goto]'); if (g) { openNode(g.dataset.goto); return; }
+    const a = t.closest('[data-act]'); if (a) { if (!a.disabled) act(a.dataset.act, nodeOf(a)); return; }
+    const card = t.closest('.gnode'); if (card && !t.closest('[data-stop]')) openNode(card.dataset.id);
+  });
+  // Right-click a node to toggle it for merging. Only finished nodes have a result to merge.
+  let hintMsg = null;
+  vp.addEventListener('contextmenu', e => {
+    const card = e.target.closest('.gnode');
+    e.preventDefault();
+    if (!card) return;
+    const id = card.dataset.id;
+    if (nodes[id].status !== 'finished') {
+      hintMsg = 'Only finished nodes can be merged. Finish the branch first.';
+      card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake');
+    } else {
+      hintMsg = null;
+      S.mergeSel.has(id) ? S.mergeSel.delete(id) : S.mergeSel.add(id);
+      card.classList.toggle('msel-on', S.mergeSel.has(id));
+    }
+    renderToolbar();
+  });
+  document.addEventListener('input', e => {
+    if (e.target.matches('textarea[data-input]')) S.drafts[nodeOf(e.target)] = e.target.value;
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && e.target.matches('textarea[data-input]')) { e.preventDefault(); send(nodeOf(e.target)); }
+    else if (e.key === 'Escape') { if (S.modal) closeModal(); else if (S.open) backToGraph(); }
+  });
+  document.addEventListener('toggle', e => {
+    const d = e.target;
+    if (d.dataset.ctx) (d.open ? S.openCtx.add(d.dataset.ctx) : S.openCtx.delete(d.dataset.ctx));
+    if (d.dataset.tool) (d.open ? S.openTools.add(d.dataset.tool) : S.openTools.delete(d.dataset.tool));
+  }, true);
+
+  renderAll(); fitView();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (!S.open) { renderAll(); fitView(); } });
+})();
+</script>
