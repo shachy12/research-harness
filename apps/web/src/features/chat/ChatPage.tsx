@@ -1,8 +1,9 @@
 import type { DagNode, NodeDetail, NodeSummary } from '@harness/shared'
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { useGraph, useNodeDetail } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
+import { activityOf } from '@/lib/activity'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ForkDialog } from '@/features/fork/ForkDialog'
@@ -78,10 +79,8 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const stream = useChatStream(node.id)
   const [draft, setDraft] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
-  const location = useLocation()
-  const navigate = useNavigate()
 
-  // How many saved messages there were when the current message was sent. The streamed copies are
+  // How many saved messages there were when the current reply started. The streamed copies are
   // shown until the saved messages (refetched after the reply) replace them, so nothing appears twice.
   const [sentAt, setSentAt] = useState(-1)
   const send = (text: string) => {
@@ -90,15 +89,16 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   }
   const showStreamed = stream.active && messages.length === sentAt
 
-  // A merged node is created with its first message passed along from the merge dialog. Send it once.
-  const autoSent = useRef(false)
-  const autoSend = (location.state as { autoSend?: string } | null)?.autoSend
+  // The node may already be working (a branch started by fork, a merge, or a reply sent earlier):
+  // attach to it once when the page opens.
+  const attached = useRef(false)
+  const { watch } = stream
   useEffect(() => {
-    if (!autoSend || autoSent.current || messages.length > 0 || node.status !== 'open') return
-    autoSent.current = true
-    navigate(location.pathname, { replace: true, state: null })
-    send(autoSend)
-  })
+    if (!detail.running || attached.current) return
+    attached.current = true
+    setSentAt(messages.length)
+    void watch()
+  }, [detail.running, messages.length, watch])
 
   // Keep the newest content in view.
   useLayoutEffect(() => {
@@ -121,7 +121,10 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold text-balance">{node.title}</h1>
-            <StatusChip status={node.status} />
+            <StatusChip
+              status={node.status}
+              activity={activityOf(node.status, stream.active || detail.running, messages.at(-1)?.role ?? null)}
+            />
             {node.parentIds.length > 1 && <MergeChip />}
           </div>
 

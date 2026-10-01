@@ -4,14 +4,20 @@ import type { LLMProvider } from './llm/index.ts';
 import { HttpError } from './routes/errors.ts';
 import { nodeRoutes } from './routes/nodes.ts';
 import { projectRoutes } from './routes/projects.ts';
+import { RunManager } from './runs.ts';
 
 export interface AppDeps {
   repo: Repository;
   llm: LLMProvider;
 }
 
+export interface RouteDeps extends AppDeps {
+  runs: RunManager;
+}
+
 // Dependencies are passed in, so tests can use an in-memory database and a fake model.
 export function createApp(deps: AppDeps) {
+  const routeDeps: RouteDeps = { ...deps, runs: new RunManager(deps.repo, deps.llm) };
   return new Hono()
     .basePath('/api')
     .onError((err, c) => {
@@ -20,8 +26,8 @@ export function createApp(deps: AppDeps) {
       return c.json({ error: 'Something went wrong on the server' }, 500);
     })
     .get('/health', (c) => c.json({ ok: true, model: deps.llm.label }))
-    .route('/projects', projectRoutes(deps))
-    .route('/nodes', nodeRoutes(deps));
+    .route('/projects', projectRoutes(routeDeps))
+    .route('/nodes', nodeRoutes(routeDeps));
 }
 
 export type AppType = ReturnType<typeof createApp>;

@@ -49,13 +49,13 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
 
   const create = () =>
     merge.mutate(
-      { parentIds, title: title.trim() || 'Synthesis' },
+      { parentIds, title: title.trim() || 'Synthesis', prompt: framing.trim() },
       {
         onSuccess: (node) => {
           selection.clear()
           onClose()
-          // The chat page sends the framing prompt as the merged node's first message.
-          navigate(`/projects/${projectId}/nodes/${node.id}`, { state: { autoSend: framing.trim() } })
+          // The merged node is already working on its first message; its chat page attaches to it.
+          navigate(`/projects/${projectId}/nodes/${node.id}`)
         },
       },
     )

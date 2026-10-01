@@ -71,6 +71,10 @@ export type ContextItem =
 export interface NodeSummary extends DagNode {
   messageCount: number;
   lastMessage: string | null;
+  /** Who wrote the last message; 'user' on an idle node means the reply failed or was stopped early. */
+  lastRole: Role | null;
+  /** The model is writing a reply right now. */
+  running: boolean;
 }
 
 export interface GraphResponse {
@@ -84,14 +88,21 @@ export interface NodeDetail {
   /** Everything the node inherits, in prompt order. */
   inherited: ContextItem[];
   childIds: string[];
+  /** The model is writing a reply right now (attach with GET /api/nodes/:id/stream). */
+  running: boolean;
 }
 
 /**
- * Server-sent events from POST /api/nodes/:id/messages.
+ * Server-sent events about a node's reply. Replies run on the server; a page only watches them.
+ *   POST /api/nodes/:id/messages  starts a reply: `user`, then the live events
+ *   GET  /api/nodes/:id/stream    attaches to a running reply: `snapshot` of the reply so far,
+ *                                 then the live events; or `idle` if nothing is running
  * `thinking` marks that the model started reasoning (its text is not shown).
  */
 export type ChatStreamEvent =
   | { type: 'user'; message: Message }
+  | { type: 'snapshot'; text: string; toolCalls: ToolCall[]; thinking: boolean }
+  | { type: 'idle' }
   | { type: 'thinking' }
   | { type: 'delta'; text: string }
   /** A tool call started or got its results; replaces any earlier event with the same call id. */

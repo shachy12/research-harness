@@ -16,14 +16,26 @@ export const renameNodeSchema = z.object({
   title: z.string().trim().min(1).max(200),
 });
 
+/** Each prompt becomes a branch: its first message, and (shortened) its title. */
 export const forkSchema = z.object({
-  titles: z.array(z.string().trim().min(1).max(200)).min(1).max(12),
+  prompts: z.array(z.string().trim().min(1)).min(1).max(12),
 });
 
+/** The merged node starts working on `prompt` (its first message) right away. */
 export const mergeSchema = z.object({
   parentIds: z.array(z.string().min(1)).min(2, 'Select at least two branches'),
   title: z.string().trim().min(1).max(200),
+  prompt: z.string().trim().min(1, 'Write the first message'),
 });
+
+/** A short node title from a prompt: its first line, cut at a word boundary. */
+export function titleFromPrompt(prompt: string, max = 80): string {
+  const line = prompt.trim().split('\n')[0].replace(/\s+/g, ' ');
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,.;:]+$/, '')}…`;
+}
 
 export type SendMessageBody = z.infer<typeof sendMessageSchema>;
 export type RenameNodeBody = z.infer<typeof renameNodeSchema>;

@@ -21,22 +21,33 @@ export const api = {
   patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),
 }
 
+/** Send a message and watch the reply as it streams in. */
+export function streamChat(nodeId: string, content: string, onEvent: (e: ChatStreamEvent) => void, signal: AbortSignal) {
+  return readEvents(
+    fetch(`/api/nodes/${nodeId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+      signal,
+    }),
+    onEvent,
+  )
+}
+
+/** Watch a reply that is already running on the server (starts with a `snapshot`, or `idle`). */
+export function watchChat(nodeId: string, onEvent: (e: ChatStreamEvent) => void, signal: AbortSignal) {
+  return readEvents(fetch(`/api/nodes/${nodeId}/stream`, { signal }), onEvent)
+}
+
+/** Stop the running reply; what arrived so far is kept. */
+export const stopReply = (nodeId: string) => api.post(`/nodes/${nodeId}/stop`)
+
 /**
- * Send a message and read the reply as it streams in.
- * The server answers with server-sent events: lines of `data: {json}` separated by blank lines.
+ * Read server-sent events: lines of `data: {json}` separated by blank lines.
+ * Aborting the signal only stops watching; the reply keeps running on the server.
  */
-export async function streamChat(
-  nodeId: string,
-  content: string,
-  onEvent: (event: ChatStreamEvent) => void,
-  signal: AbortSignal,
-): Promise<void> {
-  const res = await fetch(`/api/nodes/${nodeId}/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
-    signal,
-  })
+async function readEvents(response: Promise<Response>, onEvent: (event: ChatStreamEvent) => void): Promise<void> {
+  const res = await response
   if (!res.ok || !res.body) {
     const data = (await res.json().catch(() => null)) as ApiError | null
     throw new Error(data?.error ?? `Request failed (${res.status})`)

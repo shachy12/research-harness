@@ -73,18 +73,25 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - **Main window = the graph.** Nodes are cards (status chip, title, last message or result summary, message count). Auto-laid out top to bottom; pan and zoom; Fit button.
 - **Clicking a node opens its chat full-window**, replacing the graph (a view switch, not a dialog or side panel). The header has a "← Graph" button (and Esc) plus a breadcrumb of ancestors. Returning to the graph keeps the previous pan/zoom.
 - Chat view: inherited context collapsed at the top (message count and token estimate), collapsible tool calls, the result block once finished, a composer, and Fork / Finish branch actions.
-- Fork: a dialog to name the sub-questions, then return to the graph to show the new branches.
+- Fork: a dialog where you write each branch's first message; the branch title is derived from it (`titleFromPrompt`, first line, ~80 chars). Creating the branches starts all of them working in parallel, then returns to the graph.
+- Activity indicator on open nodes (graph cards and chat header): "Working…" while the model replies, "● Your turn" when waiting for you, "! No reply" if the last message is yours and nothing is running (failed or stopped early). Forked/finished nodes show their status instead. The graph refreshes every 1.5 s while any node is working.
 - Finish: the LLM drafts the result (Findings / Evidence & sources / Open questions / Confidence); the user edits and approves it.
 - Merge: right-click finished nodes in the graph to toggle them for merge (the card shows a "Selected for merge" badge; right-clicking an unfinished node shakes it and shows a hint), then "Merge selected" opens a preview (base context + results, tokens saved compared with full transcripts, title, framing prompt), then opens the new merged node.
 - Edges: solid = inherits full context; dashed with a "result" label = merge edge that passes only the result.
 - Considered and dropped: a split view (graph + side chat), and a canvas where every node is an inline chat.
 
+### Replies run on the server (`apps/server/src/runs.ts`)
+- `RunManager` runs one reply per node at a time, independent of any open page, and saves it when done (or what arrived, on failure/Stop). Fork and merge start their nodes' first messages through it.
+- `POST /nodes/:id/messages` starts a reply and streams it (`user`, then live events). `GET /nodes/:id/stream` attaches to a running reply (`snapshot` of the reply so far, then live events; `idle` if nothing runs). `POST /nodes/:id/stop` stops it. Disconnecting only stops watching.
+- `watchRun` subscribes synchronously when the request arrives (not inside the SSE callback), so a fast reply can't finish unseen.
+- `NodeSummary.running` / `lastRole` and `NodeDetail.running` drive the activity indicators; the chat page attaches automatically when it opens a running node.
+
 ### Web implementation notes
 - Server data goes through TanStack Query hooks in `apps/web/src/api/queries.ts`; after any change `useRefreshAll()` refetches the graph and node details.
-- Chat streaming: `streamChat()` in `api/client.ts` reads the server-sent events; `features/chat/useChatStream.ts` holds the live state. Leaving the page does not stop a reply (the server finishes and saves it); the Stop button aborts.
+- Chat streaming: `streamChat()` (send) and `watchChat()` (attach) in `api/client.ts` read the server-sent events; `features/chat/useChatStream.ts` holds the live state (`send`, `watch`, `stop`). Leaving the page only stops watching; Stop calls the server's stop endpoint.
 - Graph: React Flow with fixed-size cards (`CARD_WIDTH`/`CARD_HEIGHT`) laid out by dagre, not draggable. Pan/zoom per project is remembered in memory; the view re-fits when the node count changes. `colorMode="system"`.
 - Merge selection lives in a small external store (`features/merge/selection.ts`) so it survives opening a chat. Its actions read the store's current value, never a render-time copy.
-- The merge dialog navigates to the new node with `state.autoSend` (the first message); the chat sends it once.
+- The merge dialog sends the first message with the merge request; the server starts it, and the merged node's chat page attaches.
 - React runs effects twice in development: guard effects that trigger paid model calls with a ref (see `ResultDialog`).
 - Dark mode: `lib/theme.ts` toggles the `dark` class from the OS setting. Status colors are Tailwind tokens: `open`, `done`, `merge`, `frozen` (+ `-soft`), `canvas`, `edge`.
 - The browser-pane preview (`.claude/launch.json`) uses `data/preview.db` and the placeholder provider, so testing never touches the real `data/harness.db` or spends model credit. (Variables set by the launcher win over `.env`.)

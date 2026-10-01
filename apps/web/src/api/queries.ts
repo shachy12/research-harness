@@ -12,6 +12,8 @@ export function useGraph(projectId: string) {
   return useQuery({
     queryKey: keys.graph(projectId),
     queryFn: ({ signal }) => api.get<GraphResponse>(`/projects/${projectId}/graph`, signal),
+    // While any node is working, refresh so the cards' "Working…" / "Your turn" stay current.
+    refetchInterval: (query) => (query.state.data?.nodes.some((n) => n.running) ? 1500 : false),
   })
 }
 
@@ -34,8 +36,8 @@ export function useRefreshAll() {
 export function useFork() {
   const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: ({ nodeId, titles }: { nodeId: string; titles: string[] }) =>
-      api.post<DagNode[]>(`/nodes/${nodeId}/fork`, { titles }),
+    mutationFn: ({ nodeId, prompts }: { nodeId: string; prompts: string[] }) =>
+      api.post<DagNode[]>(`/nodes/${nodeId}/fork`, { prompts }),
     onSuccess: refresh,
   })
 }

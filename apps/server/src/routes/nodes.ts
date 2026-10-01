@@ -2,35 +2,71 @@ import { zValidator } from '@hono/zod-validator';
 import {
   type ChatStreamEvent,
   type NodeDetail,
-  type ToolCall,
   branchResultSchema,
   forkSchema,
   renameNodeSchema,
   sendMessageSchema,
+  titleFromPrompt,
 } from '@harness/shared';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import type { AppDeps } from '../app.ts';
+import type { RouteDeps } from '../app.ts';
 import { inheritedItems } from '../dag/context.ts';
 import { DRAFT_RESULT_INSTRUCTION, buildChatRequest } from '../dag/prompt.ts';
 import { planSession } from '../dag/session.ts';
 import type { ReplyContext } from '../llm/index.ts';
+import type { RunManager } from '../runs.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
-export function nodeRoutes({ repo, llm }: AppDeps) {
-  // One reply at a time per node, so two streams can't interleave in the same conversation.
-  const streaming = new Set<string>();
+/**
+ * Stream a node's running reply as server-sent events until it ends or the page disconnects.
+ * Disconnecting only stops watching; the reply keeps running on the server.
+ */
+function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStreamEvent) {
+  // Subscribe right away (not inside the stream callback), so a fast reply can't end unseen.
+  const queue: ChatStreamEvent[] = first ? [first] : [];
+  let ended = false;
+  let wake: (() => void) | null = null;
+  const notify = () => {
+    wake?.();
+    wake = null;
+  };
+  const unsubscribe = runs.subscribe(
+    nodeId,
+    (event) => {
+      queue.push(event);
+      if (event.type === 'done' || event.type === 'error') ended = true;
+      notify();
+    },
+    { snapshot: !first }, // a page that just sent the message doesn't need a snapshot
+  );
+  if (!unsubscribe) {
+    queue.push({ type: 'idle' });
+    ended = true;
+  }
 
+  return streamSSE(c, async (stream) => {
+    stream.onAbort(() => {
+      ended = true;
+      notify();
+    });
+
+    try {
+      for (;;) {
+        while (queue.length > 0 && !stream.aborted) await stream.writeSSE({ data: JSON.stringify(queue.shift()) });
+        if (ended || stream.aborted) break;
+        await new Promise<void>((resolve) => (wake = resolve));
+      }
+    } finally {
+      unsubscribe?.();
+    }
+  });
+}
+
+export function nodeRoutes({ repo, llm, runs }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
-    return node;
-  };
-
-  const requireOpen = (id: string) => {
-    const node = requireNode(id);
-    if (node.status === 'frozen') throw conflict('This node was forked, so it is frozen. Continue in one of its branches.');
-    if (node.status === 'finished') throw conflict('This branch is finished.');
     return node;
   };
 
@@ -43,6 +79,7 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
         messages: graph.messages(node.id),
         inherited: inheritedItems(graph, node.id),
         childIds: graph.children(node.id).map((n) => n.id),
+        running: runs.isRunning(node.id),
       });
     })
 
@@ -52,78 +89,49 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
       return c.json(repo.getNode(node.id)!);
     })
 
-    // Send a user message and stream the assistant's reply as server-sent events (see ChatStreamEvent).
+    // Send a user message: starts the reply on the server and streams it (see ChatStreamEvent).
     .post('/:nodeId/messages', zValidator('json', sendMessageSchema), (c) => {
-      const node = requireOpen(c.req.param('nodeId'));
-      if (streaming.has(node.id)) throw conflict('A reply is already being generated for this node.');
-
-      const content = c.req.valid('json').content;
-      // Plan the provider session before saving the message (it depends on what the node had so far).
-      const session = planSession(repo.snapshot(node.projectId), node.id);
-      const userMessage = repo.addMessage(node.id, 'user', content);
-      const request = buildChatRequest(repo.snapshot(node.projectId), node.id);
-      const ctx: ReplyContext = { nodeId: node.id, request, message: content, session };
-      streaming.add(node.id);
-
-      return streamSSE(c, async (stream) => {
-        const send = (event: ChatStreamEvent) => stream.writeSSE({ data: JSON.stringify(event) });
-        const abort = new AbortController();
-        stream.onAbort(() => abort.abort());
-
-        let text = '';
-        const toolCalls = new Map<string, ToolCall>();
-        try {
-          await send({ type: 'user', message: userMessage });
-          for await (const event of llm.streamReply(ctx, abort.signal)) {
-            if (event.type === 'session') {
-              repo.setSessionId(node.id, event.sessionId);
-            } else if (event.type === 'thinking') {
-              await send({ type: 'thinking' });
-            } else if (event.type === 'tool') {
-              toolCalls.set(event.call.id, event.call);
-              await send({ type: 'tool', call: event.call });
-            } else {
-              text += event.text;
-              await send({ type: 'delta', text: event.text });
-            }
-          }
-          const reply = repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
-          await send({ type: 'done', message: reply });
-        } catch (err) {
-          // Keep whatever arrived before the failure, so the user doesn't lose it
-          // (unless the node itself is gone, e.g. the project was reset mid-reply).
-          if ((text || toolCalls.size) && repo.getNode(node.id)) {
-            repo.addMessage(node.id, 'assistant', text, [...toolCalls.values()]);
-          }
-          if (!abort.signal.aborted) {
-            console.error(`[chat] node ${node.id}:`, err);
-            await send({ type: 'error', error: err instanceof Error ? err.message : 'The model request failed' });
-          }
-        } finally {
-          streaming.delete(node.id);
-        }
-      });
+      const nodeId = c.req.param('nodeId');
+      const userMessage = runs.start(nodeId, c.req.valid('json').content);
+      return watchRun(c, runs, nodeId, { type: 'user', message: userMessage });
     })
 
-    // Create child branches. Forking freezes an open node so its history stays fixed.
+    // Watch a reply that is already running (e.g. a branch started by fork).
+    .get('/:nodeId/stream', (c) => {
+      requireNode(c.req.param('nodeId'));
+      return watchRun(c, runs, c.req.param('nodeId'));
+    })
+
+    // Stop the running reply; what arrived so far is kept.
+    .post('/:nodeId/stop', (c) => {
+      runs.stop(requireNode(c.req.param('nodeId')).id);
+      return c.json({ ok: true });
+    })
+
+    // Create branches, one per prompt, and start each one working on its prompt right away.
+    // Forking freezes an open node so its history stays fixed.
     .post('/:nodeId/fork', zValidator('json', forkSchema), (c) => {
       const parent = requireNode(c.req.param('nodeId'));
-      if (streaming.has(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
+      if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
 
+      const { prompts } = c.req.valid('json');
       const children = repo.transaction(() => {
         if (parent.status === 'open') repo.setStatus(parent.id, 'frozen');
-        return c.req.valid('json').titles.map((title) =>
-          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id] }),
+        return prompts.map((prompt) =>
+          repo.createNode({ projectId: parent.projectId, title: titleFromPrompt(prompt), parentIds: [parent.id] }),
         );
       });
       llm.release?.(parent.id); // the parent receives no more messages
+      children.forEach((child, i) => runs.start(child.id, prompts[i]));
       return c.json(children, 201);
     })
 
     // Ask the model to draft this branch's result. Nothing is saved until the user approves it.
     .post('/:nodeId/result/draft', async (c) => {
-      const node = requireOpen(c.req.param('nodeId'));
+      const node = requireNode(c.req.param('nodeId'));
+      if (node.status !== 'open') throw conflict('Only open branches can be finished.');
       if (node.parentIds.length === 0) throw new HttpError(400, 'The root node has no result to merge.');
+      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
       const graph = repo.snapshot(node.projectId);
       if (!graph.messages(node.id).some((m) => m.role === 'assistant')) {
         throw new HttpError(400, 'This branch has no replies yet.');
@@ -149,7 +157,7 @@ export function nodeRoutes({ repo, llm }: AppDeps) {
       const node = requireNode(c.req.param('nodeId'));
       if (node.parentIds.length === 0) throw new HttpError(400, 'The root node has no result to merge.');
       if (node.status === 'frozen') throw conflict('This node was forked, so it can no longer be finished.');
-      if (streaming.has(node.id)) throw conflict('Wait for the current reply to finish.');
+      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
 
       repo.setResult(node.id, c.req.valid('json'));
       llm.release?.(node.id); // a finished branch receives no more messages

@@ -1,6 +1,7 @@
 import type { NodeSummary } from '@harness/shared'
 import { Handle, type Node, type NodeProps, Position } from '@xyflow/react'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
+import { activityOf } from '@/lib/activity'
 import { cn } from '@/lib/utils'
 import { CARD_HEIGHT, CARD_WIDTH } from './layout'
 
@@ -25,12 +26,13 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
       className={cn(
         'flex cursor-pointer flex-col gap-1.5 overflow-hidden rounded-xl border bg-card px-3 py-2.5 shadow-sm transition-colors hover:border-edge',
         mergeSelected && 'border-merge ring-3 ring-merge-soft',
+        n.running && !mergeSelected && 'border-open/60',
         shakeKey > 0 && 'animate-shake',
       )}
     >
       <Handle type="target" position={Position.Top} isConnectable={false} className={hiddenHandle} />
       <div className="flex items-center gap-1.5">
-        <StatusChip status={n.status} />
+        <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole)} />
         {n.parentIds.length > 1 && <MergeChip />}
         <span className="ml-auto font-mono text-[11px] text-muted-foreground">{n.messageCount} msg</span>
       </div>
