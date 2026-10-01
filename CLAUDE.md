@@ -48,6 +48,13 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - Edges: solid = inherits full context; dashed with a "result" label = merge edge that passes only the result.
 - Considered and dropped: a split view (graph + side chat), and a canvas where every node is an inline chat.
 
+## Commands (run from the repo root)
+- `npm run dev`: starts the server (http://localhost:8787) and the web UI (http://localhost:5173, which proxies `/api` to the server)
+- `npm run typecheck`, `npm test`, `npm run lint`
+- Add a dependency to one app: `npm install <pkg> -w @harness/web` (or `@harness/server`)
+- Add a shadcn component: `npx shadcn@latest add <name>` from `apps/web`. Generated files in `src/components/ui` are not linted. Base UI buttons rendered as links need `nativeButton={false}`.
+- Server env: `.env` at the repo root (see `.env.example`). The server port variable is `HARNESS_SERVER_PORT`, not `PORT`.
+
 ## Project structure (planned)
 npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Requires Node 24 LTS.
 - `apps/web`: React UI. `src/app` (router, AppShell with a sidebar slot), `src/features/*` (graph, chat, fork, result, merge; later projects, settings), `src/components/ui` (shadcn), `src/api` (typed server client).
