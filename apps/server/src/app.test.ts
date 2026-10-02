@@ -309,6 +309,38 @@ describe('API', () => {
     expect(llm.requests.at(-1)!.turns[0].content).toContain(paper.path);
   });
 
+  it('uploads a folder and tells the model to explore it', async () => {
+    const form = new FormData();
+    form.append('name', 'thesis');
+    for (const [rel, text] of [['main.tex', '\\begin{document}'], ['chapters/one.tex', 'Chapter one']]) {
+      form.append('path', rel);
+      form.append('file', new File([text], rel.split('/').pop()!));
+    }
+    const res = await app.request('/api/projects/default/uploads/folder', { method: 'POST', body: form });
+    expect(res.status).toBe(201);
+    const folder = (await res.json()) as Attachment;
+    expect(folder).toMatchObject({ name: 'thesis', kind: 'folder', fileCount: 2 });
+    expect(readFileSync(path.join(folder.path, 'chapters', 'one.tex'), 'utf8')).toBe('Chapter one');
+
+    const sent = await app.request(`/api/nodes/${rootId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'Summarize my thesis', attachments: [folder] }),
+    });
+    await sent.text();
+    const message = llm.contexts.at(-1)!.message;
+    expect(message).toContain(`${folder.path} (folder, 2 files)`);
+    expect(message).toContain('Glob');
+  });
+
+  it('rejects a folder upload whose paths and files do not match', async () => {
+    const form = new FormData();
+    form.append('name', 'broken');
+    form.append('path', 'a.txt');
+    const res = await app.request('/api/projects/default/uploads/folder', { method: 'POST', body: form });
+    expect(res.status).toBe(400);
+  });
+
   it('refuses attachments that are not uploads of this project', async () => {
     const res = await call('POST', `/nodes/${rootId}/messages`, {
       content: 'Read this',

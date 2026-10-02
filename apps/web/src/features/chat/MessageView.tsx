@@ -21,7 +21,9 @@ export function MessageView({ role, text, toolCalls = [], attachments = [], stre
           <div className="break-words whitespace-pre-wrap">{text}</div>
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
-              {attachments.map((a) => <AttachmentChip key={a.path} name={a.name} size={a.size} />)}
+              {attachments.map((a) => (
+                <AttachmentChip key={a.path} name={a.name} size={a.size} kind={a.kind} fileCount={a.fileCount} />
+              ))}
             </div>
           )}
         </div>

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Attachment, Project } from '@harness/shared';
 
@@ -42,25 +42,68 @@ export class Workspaces {
     const name = uniqueName(uploads, safeFileName(originalName));
     const target = path.join(uploads, name);
     writeFileSync(target, bytes, { flag: 'wx' });
-    return { name, path: target, size: bytes.byteLength };
+    return { name, path: target, size: bytes.byteLength, kind: 'file' };
   }
 
   /**
-   * Check attachments sent with a message: each must be an existing file in this project's uploads
-   * folder (a client can't point the model at other files). Returns them with the real size.
+   * Copy an uploaded folder into the uploads folder, keeping its structure. `files` paths are
+   * relative to the folder (`figures/plot.png`); every part is made safe, so nothing can be written
+   * outside it. The folder gets an unused name (`paper`, `paper-2`, …).
+   */
+  saveFolder(project: Project, folderName: string, files: { path: string; bytes: Uint8Array }[]): Attachment {
+    this.prepare(project);
+    const name = uniqueName(this.uploadsOf(project), safeFileName(folderName));
+    const root = path.join(this.uploadsOf(project), name);
+    mkdirSync(root);
+
+    let size = 0;
+    for (const file of files) {
+      const parts = file.path.split(/[\\/]/).filter(Boolean).map(safeFileName);
+      if (parts.length === 0) continue;
+      const dir = path.join(root, ...parts.slice(0, -1));
+      mkdirSync(dir, { recursive: true });
+      const target = path.join(dir, uniqueName(dir, parts.at(-1)!));
+      writeFileSync(target, file.bytes, { flag: 'wx' });
+      size += file.bytes.byteLength;
+    }
+    return { name, path: root, size, kind: 'folder', fileCount: files.length };
+  }
+
+  /**
+   * Check attachments sent with a message: each must be an existing file or folder directly in this
+   * project's uploads folder (a client can't point the model at other files). Returns them with the
+   * real name, size and kind.
    */
   validate(project: Project, attachments: Attachment[]): Attachment[] | { error: string } {
     const uploads = path.resolve(this.uploadsOf(project));
     const checked: Attachment[] = [];
     for (const a of attachments) {
       const resolved = path.resolve(a.path);
-      if (path.dirname(resolved) !== uploads || !existsSync(resolved) || !statSync(resolved).isFile()) {
-        return { error: `Attachment "${a.name}" is not an uploaded file of this project` };
+      if (path.dirname(resolved) !== uploads || !existsSync(resolved)) {
+        return { error: `Attachment "${a.name}" is not an upload of this project` };
       }
-      checked.push({ name: path.basename(resolved), path: resolved, size: statSync(resolved).size });
+      const stats = statSync(resolved);
+      if (stats.isDirectory()) {
+        const { size, fileCount } = folderStats(resolved);
+        checked.push({ name: path.basename(resolved), path: resolved, size, kind: 'folder', fileCount });
+      } else {
+        checked.push({ name: path.basename(resolved), path: resolved, size: stats.size, kind: 'file' });
+      }
     }
     return checked;
   }
+}
+
+function folderStats(dir: string): { size: number; fileCount: number } {
+  let size = 0;
+  let fileCount = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile()) {
+      size += statSync(path.join(entry.parentPath, entry.name)).size;
+      fileCount++;
+    }
+  }
+  return { size, fileCount };
 }
 
 /** A file name that is safe on Windows, macOS and Linux: no path parts, no reserved characters. */

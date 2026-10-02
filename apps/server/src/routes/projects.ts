@@ -1,5 +1,12 @@
 import { zValidator } from '@hono/zod-validator';
-import { type GraphResponse, MAX_UPLOAD_BYTES, type NodeSummary, mergeSchema } from '@harness/shared';
+import {
+  type GraphResponse,
+  MAX_FOLDER_BYTES,
+  MAX_FOLDER_FILES,
+  MAX_UPLOAD_BYTES,
+  type NodeSummary,
+  mergeSchema,
+} from '@harness/shared';
 import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
@@ -19,6 +26,34 @@ export function projectRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
       }
       const attachment = workspaces.saveUpload(project, file.name, new Uint8Array(await file.arrayBuffer()));
       return c.json(attachment, 201);
+    })
+
+    // Upload a whole folder in one request: field "name" (the folder's name), then pairs of "path"
+    // (relative to the folder, e.g. "figures/plot.png") and "file", in the same order.
+    .post('/:projectId/uploads/folder', async (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      const body = await c.req.parseBody({ all: true });
+      const name = typeof body.name === 'string' ? body.name : '';
+      const paths = [body.path ?? []].flat();
+      const files = [body.file ?? []].flat();
+      if (!name || files.length === 0 || files.length !== paths.length) {
+        throw new HttpError(400, 'Send the folder name, then a "path" and a "file" field for each file');
+      }
+      if (files.length > MAX_FOLDER_FILES) throw new HttpError(413, `"${name}" has more than ${MAX_FOLDER_FILES} files`);
+
+      const entries: { path: string; bytes: Uint8Array }[] = [];
+      let total = 0;
+      for (const [i, file] of files.entries()) {
+        const rel = paths[i];
+        if (!(file instanceof File) || typeof rel !== 'string') throw new HttpError(400, 'Each "path" must be followed by its file');
+        total += file.size;
+        if (total > MAX_FOLDER_BYTES) {
+          throw new HttpError(413, `"${name}" is larger than ${MAX_FOLDER_BYTES / 1024 / 1024} MB`);
+        }
+        entries.push({ path: rel, bytes: new Uint8Array(await file.arrayBuffer()) });
+      }
+      return c.json(workspaces.saveFolder(project, name, entries), 201);
     })
 
     .get('/:projectId/graph', (c) => {

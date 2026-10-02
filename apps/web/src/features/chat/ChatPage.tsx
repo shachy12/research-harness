@@ -1,5 +1,5 @@
 import type { Attachment, DagNode, NodeDetail, NodeSummary } from '@harness/shared'
-import { PaperclipIcon } from 'lucide-react'
+import { FolderIcon, PaperclipIcon } from 'lucide-react'
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useGraph, useNodeDetail } from '@/api/queries'
@@ -10,6 +10,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { ForkDialog } from '@/features/fork/ForkDialog'
 import { ResultBlock } from '@/features/result/ResultBlock'
 import { ResultDialog } from '@/features/result/ResultDialog'
+import { groupPickedFolder, readDrop } from '@/lib/dropped-files'
 import { contextTokens } from '@/lib/tokens'
 import { AttachmentChip } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
@@ -85,6 +86,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const [dragging, setDragging] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const folderInput = useRef<HTMLInputElement>(null)
   const canWrite = node.status === 'open'
 
   // How many saved messages there were when the current reply started. The streamed copies are
@@ -139,7 +141,11 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
         onDrop: (e: React.DragEvent) => {
           e.preventDefault()
           setDragging(false)
-          if (e.dataTransfer.files.length) files.add(e.dataTransfer.files)
+          // Files and whole folders; readDrop must start during the event (the browser clears it after).
+          void readDrop(e.dataTransfer).then((picked) => {
+            if (picked.files.length) files.addFiles(picked.files)
+            if (picked.folders.length) files.addFolders(picked.folders)
+          })
         },
       }
     : {}
@@ -148,7 +154,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
     <div className="relative flex min-h-0 flex-1 flex-col" {...dropProps}>
       {dragging && (
         <div className="pointer-events-none absolute inset-2 z-10 grid place-items-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-primary">
-          Drop files to attach them to your next message
+          Drop files or folders to attach them to your next message
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -212,6 +218,8 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
                       key={f.key}
                       name={f.name}
                       size={f.size}
+                      kind={f.kind}
+                      fileCount={f.fileCount}
                       status={f.status}
                       error={f.error}
                       onRemove={() => files.remove(f.key)}
@@ -227,20 +235,43 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
                 hidden
                 accept=".pdf,.tex,.bib,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.gif,.webp"
                 onChange={(e) => {
-                  if (e.target.files?.length) files.add(e.target.files)
+                  if (e.target.files?.length) files.addFiles(e.target.files)
                   e.target.value = '' // allow picking the same file again
                 }}
               />
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="Attach files"
-                title="Attach files (PDF, LaTeX, text, images) — or drop them on the chat"
-                onClick={() => fileInput.current?.click()}
-              >
-                <PaperclipIcon />
-              </Button>
+              <input
+                ref={folderInput}
+                type="file"
+                hidden
+                // Folder picker; React has no typed prop for this browser attribute.
+                {...{ webkitdirectory: '' }}
+                onChange={(e) => {
+                  if (e.target.files?.length) files.addFolders(groupPickedFolder(e.target.files))
+                  e.target.value = ''
+                }}
+              />
+              <div className="flex flex-col gap-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Attach files"
+                  title="Attach files (PDF, LaTeX, text, images) — or drop them on the chat"
+                  onClick={() => fileInput.current?.click()}
+                >
+                  <PaperclipIcon />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Attach a folder"
+                  title="Attach a folder (e.g. a LaTeX project) — or drop folders on the chat"
+                  onClick={() => folderInput.current?.click()}
+                >
+                  <FolderIcon />
+                </Button>
+              </div>
               <Textarea
                 aria-label="Message"
                 rows={2}

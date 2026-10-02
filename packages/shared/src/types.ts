@@ -11,12 +11,17 @@ export interface Project {
   createdAt: string;
 }
 
-/** A file the user attached to a message; copied into the project's `.harness/uploads/` folder. */
+/** A file or folder the user attached to a message; copied into the project's `.harness/uploads/` folder. */
 export interface Attachment {
   name: string;
   /** Absolute path of the copy in `.harness/uploads/`. */
   path: string;
+  /** Total bytes (all files, for a folder). */
   size: number;
+  /** Missing on older messages, which were always files. */
+  kind?: 'file' | 'folder';
+  /** Number of files inside, for a folder. */
+  fileCount?: number;
 }
 
 /**

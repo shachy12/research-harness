@@ -54,9 +54,15 @@ export function withSources(m: Message): string {
  */
 export function withAttachments(content: string, attachments: Attachment[]): string {
   if (attachments.length === 0) return content;
-  const one = attachments.length === 1;
-  const list = attachments.map((a) => `- ${a.path}`).join('\n');
-  return `${content}\n\n[The user attached ${one ? 'a file' : `${attachments.length} files`}. Read ${one ? 'it' : 'them'} with the Read tool before answering:\n${list}]`;
+  const folders = attachments.filter((a) => a.kind === 'folder');
+  const list = attachments
+    .map((a) => (a.kind === 'folder' ? `- ${a.path} (folder, ${a.fileCount ?? 'several'} files)` : `- ${a.path}`))
+    .join('\n');
+  const how = folders.length
+    ? 'Read files with the Read tool; for folders, list their contents with Glob and read the files relevant to the question'
+    : `Read ${attachments.length === 1 ? 'it' : 'them'} with the Read tool`;
+  const what = attachments.length === 1 ? (folders.length ? 'a folder' : 'a file') : `${attachments.length} attachments`;
+  return `${content}\n\n[The user attached ${what}. ${how} before answering:\n${list}]`;
 }
 
 export function segmentTurns(seg: Segment): ChatTurn[] {

@@ -1,16 +1,27 @@
-import { LoaderIcon, PaperclipIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
+import { FolderIcon, LoaderIcon, PaperclipIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
 import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-/** A file on a message, or one waiting to be sent (uploading, ready, or failed with a reason). */
-export function AttachmentChip({ name, size, status = 'ready', error, onRemove }: {
+/** A file or folder on a message, or one waiting to be sent (uploading, ready, or failed with a reason). */
+export function AttachmentChip({ name, size, kind = 'file', fileCount, status = 'ready', error, onRemove }: {
   name: string
   size: number
+  kind?: 'file' | 'folder'
+  fileCount?: number
   status?: 'uploading' | 'ready' | 'error'
   error?: string
   onRemove?: () => void
 }) {
-  const Icon = status === 'uploading' ? LoaderIcon : status === 'error' ? TriangleAlertIcon : PaperclipIcon
+  const Icon =
+    status === 'uploading' ? LoaderIcon
+    : status === 'error' ? TriangleAlertIcon
+    : kind === 'folder' ? FolderIcon
+    : PaperclipIcon
+  const details =
+    status === 'error' ? 'failed'
+    : kind === 'folder' ? `${fileCount ?? 0} ${fileCount === 1 ? 'file' : 'files'} · ${formatBytes(size)}`
+    : formatBytes(size)
+
   return (
     <span
       title={error ?? name}
@@ -20,8 +31,8 @@ export function AttachmentChip({ name, size, status = 'ready', error, onRemove }
       )}
     >
       <Icon className={cn('size-3.5 shrink-0', status === 'uploading' && 'animate-spin')} aria-hidden="true" />
-      <span className="min-w-0 truncate font-medium">{name}</span>
-      <span className="shrink-0 text-muted-foreground">{status === 'error' ? 'failed' : formatBytes(size)}</span>
+      <span className="min-w-0 truncate font-medium">{kind === 'folder' ? `${name}/` : name}</span>
+      <span className="shrink-0 text-muted-foreground">{details}</span>
       {onRemove && (
         <button
           type="button"

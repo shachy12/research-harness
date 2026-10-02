@@ -12,6 +12,8 @@ export const attachmentSchema = z.object({
   name: z.string().min(1),
   path: z.string().min(1),
   size: z.number().int().nonnegative(),
+  kind: z.enum(['file', 'folder']).optional(),
+  fileCount: z.number().int().nonnegative().optional(),
 });
 
 export const sendMessageSchema = z.object({
@@ -22,6 +24,15 @@ export const sendMessageSchema = z.object({
 
 /** Largest file accepted by the upload endpoint. */
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/** Limits for one uploaded folder. */
+export const MAX_FOLDER_BYTES = 200 * 1024 * 1024;
+export const MAX_FOLDER_FILES = 2000;
+
+/** Folder and file names skipped when uploading a folder (version control, dependencies, OS clutter). */
+export function isSkippedUploadName(name: string): boolean {
+  return name.startsWith('.') || name === 'node_modules' || name === '__MACOSX' || name === 'Thumbs.db';
+}
 
 export const renameNodeSchema = z.object({
   title: z.string().trim().min(1).max(200),

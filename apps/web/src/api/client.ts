@@ -40,6 +40,26 @@ export function streamChat(
   )
 }
 
+/** Upload a folder (all its files, with paths relative to it) in one request. */
+export async function uploadFolder(
+  projectId: string,
+  name: string,
+  files: { path: string; file: File }[],
+): Promise<Attachment> {
+  const form = new FormData()
+  form.append('name', name)
+  for (const { path, file } of files) {
+    form.append('path', path)
+    form.append('file', file)
+  }
+  const res = await fetch(`/api/projects/${projectId}/uploads/folder`, { method: 'POST', body: form })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as ApiError | null
+    throw new Error(data?.error ?? `Upload failed (${res.status})`)
+  }
+  return (await res.json()) as Attachment
+}
+
 /** Upload a file into the project's `.harness/uploads/`; attach the result to a message. */
 export async function uploadFile(projectId: string, file: File): Promise<Attachment> {
   const form = new FormData()

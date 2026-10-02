@@ -28,7 +28,7 @@ export function InheritedContext({ items }: { items: ContextItem[] }) {
               {item.message.attachments.length > 0 && (
                 <p className="flex items-center gap-1 text-muted-foreground">
                   <PaperclipIcon className="size-3" aria-hidden="true" />
-                  {item.message.attachments.map((a) => a.name).join(', ')}
+                  {item.message.attachments.map((a) => (a.kind === 'folder' ? `${a.name}/` : a.name)).join(', ')}
                 </p>
               )}
             </div>
