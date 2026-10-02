@@ -20,7 +20,7 @@ The user works on two papers that sometimes connect. A finished node's result in
 
 ## 5. Let the agent fork (via an MCP tool)
 When a reply lists several directions ("1. … 2. … 3. …"), the user wants to say "fork for each of these" and have the agent create the branches, instead of typing them into the fork dialog.
-- **Mechanism:** the harness exposes its own MCP server with a tool like `fork_branches({ branches: [{ prompt }] })` (later maybe `list_branches`, `read_result`). The agent calls it from inside a node; the harness forks *that* node.
+- **Mechanism:** the harness exposes its own MCP server with a tool like `fork_branches({ branches: [{ prompt }] })` (later maybe `list_branches`, `read_result`, and `ask_node` from item 13). The agent calls it from inside a node; the harness forks *that* node.
   - **Claude Code:** pass the server with `--mcp-config` (keep `--strict-mcp-config` so the user's own MCP servers stay out) and pre-approve only `mcp__harness__fork_branches`. Simplest transport: an HTTP MCP endpoint on our Hono server (`/mcp`), with the node id in the URL or a header so the tool knows which node is calling.
   - **API provider:** the same tool as a regular custom tool in the request, handled by our server in the reply loop.
 - **Timing:** the tool is called while the parent's reply is still running, but a fork freezes the parent and the branches should inherit the *whole* reply (including the list). So the call records the requested branches, and the harness creates and starts them right after the parent's reply finishes. The tool result tells the agent "N branches will start when this reply ends".
@@ -57,6 +57,32 @@ The code is mostly portable already (Node, `node:sqlite`, paths via `node:path`,
 - **Electron packaging (roadmap step 3):** electron-builder targets `dmg` (+ code signing and notarization for macOS, needs an Apple Developer account), `AppImage`/`deb` for Linux, NSIS for Windows. Check `node:sqlite` in Electron's Node on each.
 - **Folder dialog:** "Browse…" in the new-project dialog uses `osascript` on macOS and zenity/kdialog on Linux (`system/folder-picker.ts`); untested there.
 - **Data folder:** use the OS's app-data location in the packaged app (`app.getPath('userData')`: `~/Library/Application Support/…`, `~/.config/…`, `%APPDATA%\…`) instead of the repo's `data/`; the dev setup keeps `data/`.
+
+## 13. Keep the in-between context in cross-level merges
+A merged node starts from the merge base (the lowest common ancestor) plus the merged branches' results (see "What a merged node starts from" in CLAUDE.md). When the merged branches sit at different depths, the conversation of the nodes between the base and a branch is dropped. Example: `Root → {A → {A1, A2}, B}`; merging A1 + B uses base Root, so A's own messages are not in the merged node, only A1's result (written with A in view).
+- **Chosen direction: keep the merge as it is, and let the model ask the skipped nodes.** The merged node still starts from the base + the results (the nested trick stays, so prompts stay small and the base's cache is reused). Its merge message also lists the nodes on the way from the base to each merged branch, with their ids and titles, e.g. "A1's result was written in the context of node A (`<id>`, "Survey of ISD attacks"); ask it with `ask_node` if you need its details." The model can then fetch more context only when it needs it.
+- **Mechanism:** a tool on the harness MCP server from item 5, e.g. `ask_node({ nodeId, question })`, answering from that node's full context.
+  - **Claude Code:** answer with a one-shot run on a fork of that node's session (`--resume <node session> --fork-session --no-session-persistence`, like result drafts), so the node itself is never changed and its cache is reused. With no session, replay its context as a transcript (as `planSession` does).
+  - **API provider:** the same tool as a custom tool; the server builds that node's prompt (`buildChatRequest`) and asks the question.
+  - Maybe also `read_node({ nodeId })`, returning the node's result or transcript as text without a model call (cheaper, but long).
+- **Node ids, not session ids, in the prompt:** the harness maps a node id to its session. Session ids belong to Claude Code, can be cleared (migration 4 did), and don't exist for the API provider. The tool only accepts nodes of the same project that are ancestors of (or merged into) the asking node, so the model can't wander into unrelated branches.
+- **GUI:** show `ask_node` calls as tool rows in the chat ("Asked A: …"), with the answer collapsible, like web searches.
+- **Not chosen (for now):** pasting summaries of the intermediate nodes into the merge up front. That costs a model call per node at every merge even when unused, and frozen nodes have no result to reuse.
+- **Depends on** item 5's harness MCP server (`--mcp-config` + `--strict-mcp-config`, pre-approve only the harness tools).
+
+## 13. Supported Claude Code versions, and telling the user when theirs isn't
+The Claude Code provider depends on details a CLI update can change without notice: flags (`--input-format stream-json`, `--include-partial-messages`, `--fork-session`, `--json-schema`, `--system-prompt`, `--setting-sources ''`, `--strict-mcp-config`, `--tools`), the stream-json event shapes (`system:init` with `session_id`, `stream_event` deltas, `tool_use`/`tool_result`, `rate_limit_event`, `result` with `structured_output`), and the text format of WebSearch results (`Links: [...]`). Today a breaking update would show up as odd failures mid-research.
+- **Define the range:** one constant in `llm/claude-code.ts`, e.g. `{ minimum: '2.1.287', testedUpTo: '2.1.287' }`.
+  - Below `minimum`: **unsupported**. Don't start replies; say "Claude Code 2.0.x is too old for Harness; update it (`npm install -g @anthropic-ai/claude-code`, then run `node install.cjs` in the package folder on Windows)".
+  - Between: fine.
+  - Above `testedUpTo`: **untested**. Keep working, but show a quiet notice ("Claude Code 2.2.0 is newer than Harness was tested with; tell Claude if something breaks").
+- **Detect the version:** run `claude --version` at server start and again when a node's process starts, cached for an hour (the CLI can update itself while the server runs). Also check whether the `system:init` event reports the version (not seen in 2.1.287's strings); if it does, compare on every run for free.
+- **Check the flags, not just the number (free, no credit):** parse `claude --help` once per version and confirm every flag we pass exists. A missing flag means unsupported, whatever the number says.
+- **Catch breakage at runtime:** treat "unknown option"/"unexpected argument" errors, an `init` without `session_id`, or a result draft without `structured_output` as a new error kind `version` ("Claude Code changed in a way Harness doesn't handle yet (version X)"), not a generic failure.
+- **Where the user sees it:** the header's model chip shows the version ("claude-code 2.1.287"), with a warning style when untested or unsupported. A banner like the usage one on the graph and in chats explains it. `/api/health` returns `{ version, support: 'ok' | 'untested' | 'unsupported' }`.
+- **Option: pin a version.** Install Claude Code as an exact-version dependency of the server instead of using the global install, so updates happen only when we bump it (`findClaudeExecutable` prefers the local copy). Setting `DISABLE_AUTOUPDATER=1` (the CLI knows this variable) for our runs avoids self-updates mid-run. npm 12 blocks the package's install script, so the setup must run `install.cjs` itself.
+- **Raising `testedUpTo`:** an opt-in live check (`npm run check:claude`) that runs the real CLI once per feature (stream a short reply, fork a session, a result draft with `--json-schema`, a web search) for a few cents of credit, then compares the events with what `fake-claude.mjs` sends. Save the real output as fixtures per version, so the fake CLI stays faithful.
+- **API provider too, briefly:** the SDK is pinned by `package-lock.json`, but model ids and beta headers (`server-side-fallback-2026-07-01`, the web tool versions) get retired. Classify "unknown beta"/"model not found" errors with a message that names what to update.
 
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:
