@@ -30,3 +30,12 @@ The user works on two papers that sometimes connect. A finished node's result in
 - **Merge base:** an imported node has no ancestors in the target project, so the lowest-common-ancestor rule would find no base. Compute the base from the target project's own branches and ignore imported nodes, so the merged node keeps its project's context and adds the imported result.
 - **Files:** Claude can only read inside the target project's folder, so an import carries the result text only. Optionally copy the source branch's attachments into the target's `.harness/uploads/`.
 - **GUI:** an "Import result from another project…" action (or a cross-project picker); imported nodes get a distinct badge and show the source project name, linking to the source node.
+
+## 5. Let the agent fork (via an MCP tool)
+When a reply lists several directions ("1. … 2. … 3. …"), the user wants to say "fork for each of these" and have the agent create the branches, instead of typing them into the fork dialog.
+- **Mechanism:** the harness exposes its own MCP server with a tool like `fork_branches({ branches: [{ prompt }] })` (later maybe `list_branches`, `read_result`). The agent calls it from inside a node; the harness forks *that* node.
+  - **Claude Code:** pass the server with `--mcp-config` (keep `--strict-mcp-config` so the user's own MCP servers stay out) and pre-approve only `mcp__harness__fork_branches`. Simplest transport: an HTTP MCP endpoint on our Hono server (`/mcp`), with the node id in the URL or a header so the tool knows which node is calling.
+  - **API provider:** the same tool as a regular custom tool in the request, handled by our server in the reply loop.
+- **Timing:** the tool is called while the parent's reply is still running, but a fork freezes the parent and the branches should inherit the *whole* reply (including the list). So the call records the requested branches, and the harness creates and starts them right after the parent's reply finishes. The tool result tells the agent "N branches will start when this reply ends".
+- **Confirmation (recommended default):** show the agent's proposed branches in the fork dialog, pre-filled, for the user to edit, add files to (see item 2) or confirm, instead of starting them silently. A setting could allow auto-start later.
+- **Simpler first step (no MCP):** a "Fork from this list" button on a reply that has a list, which opens the fork dialog pre-filled with one branch per list item. Covers most of the need and also works for replies that already exist.
