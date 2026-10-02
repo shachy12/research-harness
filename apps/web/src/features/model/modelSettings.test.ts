@@ -13,7 +13,7 @@ const api: ModelsResponse = {
   defaultEffort: 'high',
   forkKeepsCache: true,
 }
-const cc: ModelsResponse = { ...api, provider: 'claude-code', forkKeepsCache: false }
+const cc: ModelsResponse = { ...api, provider: 'claude-code' }
 const none = { model: null, effort: null }
 
 describe('model settings', () => {

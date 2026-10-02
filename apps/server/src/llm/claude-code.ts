@@ -65,10 +65,18 @@ const TOOL_NAMES: Record<string, string> = {
  * server is started from inside Claude Code and change how the CLI behaves; with them, no run
  * reused the prompt cache of another (measured 2026-10-02). CLAUDE_CONFIG_DIR and a login token
  * the user set on purpose are kept.
+ *
+ * CLAUDE_CODE_TETHER_LIVE=false turns off the CLI's "tether" (server-side Message Threads, beta
+ * message-threads-2026-08-12), which Anthropic enables remotely per account and model. With it,
+ * each CLI process gets its own thread and the cache doesn't carry over: on Sonnet 5.5 a fork or
+ * resume read only the system prompt from the cache (measured 2026-10-02, CLI 2.1.287; Opus 5.5
+ * wasn't enrolled then). The variable is internal and undocumented; `check:cache` notices if it
+ * stops working.
  */
 export function cliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const keep = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN']);
-  return Object.fromEntries(Object.entries(env).filter(([key]) => !/^CLAUDE/i.test(key) || keep.has(key.toUpperCase())));
+  const kept = Object.entries(env).filter(([key]) => !/^CLAUDE/i.test(key) || keep.has(key.toUpperCase()));
+  return { ...Object.fromEntries(kept), CLAUDE_CODE_TETHER_LIVE: 'false' };
 }
 
 /** Locate the Claude Code CLI: HARNESS_CLAUDE_PATH, the npm global install on Windows, or `claude` on PATH. */
@@ -99,7 +107,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       models: known ? MODELS : [{ id: this.options.model, efforts: ALL_EFFORTS }, ...MODELS],
       defaultModel: this.options.model,
       defaultEffort: this.options.effort,
-      forkKeepsCache: false,
+      forkKeepsCache: true,
     };
   }
 

@@ -93,8 +93,8 @@ export interface ModelsResponse {
   defaultEffort: Effort;
   /**
    * Whether a branch's first reply can reuse its parent's prompt cache when both use the same
-   * model and effort. True on the API. False on Claude Code: a new or resumed CLI process doesn't
-   * reuse the cache of an earlier process (measured 2026-10-02), so a fork re-reads its history anyway.
+   * model and effort. True on the API and on Claude Code (there since the CLI's Message Threads
+   * are turned off, see `cliEnv`; measured 2026-10-02).
    */
   forkKeepsCache: boolean;
 }

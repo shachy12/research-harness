@@ -111,7 +111,7 @@ describe('ClaudeCodeProvider', () => {
         Object.assign(process.env, saved);
       }
       const [start] = log() as { claudeEnv?: string[] }[];
-      expect(start.claudeEnv).toEqual([]);
+      expect(start.claudeEnv).toEqual(['CLAUDE_CODE_TETHER_LIVE']);
     });
 
     it('starts sibling branches with the same flags and session, so their prompts share a prefix', async () => {
@@ -133,7 +133,11 @@ describe('ClaudeCodeProvider', () => {
 
   it('runs the CLI without the variables a parent Claude Code session sets', () => {
     expect(cliEnv({ PATH: 'p', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', CLAUDE_EFFORT: 'medium', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k' }))
-      .toEqual({ PATH: 'p', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k' });
+      .toEqual({ PATH: 'p', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_TETHER_LIVE: 'false' });
+  });
+
+  it('turns off the CLI\'s Message Threads, which keep forks and resumes from reading the cache', () => {
+    expect(cliEnv({ CLAUDE_CODE_TETHER_LIVE: 'true' }).CLAUDE_CODE_TETHER_LIVE).toBe('false');
   });
 
   it('keeps one process per node across messages', async () => {

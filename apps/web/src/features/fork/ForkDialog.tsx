@@ -264,7 +264,7 @@ function BranchField({ index, projectId, branch, prompt, catalog, parentSettings
           idPrefix={id}
         />
       )}
-      {/* On Claude Code every branch re-reads its context once anyway (a new CLI process), so there is nothing to warn about. */}
+      {/* Only where a branch with its parent's setting would read the cache (see forkKeepsCache). */}
       {catalog?.forkKeepsCache && changesCache(parentSettings, branch.settings, catalog) && (
         <span role="status" className="text-xs text-merge">
           A different model or effort than its parent: its first reply reads the ~{formatTokens(contextTokens)} tokens of context without the prompt cache.

@@ -5,9 +5,10 @@
  * Uses a little of your Claude usage limit (a few short replies over a ~15K-token conversation,
  * on Haiku by default), so it is not part of `npm test`. Run it after updating Claude Code or
  * changing how the provider starts the CLI. Exits with code 1 if a required check fails, 2 if it
- * stopped early (e.g. at the usage limit). Results so far (CLI 2.1.287, 2026-10-02): everything
- * passes on Haiku 4.5; on Sonnet 5.5 a fork reuses only the system prompt from the cache, not the
- * conversation (IMPROVEMENTS.md item 14).
+ * stopped early (e.g. at the usage limit). Results so far (CLI 2.1.287, 2026-10-02): the
+ * required checks pass on Haiku 4.5, Sonnet 5.5 and Opus 5.5. Without CLAUDE_CODE_TETHER_LIVE=false
+ * (see `cliEnv`), Sonnet 5.5's forks and resumes read only the system prompt from the cache; if
+ * these fail again, check whether that variable still exists in the CLI.
  *
  * It goes through ClaudeCodeProvider itself, with CLAUDE* variables set as if started from inside
  * Claude Code (they broke caching before; the provider must remove them).
@@ -75,18 +76,18 @@ const b = await reply('branch-b', 'Which shelf holds item 140?', forkOf(first.se
 check(true, 'second sibling branch (started after the first)', b.usage.cacheRead >= 0.8 * parentSize, b.usage);
 void a;
 
-// 3. Sibling branches started at the same moment, as the fork dialog does: neither can read the
-//    other's cache yet. Reported, not required (see IMPROVEMENTS.md item 14).
+// 3. Sibling branches started at the same moment, as the fork dialog does: both read the
+//    parent's cache.
 const [c, d] = await Promise.all([
   reply('branch-c', 'Which shelf holds item 210?', forkOf(first.sessionId, 'Shelf of item 210')),
   reply('branch-d', 'Which shelf holds item 280?', forkOf(first.sessionId, 'Shelf of item 280')),
 ]);
-check(false, 'sibling branches started together (first)', c.usage.cacheRead >= 0.8 * parentSize, c.usage);
-check(false, 'sibling branches started together (second)', d.usage.cacheRead >= 0.8 * parentSize, d.usage);
+check(true, 'sibling branches started together (first)', c.usage.cacheRead >= 0.8 * parentSize, c.usage);
+check(true, 'sibling branches started together (second)', d.usage.cacheRead >= 0.8 * parentSize, d.usage);
 
-// 4. Resuming the parent in a new process (after an idle stop). Known to miss on CLI 2.1.287.
+// 4. Resuming the parent in a new process (after an idle stop or Stop).
 const resumed = await reply('parent', 'Say OK again.', { mode: 'resume', sessionId: first.sessionId, preamble: null, transcript: [] });
-check(false, 'parent resumed in a new process', resumed.usage.cacheRead >= 0.8 * parentSize, resumed.usage);
+check(true, 'parent resumed in a new process', resumed.usage.cacheRead >= 0.8 * parentSize, resumed.usage);
 
 provider.dispose();
 console.log(failed ? '\nA required check failed: branches no longer share the prompt cache.' : '\nRequired checks passed.');
