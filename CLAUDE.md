@@ -94,6 +94,8 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - `POST /nodes/:id/messages` starts a reply and streams it (`user`, then live events). `GET /nodes/:id/stream` attaches to a running reply (`snapshot` of the reply so far, then live events; `idle` if nothing runs). `POST /nodes/:id/stop` stops it. Disconnecting only stops watching.
 - `watchRun` subscribes synchronously when the request arrives (not inside the SSE callback), so a fast reply can't finish unseen.
 - `NodeSummary.running` / `lastRole` and `NodeDetail.running` drive the activity indicators; the chat page attaches automatically when it opens a running node.
+- `run: { startedAt, activity }` (from `RunManager.status`) shows progress: graph cards and the chat header show "Working · 1:42", cards show the current activity ("Searching the web: …", "Reading main.tex", "Thinking", "Writing"; wording from `toolActivity` in shared). Long research turns (several minutes on Opus) must visibly keep moving.
+- Attaching is an effect with a cleanup (`stream.attach()` returns the stop function; `useEffectEvent` reads the latest values). Don't guard it with an "already attached" ref: React's development double mount cancels the first watch, and a ref-guarded effect never reattaches (this left forked branches on "Waiting for the model…" — fixed 2026-10-02).
 
 ### Web implementation notes
 - Server data goes through TanStack Query hooks in `apps/web/src/api/queries.ts`; after any change `useRefreshAll()` refetches the graph and node details.
@@ -103,7 +105,7 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - The merge dialog sends the first message with the merge request; the server starts it, and the merged node's chat page attaches.
 - React runs effects twice in development: guard effects that trigger paid model calls with a ref (see `ResultDialog`).
 - Dark mode: `lib/theme.ts` toggles the `dark` class from the OS setting. Status colors are Tailwind tokens: `open`, `done`, `merge`, `frozen` (+ `-soft`), `canvas`, `edge`.
-- The browser-pane preview (`.claude/launch.json`) uses `HARNESS_DATA_DIR=data/preview` and the placeholder provider, so testing never touches the real data, uploads, or model credit. (Variables set by the launcher win over `.env`.)
+- The browser-pane preview (`.claude/launch.json`) runs on its own ports (web 5180, server 8790 via `HARNESS_WEB_PORT` / `HARNESS_SERVER_PORT`) next to the user's dev server, with `HARNESS_DATA_DIR=data/preview` and the placeholder provider slowed down (`HARNESS_PLACEHOLDER_DELAY_MS=120`, ~6–8 s replies) so long-reply states can be tested. Testing never touches the real data, uploads, or model credit. (Variables set by the launcher win over `.env`.) When the pane isn't drawing, read cards with `textContent`, not `innerText`.
 
 ## Commands (run from the repo root)
 - `npm run dev`: starts the server (http://localhost:8787) and the web UI (http://localhost:5173, which proxies `/api` to the server)

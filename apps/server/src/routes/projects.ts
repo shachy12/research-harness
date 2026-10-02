@@ -69,6 +69,7 @@ export function projectRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
           lastMessage: last?.content ?? null,
           lastRole: last?.role ?? null,
           running: runs.isRunning(node.id),
+          run: runs.status(node.id),
         };
       });
       return c.json<GraphResponse>({ project, nodes });

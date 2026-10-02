@@ -95,6 +95,14 @@ export interface NodeSummary extends DagNode {
   lastRole: Role | null;
   /** The model is writing a reply right now. */
   running: boolean;
+  /** When the running reply started and what it is doing; null when not running. */
+  run: RunStatus | null;
+}
+
+export interface RunStatus {
+  startedAt: string;
+  /** e.g. "Thinking", "Searching the web: …", "Reading main.tex", "Writing". */
+  activity: string;
 }
 
 export interface GraphResponse {
@@ -110,6 +118,7 @@ export interface NodeDetail {
   childIds: string[];
   /** The model is writing a reply right now (attach with GET /api/nodes/:id/stream). */
   running: boolean;
+  run: RunStatus | null;
 }
 
 /**
@@ -121,7 +130,7 @@ export interface NodeDetail {
  */
 export type ChatStreamEvent =
   | { type: 'user'; message: Message }
-  | { type: 'snapshot'; text: string; toolCalls: ToolCall[]; thinking: boolean }
+  | { type: 'snapshot'; text: string; toolCalls: ToolCall[]; thinking: boolean; startedAt: string }
   | { type: 'idle' }
   | { type: 'thinking' }
   | { type: 'delta'; text: string }

@@ -5,8 +5,14 @@
       "name": "dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 5173,
-      "env": { "HARNESS_DATA_DIR": "../../data/preview", "HARNESS_PROVIDER": "placeholder" }
+      "port": 5180,
+      "env": {
+        "HARNESS_WEB_PORT": "5180",
+        "HARNESS_SERVER_PORT": "8790",
+        "HARNESS_DATA_DIR": "../../data/preview",
+        "HARNESS_PROVIDER": "placeholder",
+        "HARNESS_PLACEHOLDER_DELAY_MS": "120"
+      }
     }
   ]
 }

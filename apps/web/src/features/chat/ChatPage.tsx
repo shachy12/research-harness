@@ -1,6 +1,6 @@
-import type { Attachment, DagNode, NodeDetail, NodeSummary } from '@harness/shared'
+import { type Attachment, type DagNode, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
 import { FolderIcon, PaperclipIcon } from 'lucide-react'
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useGraph, useNodeDetail } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
@@ -12,6 +12,7 @@ import { ResultBlock } from '@/features/result/ResultBlock'
 import { ResultDialog } from '@/features/result/ResultDialog'
 import { groupPickedFolder, readDrop } from '@/lib/dropped-files'
 import { contextTokens } from '@/lib/tokens'
+import { useNow } from '@/lib/useNow'
 import { AttachmentChip } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
 import { useAttachments } from './useAttachments'
@@ -90,27 +91,38 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const folderInput = useRef<HTMLInputElement>(null)
   const canWrite = node.status === 'open'
 
-  // How many saved messages there were when the current reply started. The streamed copies are
-  // shown until the saved messages (refetched after the reply) replace them, so nothing appears twice.
-  const [sentAt, setSentAt] = useState(-1)
+  // The streamed copies are shown until the refetched saved messages replace them, so nothing appears twice.
   const [sentFiles, setSentFiles] = useState<Attachment[]>([])
   const send = (text: string, attachments: Attachment[] = []) => {
-    setSentAt(messages.length)
     setSentFiles(attachments)
-    void stream.send(text, attachments)
+    void stream.send(text, attachments, messages.length)
   }
-  const showStreamed = stream.active && messages.length === sentAt
+  const showStreamed = stream.active && messages.length === stream.baseline
 
-  // The node may already be working (a branch started by fork, a merge, or a reply sent earlier):
-  // attach to it once when the page opens.
-  const attached = useRef(false)
-  const { watch } = stream
+  // Progress while working: what the model is doing right now, and for how long.
+  const working = stream.active || detail.running
+  const now = useNow(working)
+  const startedAt = stream.startedAt ?? detail.run?.startedAt
+  const elapsed = working && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
+  const runningTool = stream.toolCalls.findLast((c) => c.status === 'running')
+  const currentActivity = runningTool
+    ? toolActivity(runningTool)
+    : stream.thinking || stream.toolCalls.length > 0
+      ? 'Thinking'
+      : 'Starting Claude'
+
+  // The node may already be working (a branch started by fork, a merge, or a reply sent from
+  // another page): watch it while it runs. The cleanup stops watching, so React's double mount in
+  // development (and leaving the page) can't leave a dead watch behind. Not while sending: the
+  // send already streams the reply.
+  const startWatching = useEffectEvent(() => {
+    if (stream.userText !== null) return undefined
+    return stream.attach(messages.length)
+  })
   useEffect(() => {
-    if (!detail.running || attached.current) return
-    attached.current = true
-    setSentAt(messages.length)
-    void watch()
-  }, [detail.running, messages.length, watch])
+    if (!detail.running) return
+    return startWatching()
+  }, [detail.running])
 
   // Keep the newest content in view.
   useLayoutEffect(() => {
@@ -165,6 +177,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             <StatusChip
               status={node.status}
               activity={activityOf(node.status, stream.active || detail.running, messages.at(-1)?.role ?? null)}
+              elapsed={elapsed}
             />
             {node.parentIds.length > 1 && <MergeChip />}
           </div>
@@ -187,12 +200,10 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             <MessageView role="assistant" text={stream.replyText} toolCalls={stream.toolCalls} streaming />
           )}
           {showStreamed && !stream.replyText && (
-            <p className="animate-pulse text-sm text-muted-foreground">
-              {stream.toolCalls.some((c) => c.status === 'running')
-                ? 'Researching…'
-                : stream.thinking || stream.toolCalls.length > 0
-                  ? 'Thinking…'
-                  : 'Waiting for the model…'}
+            <p className="flex items-center gap-2 text-sm text-muted-foreground tabular-nums">
+              <span className="size-2 shrink-0 animate-pulse rounded-full bg-open" aria-hidden="true" />
+              <span className="min-w-0 truncate">{currentActivity}…</span>
+              {elapsed && <span className="shrink-0">· {elapsed}</span>}
             </p>
           )}
           {stream.error && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{stream.error}</p>}

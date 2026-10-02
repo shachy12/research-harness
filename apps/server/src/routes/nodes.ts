@@ -80,6 +80,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
         inherited: inheritedItems(graph, node.id),
         childIds: graph.children(node.id).map((n) => n.id),
         running: runs.isRunning(node.id),
+        run: runs.status(node.id),
       });
     })
 

@@ -171,7 +171,8 @@ describe('API', () => {
 
     expect((await detail(rootId)).running).toBe(true);
     const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
-    expect(graph.nodes[0]).toMatchObject({ running: true, lastRole: 'user' });
+    expect(graph.nodes[0]).toMatchObject({ running: true, lastRole: 'user', run: { activity: 'Writing' } });
+    expect(Date.parse(graph.nodes[0].run!.startedAt)).toBeLessThanOrEqual(Date.now());
     expect((await call('POST', `/nodes/${rootId}/messages`, { content: 'another' })).status).toBe(409);
 
     // A second page attaches: it gets a snapshot of the reply so far, then the rest.
@@ -180,7 +181,8 @@ describe('API', () => {
     llm.release();
 
     const watched = parseEvents(await watching);
-    expect(watched[0]).toEqual({ type: 'snapshot', text: 'Hello ', toolCalls: [], thinking: false });
+    expect(watched[0]).toMatchObject({ type: 'snapshot', text: 'Hello ', toolCalls: [], thinking: false });
+    expect(watched[0]).toHaveProperty('startedAt');
     expect(watched.at(-1)).toMatchObject({ type: 'done', message: { content: 'Hello there' } });
     expect((await sending).at(-1)?.type).toBe('done');
 
@@ -193,6 +195,7 @@ describe('API', () => {
     await call('POST', `/nodes/${rootId}/stop`);
     expect((await stopped).at(-1)).toMatchObject({ type: 'done', message: { content: 'Hello ' } });
     expect((await detail(rootId)).running).toBe(false);
+    expect((await detail(rootId)).run).toBeNull();
   });
 
   it('fork names each branch after its prompt and starts it working', async () => {

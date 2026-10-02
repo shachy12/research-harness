@@ -10,17 +10,21 @@ const STATUS: Record<NodeStatus, { icon: string; label: string; className: strin
 }
 
 const ACTIVITY: Record<Activity, { label: string; className: string }> = {
-  working: { label: 'Working…', className: 'bg-open-soft text-open' },
+  working: { label: 'Working…', className: 'bg-open-soft text-open tabular-nums' },
   yours: { label: '● Your turn', className: 'bg-merge-soft text-merge' },
   failed: { label: '! No reply', className: 'bg-destructive/10 text-destructive' },
 }
 
 const chip = 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap'
 
-/** An open node shows what it's waiting for; forked and finished nodes show their status. */
-export function StatusChip({ status, activity = null, className }: {
+/**
+ * An open node shows what it's waiting for; forked and finished nodes show their status.
+ * `elapsed` (e.g. "1:42") is shown while working, so a long research turn visibly keeps going.
+ */
+export function StatusChip({ status, activity = null, elapsed, className }: {
   status: NodeStatus
   activity?: Activity | null
+  elapsed?: string
   className?: string
 }) {
   if (activity) {
@@ -28,7 +32,7 @@ export function StatusChip({ status, activity = null, className }: {
     return (
       <span className={cn(chip, a.className, className)}>
         {activity === 'working' && <LoaderIcon className="size-3 animate-spin" aria-hidden="true" />}
-        {a.label}
+        {activity === 'working' && elapsed ? `Working · ${elapsed}` : a.label}
       </span>
     )
   }

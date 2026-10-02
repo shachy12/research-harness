@@ -1,4 +1,4 @@
-import type { Attachment, ChatStreamEvent, Message, ToolCall } from '@harness/shared';
+import { type Attachment, type ChatStreamEvent, type Message, type RunStatus, type ToolCall, toolActivity } from '@harness/shared';
 import { buildChatRequest, withAttachments } from './dag/prompt.ts';
 import { planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
@@ -10,12 +10,16 @@ type Listener = (event: ChatStreamEvent) => void;
 
 interface Run {
   nodeId: string;
+  startedAt: string;
+  /** What the model is doing right now, for the "Working" indicators. */
+  activity: string;
   text: string;
   toolCalls: Map<string, ToolCall>;
   thinking: boolean;
   listeners: Set<Listener>;
   abort: AbortController;
 }
+
 
 /**
  * Runs model replies on the server, one per node at a time, independent of any open page.
@@ -38,6 +42,12 @@ export class RunManager {
     return this.runs.has(nodeId);
   }
 
+  /** When the node's reply started and what it is doing, or null if nothing is running. */
+  status(nodeId: string): RunStatus | null {
+    const run = this.runs.get(nodeId);
+    return run ? { startedAt: run.startedAt, activity: run.activity } : null;
+  }
+
   /**
    * Save the user message and start the reply in the background. Returns the saved message.
    * Attachments must already be validated (`Workspaces.validate`).
@@ -58,6 +68,8 @@ export class RunManager {
 
     const run: Run = {
       nodeId,
+      startedAt: new Date().toISOString(),
+      activity: 'Starting',
       text: '',
       toolCalls: new Map(),
       thinking: false,
@@ -78,7 +90,13 @@ export class RunManager {
     const run = this.runs.get(nodeId);
     if (!run) return null;
     if (snapshot) {
-      listener({ type: 'snapshot', text: run.text, toolCalls: [...run.toolCalls.values()], thinking: run.thinking });
+      listener({
+        type: 'snapshot',
+        text: run.text,
+        toolCalls: [...run.toolCalls.values()],
+        thinking: run.thinking,
+        startedAt: run.startedAt,
+      });
     }
     run.listeners.add(listener);
     return () => run.listeners.delete(listener);
@@ -99,12 +117,15 @@ export class RunManager {
           this.repo.setSessionId(run.nodeId, event.sessionId);
         } else if (event.type === 'thinking') {
           run.thinking = true;
+          run.activity = 'Thinking';
           emit({ type: 'thinking' });
         } else if (event.type === 'tool') {
           run.toolCalls.set(event.call.id, event.call);
+          run.activity = event.call.status === 'running' ? toolActivity(event.call) : 'Thinking';
           emit({ type: 'tool', call: event.call });
         } else {
           run.thinking = false;
+          run.activity = 'Writing';
           run.text += event.text;
           emit({ type: 'delta', text: event.text });
         }

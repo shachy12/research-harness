@@ -1,7 +1,9 @@
 import type { NodeSummary } from '@harness/shared'
 import { Handle, type Node, type NodeProps, Position } from '@xyflow/react'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
+import { formatElapsed } from '@harness/shared'
 import { activityOf } from '@/lib/activity'
+import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
 import { CARD_HEIGHT, CARD_WIDTH } from './layout'
 
@@ -18,6 +20,8 @@ const hiddenHandle = '!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent'
 
 export function NodeCard({ data }: NodeProps<CardNode>) {
   const { summary: n, mergeSelected, shakeKey } = data
+  const now = useNow(n.running)
+  const elapsed = n.run ? formatElapsed(now - Date.parse(n.run.startedAt)) : undefined
 
   return (
     <div
@@ -32,7 +36,7 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
     >
       <Handle type="target" position={Position.Top} isConnectable={false} className={hiddenHandle} />
       <div className="flex items-center gap-1.5">
-        <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole)} />
+        <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole)} elapsed={elapsed} />
         {n.parentIds.length > 1 && <MergeChip />}
         <span className="ml-auto font-mono text-[11px] text-muted-foreground">{n.messageCount} msg</span>
       </div>
@@ -41,6 +45,8 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
         <div className="self-start rounded-full bg-merge-soft px-2 py-0.5 text-[11px] font-semibold text-merge">
           ⑃ Selected for merge
         </div>
+      ) : n.run ? (
+        <div className="line-clamp-2 text-xs text-open italic">{n.run.activity}…</div>
       ) : n.result ? (
         <div className="line-clamp-2 rounded-md bg-done-soft px-2 py-1 text-xs">
           <b className="text-done">Result:</b> {n.result.findings}

@@ -12,18 +12,27 @@ export interface StreamState {
   toolCalls: ToolCall[]
   /** The model is reasoning and hasn't produced text yet. */
   thinking: boolean
+  /** When the reply started (from the server when attaching; now when sending). */
+  startedAt: string | null
+  /**
+   * How many saved messages the page had when this reply started. The streamed copies are shown
+   * while the saved list still has that many; once the refetch adds the reply, they give way.
+   */
+  baseline: number
   active: boolean
   error: string | null
 }
 
-const IDLE: StreamState = { userText: null, replyText: '', toolCalls: [], thinking: false, active: false, error: null }
+const IDLE: StreamState = {
+  userText: null, replyText: '', toolCalls: [], thinking: false, startedAt: null, baseline: -1, active: false, error: null,
+}
 
 const upsert = (calls: ToolCall[], call: ToolCall) =>
   calls.some((c) => c.id === call.id) ? calls.map((c) => (c.id === call.id ? call : c)) : [...calls, call]
 
 /**
- * Shows one node's reply as it streams. Replies run on the server: `send` starts one, `watch`
- * attaches to one already running (e.g. a branch started by fork), `stop` ends it.
+ * Shows one node's reply as it streams. Replies run on the server: `send` starts one, `attach`
+ * watches one already running (e.g. a branch started by fork), `stop` ends it.
  * Leaving the page only stops watching.
  */
 export function useChatStream(nodeId: string) {
@@ -37,7 +46,9 @@ export function useChatStream(nodeId: string) {
   const onEvent = (event: ChatStreamEvent) => {
     switch (event.type) {
       case 'snapshot':
-        setState((s) => ({ ...s, replyText: event.text, toolCalls: event.toolCalls, thinking: event.thinking }))
+        setState((s) => ({
+          ...s, replyText: event.text, toolCalls: event.toolCalls, thinking: event.thinking, startedAt: event.startedAt,
+        }))
         break
       case 'thinking':
         setState((s) => ({ ...s, thinking: true }))
@@ -54,26 +65,37 @@ export function useChatStream(nodeId: string) {
     }
   }
 
-  const run = async (userText: string | null, start: (signal: AbortSignal) => Promise<void>) => {
+  /** Start watching (the previous watch, if any, is dropped). The controller is set synchronously. */
+  const run = async (userText: string | null, baseline: number, start: (signal: AbortSignal) => Promise<void>) => {
     abortRef.current?.abort()
     const abort = new AbortController()
     abortRef.current = abort
-    setState({ ...IDLE, userText, active: true })
+    setState({ ...IDLE, userText, baseline, startedAt: userText ? new Date().toISOString() : null, active: true })
     try {
       await start(abort.signal)
     } catch (err) {
-      if (abort.signal.aborted) return // the page closed; the reply goes on without us
+      if (abort.signal.aborted) return // this watch was dropped; the reply goes on without it
       setState((s) => ({ ...s, error: err instanceof Error ? err.message : 'Sending failed' }))
     }
+    if (abort.signal.aborted) return
     await refresh()
     setState((s) => ({ ...IDLE, error: s.error }))
   }
 
   return {
     ...state,
-    send: (content: string, attachments: Attachment[] = []) =>
-      run(content, (signal) => streamChat(nodeId, content, attachments, onEvent, signal)),
-    watch: () => run(null, (signal) => watchChat(nodeId, onEvent, signal)),
+    /** `messageCount`: saved messages before this one (see `baseline`). */
+    send: (content: string, attachments: Attachment[], messageCount: number) =>
+      run(content, messageCount, (signal) => streamChat(nodeId, content, attachments, onEvent, signal)),
+    /**
+     * Watch a reply that is already running. Returns a function that stops watching, for use as an
+     * effect cleanup (React may mount a page twice in development; each mount needs its own watch).
+     */
+    attach: (messageCount: number) => {
+      void run(null, messageCount, (signal) => watchChat(nodeId, onEvent, signal))
+      const mine = abortRef.current
+      return () => mine?.abort()
+    },
     stop: () => void stopReply(nodeId),
   }
 }

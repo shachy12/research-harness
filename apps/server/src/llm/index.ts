@@ -32,6 +32,6 @@ export function providerFromEnv(env: NodeJS.ProcessEnv = process.env): LLMProvid
     });
   }
 
-  if (choice === 'placeholder') return new PlaceholderProvider();
+  if (choice === 'placeholder') return new PlaceholderProvider(Number(env.HARNESS_PLACEHOLDER_DELAY_MS ?? 15));
   throw new Error(`Unknown HARNESS_PROVIDER "${choice}". Use claude-code, anthropic or placeholder.`);
 }

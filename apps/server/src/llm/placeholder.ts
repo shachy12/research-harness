@@ -10,13 +10,19 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export class PlaceholderProvider implements LLMProvider {
   readonly label = 'placeholder (no API key)';
+  private readonly wordDelayMs: number;
+
+  /** `wordDelayMs` slows the reply down, e.g. to test what the UI shows during a long reply. */
+  constructor(wordDelayMs = 15) {
+    this.wordDelayMs = wordDelayMs;
+  }
 
   async *streamReply({ request }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     const question = request.turns.at(-1)?.content ?? '';
     if (/search/i.test(question)) {
       const call = { id: `sample-${Date.now()}`, name: 'web_search', input: question.slice(0, 80), status: 'running' as const, results: [] };
       yield { type: 'tool', call };
-      await pause(600);
+      await pause(40 * this.wordDelayMs);
       yield {
         type: 'tool',
         call: { ...call, status: 'done', results: [{ title: 'Sample result (placeholder, not a real search)', url: 'https://example.com/' }] },
@@ -29,7 +35,7 @@ export class PlaceholderProvider implements LLMProvider {
       `To get real answers, set ANTHROPIC_API_KEY in the .env file at the repository root and restart the server.`;
     for (const word of text.split(/(?<= )/)) {
       if (signal.aborted) return;
-      await pause(15);
+      await pause(this.wordDelayMs);
       yield { type: 'text', text: word };
     }
   }
