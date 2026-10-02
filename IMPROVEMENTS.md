@@ -16,7 +16,7 @@ The fork dialog has one text field per branch; it should also take files/folders
 - **API:** `forkSchema` gets `branches: { prompt, attachments }[]` (or `attachments` alongside `prompts`); the fork route validates them with `Workspaces.validate` and passes them to `runs.start(child, prompt, attachments)`, which already supports attachments.
 
 ## 3. Stream the result draft live when finishing a branch
-*(Interpreted as the Finish-branch summary; confirm.)* "Finish branch" currently shows "Drafting the result…" until the whole draft arrives, which can take a while on Opus.
+When closing a branch (Finish branch), the result summary should be written live, like chat replies. Currently it shows "Drafting the result…" until the whole draft arrives, which can take a while on Opus.
 - Show the model writing the draft as it goes, like replies in the chat, then turn it into the editable form when done.
 - **Claude Code:** the draft is a one-shot `--json-schema` run; switch it to `--output-format stream-json --include-partial-messages` and stream the text (the structured result arrives at the end).
 - **API provider:** stream with the SDK instead of `messages.parse`, then parse the final JSON.
