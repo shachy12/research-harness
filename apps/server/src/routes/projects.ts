@@ -1,11 +1,26 @@
 import { zValidator } from '@hono/zod-validator';
-import { type GraphResponse, type NodeSummary, mergeSchema } from '@harness/shared';
+import { type GraphResponse, MAX_UPLOAD_BYTES, type NodeSummary, mergeSchema } from '@harness/shared';
 import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
-export function projectRoutes({ repo, llm, runs }: RouteDeps) {
+export function projectRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
   return new Hono()
+    // Upload a file (multipart field "file"). It is copied into the project's .harness/uploads/ and
+    // can then be attached to a message; the model reads it from there.
+    .post('/:projectId/uploads', async (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      const body = await c.req.parseBody();
+      const file = body.file;
+      if (!(file instanceof File)) throw new HttpError(400, 'Send the file in a form field named "file"');
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new HttpError(413, `"${file.name}" is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`);
+      }
+      const attachment = workspaces.saveUpload(project, file.name, new Uint8Array(await file.arrayBuffer()));
+      return c.json(attachment, 201);
+    })
+
     .get('/:projectId/graph', (c) => {
       const project = repo.getProject(c.req.param('projectId'));
       if (!project) throw notFound('Project');

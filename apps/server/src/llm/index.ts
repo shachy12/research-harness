@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { AnthropicProvider, type Effort } from './anthropic.ts';
 import { ClaudeCodeProvider, findClaudeExecutable } from './claude-code.ts';
 import { PlaceholderProvider } from './placeholder.ts';
@@ -14,15 +13,12 @@ const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
  *   HARNESS_PROVIDER=anthropic     the Claude API (needs ANTHROPIC_API_KEY)
  *   unset                          the API if a key is set, otherwise a placeholder
  */
-export function providerFromEnv(dataDir: string, env: NodeJS.ProcessEnv = process.env): LLMProvider {
+export function providerFromEnv(env: NodeJS.ProcessEnv = process.env): LLMProvider {
   const choice = env.HARNESS_PROVIDER ?? (env.ANTHROPIC_API_KEY ? 'anthropic' : 'placeholder');
 
   if (choice === 'claude-code') {
-    return new ClaudeCodeProvider({
-      command: findClaudeExecutable(env),
-      cwd: path.join(dataDir, 'claude-sessions'),
-      model: env.HARNESS_MODEL,
-    });
+    // Runs in each project's working folder (passed per call), so it can read the project's files.
+    return new ClaudeCodeProvider({ command: findClaudeExecutable(env), model: env.HARNESS_MODEL });
   }
 
   if (choice === 'anthropic') {

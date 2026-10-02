@@ -12,7 +12,7 @@ const log = (entry) => appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringif
 const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');
 
 if (flag('--input-format') === 'stream-json') {
-  log({ argv });
+  log({ argv, cwd: process.cwd() });
   createInterface({ input: process.stdin }).on('line', (line) => {
     const text = JSON.parse(line).message.content;
     log({ message: text });
@@ -31,6 +31,10 @@ if (flag('--input-format') === 'stream-json') {
           }],
         },
       });
+    }
+    if (text.includes('attached')) {
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { file_path: 'C:\\p\\.harness\\uploads\\paper.pdf' } }] } });
+      out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: [{ type: 'text', text: 'PDF content' }] }] } });
     }
     out({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'thinking' } } });
     out({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'text' } } });

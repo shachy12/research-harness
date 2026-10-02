@@ -1,4 +1,4 @@
-import type { ApiError, ChatStreamEvent } from '@harness/shared'
+import type { ApiError, Attachment, ChatStreamEvent } from '@harness/shared'
 
 async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -21,17 +21,35 @@ export const api = {
   patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),
 }
 
-/** Send a message and watch the reply as it streams in. */
-export function streamChat(nodeId: string, content: string, onEvent: (e: ChatStreamEvent) => void, signal: AbortSignal) {
+/** Send a message (with uploaded attachments) and watch the reply as it streams in. */
+export function streamChat(
+  nodeId: string,
+  content: string,
+  attachments: Attachment[],
+  onEvent: (e: ChatStreamEvent) => void,
+  signal: AbortSignal,
+) {
   return readEvents(
     fetch(`/api/nodes/${nodeId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, attachments }),
       signal,
     }),
     onEvent,
   )
+}
+
+/** Upload a file into the project's `.harness/uploads/`; attach the result to a message. */
+export async function uploadFile(projectId: string, file: File): Promise<Attachment> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/projects/${projectId}/uploads`, { method: 'POST', body: form })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as ApiError | null
+    throw new Error(data?.error ?? `Upload failed (${res.status})`)
+  }
+  return (await res.json()) as Attachment
 }
 
 /** Watch a reply that is already running on the server (starts with a `snapshot`, or `idle`). */

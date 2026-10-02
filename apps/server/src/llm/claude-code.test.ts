@@ -16,7 +16,7 @@ beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), 'harness-cc-'));
   logFile = path.join(dir, 'calls.jsonl');
   process.env.FAKE_CLAUDE_LOG = logFile;
-  provider = new ClaudeCodeProvider({ command: process.execPath, prefixArgs: [FAKE_CLI], cwd: dir });
+  provider = new ClaudeCodeProvider({ command: process.execPath, prefixArgs: [FAKE_CLI] });
 });
 
 afterEach(() => provider.dispose());
@@ -25,10 +25,11 @@ const log = () =>
   readFileSync(logFile, 'utf8')
     .trim()
     .split('\n')
-    .map((l) => JSON.parse(l) as { argv?: string[]; message?: string; prompt?: string });
+    .map((l) => JSON.parse(l) as { argv?: string[]; cwd?: string; message?: string; prompt?: string });
 
 const ctx = (message: string, session: SessionPlan, nodeId = 'n1'): ReplyContext => ({
   nodeId,
+  workDir: dir,
   message,
   session,
   request: { system: '', turns: [] },
@@ -51,6 +52,20 @@ describe('ClaudeCodeProvider', () => {
     expect(events[0]).toEqual({ type: 'session', sessionId: 'new-session' });
     expect(events).toContainEqual({ type: 'thinking' });
     expect(replyText(events)).toBe('echo: hello');
+  });
+
+  it("runs in the project's working folder; only web tools are pre-approved", async () => {
+    await collect(provider.streamReply(ctx('hello', NEW), new AbortController().signal));
+    const [start] = log();
+    expect(path.resolve(start.cwd!)).toBe(path.resolve(dir));
+    expect(start.argv).toEqual(expect.arrayContaining(['--tools', 'WebSearch,WebFetch,Read,Glob,Grep']));
+    expect(start.argv).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch']));
+  });
+
+  it('reports file reads as tool calls', async () => {
+    const events = await collect(provider.streamReply(ctx('see the attached paper', NEW), new AbortController().signal));
+    const calls = events.flatMap((e) => (e.type === 'tool' ? [e.call] : []));
+    expect(calls.at(-1)).toMatchObject({ name: 'read_file', input: 'C:\\p\\.harness\\uploads\\paper.pdf', status: 'done', results: [] });
   });
 
   it('keeps one process per node across messages', async () => {

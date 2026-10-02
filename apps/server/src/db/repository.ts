@@ -1,19 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { BranchResult, DagNode, Message, NodeStatus, Project, Role, ToolCall } from '@harness/shared';
+import type { Attachment, BranchResult, DagNode, Message, NodeStatus, Project, Role, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
-interface ProjectRow { id: string; name: string; created_at: string }
+interface ProjectRow { id: string; name: string; folder: string | null; created_at: string }
 interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
 }
 interface MessageRow {
-  id: string; node_id: string; role: Role; content: string; tool_calls: string; created_at: string;
+  id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string; created_at: string;
 }
 
-const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, createdAt: r.created_at });
+const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, folder: r.folder, createdAt: r.created_at });
 const toNode = (r: NodeRow): DagNode => ({
   id: r.id,
   projectId: r.project_id,
@@ -30,6 +30,7 @@ const toMessage = (r: MessageRow): Message => ({
   role: r.role,
   content: r.content,
   toolCalls: JSON.parse(r.tool_calls) as ToolCall[],
+  attachments: JSON.parse(r.attachments) as Attachment[],
   createdAt: r.created_at,
 });
 
@@ -113,11 +114,16 @@ export class Repository {
 
   // ---- messages ----
 
-  addMessage(nodeId: string, role: Role, content: string, toolCalls: ToolCall[] = []): Message {
+  addMessage(
+    nodeId: string,
+    role: Role,
+    content: string,
+    { toolCalls = [], attachments = [] }: { toolCalls?: ToolCall[]; attachments?: Attachment[] } = {},
+  ): Message {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO messages (id, node_id, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, nodeId, role, content, JSON.stringify(toolCalls), now());
+      .prepare('INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, nodeId, role, content, JSON.stringify(toolCalls), JSON.stringify(attachments), now());
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as unknown as MessageRow;
     return toMessage(row);
   }

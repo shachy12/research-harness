@@ -36,6 +36,14 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE messages ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]';`,
   // 3: Claude Code session id per node (claude-code provider)
   `ALTER TABLE nodes ADD COLUMN session_id TEXT;`,
+  // 4: per-project working folders and file attachments. Claude Code sessions are tied to the
+  // folder they were created in, and earlier ones used a shared folder, so they can't be resumed:
+  // clear them, and the next message replays the conversation as a transcript instead.
+  `
+  ALTER TABLE projects ADD COLUMN folder TEXT;
+  ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
+  UPDATE nodes SET session_id = NULL;
+  `,
 ];
 
 /** Open (or create) the database and bring its schema up to date. Pass ':memory:' for tests. */

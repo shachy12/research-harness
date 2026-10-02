@@ -1,9 +1,10 @@
-import type { ChatStreamEvent, Message, ToolCall } from '@harness/shared';
-import { buildChatRequest } from './dag/prompt.ts';
+import type { Attachment, ChatStreamEvent, Message, ToolCall } from '@harness/shared';
+import { buildChatRequest, withAttachments } from './dag/prompt.ts';
 import { planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
 import type { LLMProvider } from './llm/index.ts';
 import { conflict, notFound } from './routes/errors.ts';
+import type { Workspaces } from './workspace.ts';
 
 type Listener = (event: ChatStreamEvent) => void;
 
@@ -25,18 +26,23 @@ export class RunManager {
   private readonly runs = new Map<string, Run>();
   private readonly repo: Repository;
   private readonly llm: LLMProvider;
+  private readonly workspaces: Workspaces;
 
-  constructor(repo: Repository, llm: LLMProvider) {
+  constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces) {
     this.repo = repo;
     this.llm = llm;
+    this.workspaces = workspaces;
   }
 
   isRunning(nodeId: string): boolean {
     return this.runs.has(nodeId);
   }
 
-  /** Save the user message and start the reply in the background. Returns the saved message. */
-  start(nodeId: string, content: string): Message {
+  /**
+   * Save the user message and start the reply in the background. Returns the saved message.
+   * Attachments must already be validated (`Workspaces.validate`).
+   */
+  start(nodeId: string, content: string, attachments: Attachment[] = []): Message {
     const node = this.repo.getNode(nodeId);
     if (!node) throw notFound('Node');
     if (node.status === 'frozen') throw conflict('This node was forked, so it is frozen. Continue in one of its branches.');
@@ -45,8 +51,10 @@ export class RunManager {
 
     // Plan the provider session before saving the message (it depends on what the node had so far).
     const session = planSession(this.repo.snapshot(node.projectId), nodeId);
-    const userMessage = this.repo.addMessage(nodeId, 'user', content);
+    const workDir = this.workspaces.prepare(this.repo.getProject(node.projectId)!);
+    const userMessage = this.repo.addMessage(nodeId, 'user', content, { attachments });
     const request = buildChatRequest(this.repo.snapshot(node.projectId), nodeId);
+    const message = withAttachments(content, attachments);
 
     const run: Run = {
       nodeId,
@@ -57,7 +65,7 @@ export class RunManager {
       abort: new AbortController(),
     };
     this.runs.set(nodeId, run);
-    void this.execute(run, { nodeId, request, message: content, session });
+    void this.execute(run, { nodeId, workDir, request, message, session });
     return userMessage;
   }
 
@@ -113,7 +121,7 @@ export class RunManager {
     this.runs.delete(run.nodeId);
     const hasContent = run.text || run.toolCalls.size > 0;
     const saved = hasContent && this.repo.getNode(run.nodeId)
-      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, [...run.toolCalls.values()])
+      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()] })
       : null;
 
     if (failure) emit({ type: 'error', error: failure });

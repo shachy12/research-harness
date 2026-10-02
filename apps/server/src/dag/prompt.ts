@@ -1,4 +1,4 @@
-import type { Message } from '@harness/shared';
+import type { Attachment, Message } from '@harness/shared';
 import { type Segment, formatResult, fullSegments, inheritedSegments } from './context.ts';
 import type { GraphReader } from './graph.ts';
 
@@ -47,10 +47,25 @@ export function withSources(m: Message): string {
   return `${m.content}\n\n[Sources consulted for this reply:\n${list}]`;
 }
 
+/**
+ * Attached files are not inlined: the message tells the model where they are, and it reads them
+ * with its Read tool (Claude Code). Once read, the content is part of the session, so branches
+ * forked later inherit it.
+ */
+export function withAttachments(content: string, attachments: Attachment[]): string {
+  if (attachments.length === 0) return content;
+  const one = attachments.length === 1;
+  const list = attachments.map((a) => `- ${a.path}`).join('\n');
+  return `${content}\n\n[The user attached ${one ? 'a file' : `${attachments.length} files`}. Read ${one ? 'it' : 'them'} with the Read tool before answering:\n${list}]`;
+}
+
 export function segmentTurns(seg: Segment): ChatTurn[] {
   switch (seg.kind) {
     case 'messages':
-      return seg.messages.map((m) => ({ role: m.role, content: withSources(m) }));
+      return seg.messages.map((m) => ({
+        role: m.role,
+        content: m.role === 'user' ? withAttachments(m.content, m.attachments) : withSources(m),
+      }));
     case 'branch-start':
       return [{ role: 'user', content: branchStartNote(seg.node.title) }];
     case 'results':

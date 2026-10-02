@@ -5,10 +5,12 @@ import { HttpError } from './routes/errors.ts';
 import { nodeRoutes } from './routes/nodes.ts';
 import { projectRoutes } from './routes/projects.ts';
 import { RunManager } from './runs.ts';
+import type { Workspaces } from './workspace.ts';
 
 export interface AppDeps {
   repo: Repository;
   llm: LLMProvider;
+  workspaces: Workspaces;
 }
 
 export interface RouteDeps extends AppDeps {
@@ -17,7 +19,7 @@ export interface RouteDeps extends AppDeps {
 
 // Dependencies are passed in, so tests can use an in-memory database and a fake model.
 export function createApp(deps: AppDeps) {
-  const routeDeps: RouteDeps = { ...deps, runs: new RunManager(deps.repo, deps.llm) };
+  const routeDeps: RouteDeps = { ...deps, runs: new RunManager(deps.repo, deps.llm, deps.workspaces) };
   return new Hono()
     .basePath('/api')
     .onError((err, c) => {

@@ -16,9 +16,11 @@ export type ReplyEvent =
  */
 export interface ReplyContext {
   nodeId: string;
+  /** The project's working folder: session-based providers run there (and can read files only there). */
+  workDir: string;
   /** Full context as turns, ending with the new message (or the draft instruction). */
   request: ChatRequest;
-  /** Just the new user message (or the draft instruction). */
+  /** Just the new user message, including any attachment note (or the draft instruction). */
   message: string;
   session: SessionPlan;
 }

@@ -1,12 +1,14 @@
-import type { Role, ToolCall } from '@harness/shared'
+import type { Attachment, Role, ToolCall } from '@harness/shared'
 import { cn } from '@/lib/utils'
+import { AttachmentChip } from './AttachmentChip'
 import { Markdown } from './Markdown'
 import { ToolCalls } from './ToolCalls'
 
-export function MessageView({ role, text, toolCalls = [], streaming }: {
+export function MessageView({ role, text, toolCalls = [], attachments = [], streaming }: {
   role: Role
   text: string
   toolCalls?: ToolCall[]
+  attachments?: Attachment[]
   streaming?: boolean
 }) {
   return (
@@ -15,7 +17,14 @@ export function MessageView({ role, text, toolCalls = [], streaming }: {
         {role === 'user' ? 'You' : 'Assistant'}
       </div>
       {role === 'user' ? (
-        <div className="rounded-lg bg-open-soft px-3 py-2 break-words whitespace-pre-wrap">{text}</div>
+        <div className="flex flex-col gap-2 rounded-lg bg-open-soft px-3 py-2">
+          <div className="break-words whitespace-pre-wrap">{text}</div>
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {attachments.map((a) => <AttachmentChip key={a.path} name={a.name} size={a.size} />)}
+            </div>
+          )}
+        </div>
       ) : (
         <>
           <ToolCalls calls={toolCalls} />

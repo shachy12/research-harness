@@ -1,10 +1,14 @@
-import type { BranchResult, ChatStreamEvent, DagNode, GraphResponse, NodeDetail } from '@harness/shared';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import type { Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, NodeDetail } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.ts';
 import type { ChatRequest } from './dag/prompt.ts';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
 import type { LLMProvider, ReplyContext, ReplyEvent } from './llm/index.ts';
+import { Workspaces } from './workspace.ts';
 
 /**
  * Records the requests it receives and replies with fixed text.
@@ -19,7 +23,11 @@ class FakeProvider implements LLMProvider {
     this.gate?.();
   }
 
-  async *streamReply({ request, message }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  contexts: ReplyContext[] = [];
+
+  async *streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+    const { request, message } = ctx;
+    this.contexts.push(ctx);
     this.requests.push(request);
     yield { type: 'session', sessionId: 'session-1' };
     yield { type: 'thinking' };
@@ -90,13 +98,23 @@ async function fork(nodeId: string, prompts: string[]) {
   return data;
 }
 
+let workspaces: Workspaces;
+
 beforeEach(() => {
   const repo = new Repository(openDatabase(':memory:'));
   repo.createProject('default', 'Test', 'Main thread');
   llm = new FakeProvider();
-  app = createApp({ repo, llm });
+  workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), 'harness-app-')));
+  app = createApp({ repo, llm, workspaces });
   rootId = repo.listNodes('default')[0].id;
 });
+
+async function upload(name: string, text: string): Promise<{ status: number; data: Attachment }> {
+  const form = new FormData();
+  form.append('file', new File([text], name));
+  const res = await app.request('/api/projects/default/uploads', { method: 'POST', body: form });
+  return { status: res.status, data: (await res.json()) as Attachment };
+}
 
 describe('API', () => {
   it('reports health and the model label', async () => {
@@ -262,6 +280,47 @@ describe('API', () => {
     const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
     expect(graph.nodes.map((n) => [n.id, n.messageCount])).toEqual([[newRoot.id, 0]]);
     expect((await call('GET', `/nodes/${rootId}`)).status).toBe(404);
+  });
+
+  it("uploads files into the project's .harness/uploads and attaches them to a message", async () => {
+    const { status, data: paper } = await upload('paper.tex', '\\section{Intro}');
+    expect(status).toBe(201);
+    expect(paper.name).toBe('paper.tex');
+    expect(path.basename(path.dirname(paper.path))).toBe('uploads');
+    expect(readFileSync(paper.path, 'utf8')).toBe('\\section{Intro}');
+
+    const res = await app.request(`/api/nodes/${rootId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'Review my draft', attachments: [paper] }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // Saved with the message, and the model is told where to read it, running in the project folder.
+    const saved = (await detail(rootId)).messages[0];
+    expect(saved.attachments).toEqual([paper]);
+    const ctx = llm.contexts.at(-1)!;
+    expect(ctx.message).toContain('Review my draft');
+    expect(ctx.message).toContain(paper.path);
+    expect(path.resolve(paper.path).startsWith(path.resolve(ctx.workDir))).toBe(true);
+    expect(existsSync(path.join(ctx.workDir, '.harness', '.gitignore'))).toBe(true);
+    // Later prompts keep the note, so a replay (or another provider) still knows about the file.
+    expect(llm.requests.at(-1)!.turns[0].content).toContain(paper.path);
+  });
+
+  it('refuses attachments that are not uploads of this project', async () => {
+    const res = await call('POST', `/nodes/${rootId}/messages`, {
+      content: 'Read this',
+      attachments: [{ name: 'hosts', path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', size: 1 }],
+    });
+    expect(res.status).toBe(400);
+    expect((await detail(rootId)).messages).toHaveLength(0);
+  });
+
+  it('rejects an upload without a file', async () => {
+    const res = await app.request('/api/projects/default/uploads', { method: 'POST', body: new FormData() });
+    expect(res.status).toBe(400);
   });
 
   it('renames a node', async () => {

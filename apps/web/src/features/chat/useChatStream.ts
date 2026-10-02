@@ -1,4 +1,4 @@
-import type { ChatStreamEvent, ToolCall } from '@harness/shared'
+import type { Attachment, ChatStreamEvent, ToolCall } from '@harness/shared'
 import { useEffect, useRef, useState } from 'react'
 import { stopReply, streamChat, watchChat } from '@/api/client'
 import { useRefreshAll } from '@/api/queries'
@@ -71,7 +71,8 @@ export function useChatStream(nodeId: string) {
 
   return {
     ...state,
-    send: (content: string) => run(content, (signal) => streamChat(nodeId, content, onEvent, signal)),
+    send: (content: string, attachments: Attachment[] = []) =>
+      run(content, (signal) => streamChat(nodeId, content, attachments, onEvent, signal)),
     watch: () => run(null, (signal) => watchChat(nodeId, onEvent, signal)),
     stop: () => void stopReply(nodeId),
   }

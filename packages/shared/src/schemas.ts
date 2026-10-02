@@ -8,9 +8,20 @@ export const branchResultSchema = z.object({
   confidence: z.enum(['low', 'medium', 'high']),
 });
 
+export const attachmentSchema = z.object({
+  name: z.string().min(1),
+  path: z.string().min(1),
+  size: z.number().int().nonnegative(),
+});
+
 export const sendMessageSchema = z.object({
   content: z.string().trim().min(1, 'Message is empty'),
+  /** Files uploaded beforehand with POST /projects/:id/uploads. */
+  attachments: z.array(attachmentSchema).max(20).default([]),
 });
+
+/** Largest file accepted by the upload endpoint. */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 export const renameNodeSchema = z.object({
   title: z.string().trim().min(1).max(200),

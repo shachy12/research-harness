@@ -1,5 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { type BranchResult, type ToolCall, branchResultSchema } from '@harness/shared';
@@ -21,18 +21,26 @@ export interface ClaudeCodeOptions {
   command: string;
   /** Arguments placed before the CLI flags (tests run a fake CLI script through node). */
   prefixArgs?: string[];
-  /** Working directory; Claude Code keeps sessions per directory, so this keeps ours separate. */
-  cwd: string;
   model?: string;
   /** Stop a node's process after this long without messages. */
   idleMs?: number;
 }
 
-const RESEARCH_TOOLS = 'WebSearch,WebFetch';
+// Available tools. Only web search/fetch are pre-approved; Read/Glob/Grep work inside the working
+// folder by Claude Code's default permissions, and a read outside it is refused (no one is there to
+// approve it in -p mode). So the model can read the project's files and uploads, and nothing else.
+const TOOLS = 'WebSearch,WebFetch,Read,Glob,Grep';
+const PRE_APPROVED = 'WebSearch,WebFetch';
 
 // The CLI's schema validator rejects the `$schema` dialect line zod adds, so leave it out.
 const { $schema: _dialect, ...RESULT_JSON_SCHEMA } = z.toJSONSchema(branchResultSchema);
-const TOOL_NAMES: Record<string, string> = { WebSearch: 'web_search', WebFetch: 'web_fetch' };
+const TOOL_NAMES: Record<string, string> = {
+  WebSearch: 'web_search',
+  WebFetch: 'web_fetch',
+  Read: 'read_file',
+  Glob: 'find_files',
+  Grep: 'search_files',
+};
 
 /** Locate the Claude Code CLI: HARNESS_CLAUDE_PATH, the npm global install on Windows, or `claude` on PATH. */
 export function findClaudeExecutable(env: NodeJS.ProcessEnv = process.env): string {
@@ -52,14 +60,13 @@ export class ClaudeCodeProvider implements LLMProvider {
   constructor(options: ClaudeCodeOptions) {
     this.options = options;
     this.label = `claude-code:${options.model ?? 'account default'}`;
-    mkdirSync(options.cwd, { recursive: true });
   }
 
   async *streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     let proc = this.live.get(ctx.nodeId);
     let text = ctx.message;
     if (!proc) {
-      proc = this.startProcess(ctx.nodeId, ctx.session);
+      proc = this.startProcess(ctx.nodeId, ctx.session, ctx.workDir);
       // A resumed session already holds the context; otherwise send the preamble/transcript first.
       if (ctx.session.mode !== 'resume') text = firstMessage(ctx.session, ctx.message);
     }
@@ -87,7 +94,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       ...this.commonArgs(),
     ];
     const prompt = plan.mode === 'resume' ? ctx.message : firstMessage(plan, ctx.message);
-    const output = await runOnce(this.options, args, prompt, signal);
+    const output = await runOnce(this.options, ctx.workDir, args, prompt, signal);
 
     const parsed = JSON.parse(output) as { is_error?: boolean; result?: string; structured_output?: unknown };
     if (parsed.is_error) throw new Error(parsed.result || 'Claude Code could not draft the result.');
@@ -116,7 +123,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     ];
   }
 
-  private startProcess(nodeId: string, plan: SessionPlan): LiveProcess {
+  private startProcess(nodeId: string, plan: SessionPlan, workDir: string): LiveProcess {
     const args = [
       '-p',
       '--input-format', 'stream-json',
@@ -124,11 +131,11 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--verbose',
       '--include-partial-messages',
       ...sessionArgs(plan),
-      '--tools', RESEARCH_TOOLS,
-      '--allowedTools', RESEARCH_TOOLS,
+      '--tools', TOOLS,
+      '--allowedTools', PRE_APPROVED,
       ...this.commonArgs(),
     ];
-    const proc = new LiveProcess(this.options, args, () => {
+    const proc = new LiveProcess(this.options, workDir, args, () => {
       if (this.live.get(nodeId) === proc) this.live.delete(nodeId);
     });
     this.live.set(nodeId, proc);
@@ -160,10 +167,10 @@ class LiveProcess {
   private stderr = '';
   private exited = false;
 
-  constructor(options: ClaudeCodeOptions, args: string[], onExit: () => void) {
+  constructor(options: ClaudeCodeOptions, cwd: string, args: string[], onExit: () => void) {
     this.idleMs = options.idleMs ?? 10 * 60_000;
     this.child = spawn(options.command, [...(options.prefixArgs ?? []), ...args], {
-      cwd: options.cwd,
+      cwd,
       windowsHide: true,
     });
     this.child.stderr.on('data', (d: Buffer) => {
@@ -231,7 +238,7 @@ class LiveProcess {
 
 type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: { query?: string; url?: string } }
+  | { type: 'tool_use'; id: string; name: string; input: { query?: string; url?: string; file_path?: string; pattern?: string } }
   | { type: 'tool_result'; tool_use_id: string; is_error?: boolean; content: string | { type: string; text?: string }[] }
   | { type: string };
 
@@ -274,7 +281,7 @@ export function mapEvent(
         const call: ToolCall = {
           id: block.id,
           name: TOOL_NAMES[block.name],
-          input: block.input.query ?? block.input.url ?? '',
+          input: block.input.query ?? block.input.url ?? block.input.file_path ?? block.input.pattern ?? '',
           status: 'running',
           results: [],
         };
@@ -289,7 +296,10 @@ export function mapEvent(
           call.error = text.slice(0, 200);
         } else {
           call.status = 'done';
-          call.results = call.name === 'web_search' ? parseSearchLinks(text) : [{ title: call.input, url: call.input }];
+          call.results =
+            call.name === 'web_search' ? parseSearchLinks(text)
+            : call.name === 'web_fetch' ? [{ title: call.input, url: call.input }]
+            : []; // local file reads/searches: nothing to link to
         }
         out.push({ type: 'tool', call: { ...call } });
       }
@@ -319,10 +329,10 @@ export function parseSearchLinks(text: string): { title: string; url: string }[]
 }
 
 /** Run the CLI once with the prompt on stdin and return its stdout. */
-function runOnce(options: ClaudeCodeOptions, args: string[], prompt: string, signal: AbortSignal): Promise<string> {
+function runOnce(options: ClaudeCodeOptions, cwd: string, args: string[], prompt: string, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(options.command, [...(options.prefixArgs ?? []), ...args], {
-      cwd: options.cwd,
+      cwd,
       windowsHide: true,
     });
     let stdout = '';

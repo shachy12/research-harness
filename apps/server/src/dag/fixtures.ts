@@ -30,6 +30,7 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
         role: prefix === 'u' ? 'user' : 'assistant',
         content: rest.join(': '),
         toolCalls: [],
+        attachments: [],
         createdAt: '2026-01-01T00:00:00.000Z',
       });
     });

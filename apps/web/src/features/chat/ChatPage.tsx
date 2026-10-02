@@ -1,4 +1,5 @@
-import type { DagNode, NodeDetail, NodeSummary } from '@harness/shared'
+import type { Attachment, DagNode, NodeDetail, NodeSummary } from '@harness/shared'
+import { PaperclipIcon } from 'lucide-react'
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useGraph, useNodeDetail } from '@/api/queries'
@@ -10,7 +11,9 @@ import { ForkDialog } from '@/features/fork/ForkDialog'
 import { ResultBlock } from '@/features/result/ResultBlock'
 import { ResultDialog } from '@/features/result/ResultDialog'
 import { contextTokens } from '@/lib/tokens'
+import { AttachmentChip } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
+import { useAttachments } from './useAttachments'
 import { MessageView } from './MessageView'
 import { useChatStream } from './useChatStream'
 
@@ -77,15 +80,21 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
 function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: DialogKind) => void }) {
   const { node, messages, inherited, childIds } = detail
   const stream = useChatStream(node.id)
+  const files = useAttachments(node.projectId)
   const [draft, setDraft] = useState('')
+  const [dragging, setDragging] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const canWrite = node.status === 'open'
 
   // How many saved messages there were when the current reply started. The streamed copies are
   // shown until the saved messages (refetched after the reply) replace them, so nothing appears twice.
   const [sentAt, setSentAt] = useState(-1)
-  const send = (text: string) => {
+  const [sentFiles, setSentFiles] = useState<Attachment[]>([])
+  const send = (text: string, attachments: Attachment[] = []) => {
     setSentAt(messages.length)
-    void stream.send(text)
+    setSentFiles(attachments)
+    void stream.send(text, attachments)
   }
   const showStreamed = stream.active && messages.length === sentAt
 
@@ -107,16 +116,41 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
   const submit = () => {
     const text = draft.trim()
-    if (!text || stream.active) return
+    if (!text || stream.active || files.uploading) return
     setDraft('')
-    send(text)
+    send(text, files.ready)
+    files.clear()
   }
 
   const hasReply = messages.some((m) => m.role === 'assistant')
   const canFinish = node.status === 'open' && node.parentIds.length > 0
 
+  // Drop files anywhere on the chat to attach them to the next message.
+  const dropProps = canWrite
+    ? {
+        onDragOver: (e: React.DragEvent) => {
+          if (!e.dataTransfer.types.includes('Files')) return
+          e.preventDefault()
+          setDragging(true)
+        },
+        onDragLeave: (e: React.DragEvent) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false)
+        },
+        onDrop: (e: React.DragEvent) => {
+          e.preventDefault()
+          setDragging(false)
+          if (e.dataTransfer.files.length) files.add(e.dataTransfer.files)
+        },
+      }
+    : {}
+
   return (
-    <>
+    <div className="relative flex min-h-0 flex-1 flex-col" {...dropProps}>
+      {dragging && (
+        <div className="pointer-events-none absolute inset-2 z-10 grid place-items-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-primary">
+          Drop files to attach them to your next message
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5">
           <div className="flex flex-wrap items-center gap-2">
@@ -139,9 +173,9 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           )}
 
           {messages.map((m) => (
-            <MessageView key={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} />
+            <MessageView key={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
           ))}
-          {showStreamed && stream.userText && <MessageView role="user" text={stream.userText} />}
+          {showStreamed && stream.userText && <MessageView role="user" text={stream.userText} attachments={sentFiles} />}
           {showStreamed && (stream.replyText || stream.toolCalls.length > 0) && (
             <MessageView role="assistant" text={stream.replyText} toolCalls={stream.toolCalls} streaming />
           )}
@@ -163,14 +197,50 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
       <div className="border-t">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-4 py-3">
-          {node.status === 'open' ? (
+          {canWrite ? (
             <form
-              className="flex items-end gap-2"
+              className="flex flex-col gap-2"
               onSubmit={(e) => {
                 e.preventDefault()
                 submit()
               }}
             >
+              {files.files.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {files.files.map((f) => (
+                    <AttachmentChip
+                      key={f.key}
+                      name={f.name}
+                      size={f.size}
+                      status={f.status}
+                      error={f.error}
+                      onRemove={() => files.remove(f.key)}
+                    />
+                  ))}
+                </div>
+              )}
+              <div className="flex items-end gap-2">
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                accept=".pdf,.tex,.bib,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.gif,.webp"
+                onChange={(e) => {
+                  if (e.target.files?.length) files.add(e.target.files)
+                  e.target.value = '' // allow picking the same file again
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Attach files"
+                title="Attach files (PDF, LaTeX, text, images) — or drop them on the chat"
+                onClick={() => fileInput.current?.click()}
+              >
+                <PaperclipIcon />
+              </Button>
               <Textarea
                 aria-label="Message"
                 rows={2}
@@ -188,8 +258,15 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
               {stream.active ? (
                 <Button type="button" variant="outline" onClick={stream.stop}>Stop</Button>
               ) : (
-                <Button type="submit" disabled={!draft.trim()}>Send</Button>
+                <Button
+                  type="submit"
+                  disabled={!draft.trim() || files.uploading}
+                  title={files.uploading ? 'Waiting for uploads to finish' : undefined}
+                >
+                  Send
+                </Button>
               )}
+              </div>
             </form>
           ) : (
             <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
@@ -215,7 +292,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           </div>
         </div>
       </div>
-    </>
+    </div>
   )
 }
 

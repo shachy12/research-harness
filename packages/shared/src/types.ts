@@ -3,7 +3,20 @@
 export interface Project {
   id: string;
   name: string;
+  /**
+   * The project's working folder: the model runs there and can read files in it (and nowhere else).
+   * Null means the default location under the app's data folder. Managed data lives in `.harness/`.
+   */
+  folder: string | null;
   createdAt: string;
+}
+
+/** A file the user attached to a message; copied into the project's `.harness/uploads/` folder. */
+export interface Attachment {
+  name: string;
+  /** Absolute path of the copy in `.harness/uploads/`. */
+  path: string;
+  size: number;
 }
 
 /**
@@ -45,6 +58,8 @@ export interface Message {
   content: string;
   /** Searches and fetches the model ran while writing this reply (empty for user messages). */
   toolCalls: ToolCall[];
+  /** Files attached to this message (user messages only). */
+  attachments: Attachment[];
   createdAt: string;
 }
 

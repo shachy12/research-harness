@@ -63,7 +63,7 @@ function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStre
   });
 }
 
-export function nodeRoutes({ repo, llm, runs }: RouteDeps) {
+export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
@@ -91,9 +91,12 @@ export function nodeRoutes({ repo, llm, runs }: RouteDeps) {
 
     // Send a user message: starts the reply on the server and streams it (see ChatStreamEvent).
     .post('/:nodeId/messages', zValidator('json', sendMessageSchema), (c) => {
-      const nodeId = c.req.param('nodeId');
-      const userMessage = runs.start(nodeId, c.req.valid('json').content);
-      return watchRun(c, runs, nodeId, { type: 'user', message: userMessage });
+      const node = requireNode(c.req.param('nodeId'));
+      const { content, attachments } = c.req.valid('json');
+      const checked = workspaces.validate(repo.getProject(node.projectId)!, attachments);
+      if ('error' in checked) throw new HttpError(400, checked.error);
+      const userMessage = runs.start(node.id, content, checked);
+      return watchRun(c, runs, node.id, { type: 'user', message: userMessage });
     })
 
     // Watch a reply that is already running (e.g. a branch started by fork).
@@ -139,6 +142,7 @@ export function nodeRoutes({ repo, llm, runs }: RouteDeps) {
 
       const ctx: ReplyContext = {
         nodeId: node.id,
+        workDir: workspaces.prepare(repo.getProject(node.projectId)!),
         request: buildChatRequest(graph, node.id, [{ role: 'user', content: DRAFT_RESULT_INSTRUCTION }]),
         message: DRAFT_RESULT_INSTRUCTION,
         session: planSession(graph, node.id),
