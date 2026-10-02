@@ -44,3 +44,10 @@ When a reply lists several directions ("1. … 2. … 3. …"), the user wants t
   - **Review before starting:** a checkbox per item to skip some, each branch's resulting message editable, files per branch (item 2).
   - **List detection:** take numbered and bulleted top-level items from the reply's Markdown (a sub-list belongs to its parent item); if a reply has several lists, let the user pick which one.
   - The same instruction field fits the MCP version: "fork for each of these and check …" becomes the instruction the agent passes along.
+
+## 6. Rename nodes, and model-written titles
+Titles taken from the first line of a prompt are often long and awkward ("Let understand the feasibility of this linear cube root rc-pir, we should start…").
+- **Manual rename (always wins):** click the title in the chat header to edit it; a "Rename" action on graph cards. The API already exists (`PATCH /nodes/:id`, `useRename` in `api/queries.ts`); only the UI is missing.
+- **Automatic title:** once, right after a node's first reply, ask a small fast model for a 3–7 word title ("Linear-storage cube-root RC-PIR feasibility"). Claude Code: a throwaway `claude -p --model haiku --no-session-persistence` run given the prompt and the start of the reply; API provider: one small request. Costs a fraction of a cent and doesn't touch the node's conversation.
+- **Never overwrite the user:** store where a title came from (`title_source`: `prompt` | `model` | `user`). The model only replaces `prompt` titles; a user rename sets `user` and is final. Optional "Suggest a title" button to re-run it on demand.
+- Merge nodes: the same, based on the merge's first message.
