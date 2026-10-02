@@ -59,3 +59,11 @@ Opening a node always jumps to the bottom. Each node should remember which assis
 - **Storage:** server-side so it survives restarts and works in Electron later: a `read_upto` message id per node (append-only migration; the automatic pre-migration backup covers it), plus a small `PUT /nodes/:id/read` endpoint.
 - **Don't yank the view:** while a reply streams, follow it only if the user is already at the bottom; after sending a message, jump to the bottom.
 - **Graph:** an unread badge on cards ("2 new"), most useful after a fork when several branches finish while the user is elsewhere.
+
+## 8. Change model and effort while working (with a cache warning)
+Choose the model (e.g. Opus 5.5 / Sonnet 5.5 / Haiku 4.5) and effort (low → max) per node while working, not only in `.env`.
+- **GUI:** a model and effort picker by the composer and in the fork dialog (per branch). Branches inherit their parent's setting; a project default replaces `HARNESS_MODEL` / `HARNESS_EFFORT`.
+- **Cache warning (correct, verified):** prompt caches are per model. The first reply after switching a node's model re-reads its whole inherited history without the cache; same for a branch forked onto a different model than its parent. Show it before switching, with the size: "Switching to Sonnet re-reads ~43K tokens of history at full price once (about N× a normal reply); later replies use the cache again."
+- **Effort:** on the API, changing top-level effort mid-conversation also invalidates the cached conversation; Opus 5.5 / Sonnet 5.5 / Fable 5.1 support a per-message effort change that keeps the cache (beta `mid-conversation-output-config-2026-07-01`). Use that on the API provider. For Claude Code, pass `--effort` / `--model` when (re)starting the node's process; verify with the real CLI whether changing them on `--resume` keeps the cache, and warn accordingly.
+- **Storage:** `model` and `effort` per node (append-only migration). Changing them restarts the node's Claude Code process with the new flags (session kept).
+- **Side note:** each model's reasoning traces are tied to that model; after a switch, earlier turns' hidden reasoning isn't reused (the visible conversation is). Nothing to show the user, but expect the first reply after a switch to rethink from the transcript.
