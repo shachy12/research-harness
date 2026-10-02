@@ -70,6 +70,7 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
         <ForkDialog
           node={node}
           inheritedTokens={contextTokens(detail.data.inherited) + detail.data.messages.reduce((s, m) => s + Math.ceil(m.content.length / 4), 0)}
+          existingBranches={detail.data.childIds.length}
           onClose={() => setDialog(null)}
         />
       )}

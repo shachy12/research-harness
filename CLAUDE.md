@@ -1,4 +1,4 @@
-# Harness — DAG-based LLM research chat
+﻿# Harness ג€” DAG-based LLM research chat
 
 ## Concept
 A chat harness where a conversation is a DAG instead of a linear thread, matching a research workflow:
@@ -6,7 +6,7 @@ A chat harness where a conversation is a DAG instead of a linear thread, matchin
 1. Start with a **root node** (a normal chat).
 2. **Fork** a node into N child branches. Each child inherits the full context of its parent.
 3. Work each branch as a short sub-research task.
-4. **Finish** a branch → produce a **result** (a distilled report, not the transcript).
+4. **Finish** a branch ג†’ produce a **result** (a distilled report, not the transcript).
 5. **Merge** several finished branches into one new node whose context is
    `[ancestor context up to the fork point] + [result(B1)..result(Bn)] + [optional user framing]`.
    Only results flow back, never the branch transcripts.
@@ -33,8 +33,8 @@ TypeScript end to end, on Node. Chosen over Python + FastAPI because Electron is
 | Storage | SQLite via Node's built-in `node:sqlite`, plain SQL in one repository module |
 
 Changed during the MVP (2026-10-01):
-- **Vercel AI SDK → own provider interface + official SDKs.** Claude is called through the official Anthropic SDK (direct access to prompt caching, structured outputs, refusal fallbacks). Providers stay pluggable through `LLMProvider`.
-- **Drizzle + better-sqlite3 → `node:sqlite`.** No native module to rebuild for Electron, and npm 12 blocks install scripts by default. Four tables and simple queries don't need an ORM. Verify `node:sqlite` is available in Electron's bundled Node when we get there; the repository module is the only place to change if not.
+- **Vercel AI SDK ג†’ own provider interface + official SDKs.** Claude is called through the official Anthropic SDK (direct access to prompt caching, structured outputs, refusal fallbacks). Providers stay pluggable through `LLMProvider`.
+- **Drizzle + better-sqlite3 ג†’ `node:sqlite`.** No native module to rebuild for Electron, and npm 12 blocks install scripts by default. Four tables and simple queries don't need an ORM. Verify `node:sqlite` is available in Electron's bundled Node when we get there; the repository module is the only place to change if not.
 
 ## Providers
 Chosen with `HARNESS_PROVIDER` in `.env`: `claude-code` (the user's choice for their own research: runs on their Claude subscription), `anthropic` (API key, pay per token), or `placeholder`.
@@ -46,7 +46,7 @@ Why Claude Code: Anthropic's terms don't allow Claude.ai subscription logins in 
 - A node's Claude Code session id is stored in `nodes.session_id` (from the `system:init` event). `dag/session.ts` `planSession` decides how a node's first message starts: `resume` its own session, `fork` the parent's (merge: the base's) session with `--resume X --fork-session`, or `new`. The branch note / merge results go in front of the first message. If there is no session to fork from (e.g. nodes made with another provider), the earlier context is sent as a rendered transcript.
 - Tools: `--tools WebSearch,WebFetch,Read,Glob,Grep`, but only `--allowedTools WebSearch,WebFetch` are pre-approved. Read/Glob/Grep work inside the working folder by Claude Code's default permissions; a read outside it needs approval, which `-p` mode refuses (verified 2026-10-02: it shows up as a permission denial). So the model can read the project folder and nothing else. Our `SYSTEM_PROMPT` replaces Claude Code's default (`--system-prompt`); `--setting-sources ''` and `--strict-mcp-config` ignore the user's own Claude Code settings, memory and MCP servers.
 - Runs happen in the project's working folder (`ReplyContext.workDir`). Claude Code keeps sessions per folder, so sessions only resume from the folder that created them; migration 4 cleared the older session ids (made in a shared folder), and `planSession`'s transcript fallback takes over for those nodes. If a project's folder ever changes, clear its nodes' session ids the same way.
-- Result drafts: a one-shot run with `--resume <node session> --fork-session --no-session-persistence --output-format json --json-schema …`; the answer is in `structured_output`. The CLI rejects the `$schema` line zod adds to JSON Schemas, so it is stripped.
+- Result drafts: a one-shot run with `--resume <node session> --fork-session --no-session-persistence --output-format json --json-schema ג€¦`; the answer is in `structured_output`. The CLI rejects the `$schema` line zod adds to JSON Schemas, so it is stripped.
 - Tool calls come from `assistant`/`tool_use` (WebSearch `input.query`, WebFetch `input.url`) and `user`/`tool_result` blocks; search result links are parsed from the `Links: [...]` JSON in the result text.
 - Windows notes: the npm package's postinstall (which places `claude.exe`) is blocked by npm 12; run `node install.cjs` in the package folder once. `findClaudeExecutable` uses `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe` directly (the `claude.ps1` shim is blocked by the PowerShell policy). Windows PowerShell drops empty-string arguments to native programs, so test the CLI from Node, not PowerShell.
 - Tests use `llm/fake-claude.mjs`, a fake CLI speaking the same protocol.
@@ -54,13 +54,13 @@ Why Claude Code: Anthropic's terms don't allow Claude.ai subscription logins in 
 ## Model settings (anthropic provider)
 - Default model `claude-opus-5-5`, effort `high` (Opus 5.5's own default is `medium`, so it is set explicitly). Override with `HARNESS_MODEL` / `HARNESS_EFFORT`.
 - Requests use the server-side refusal fallback (`fallbacks: 'default'`, beta `server-side-fallback-2026-07-01`).
-- Thinking is always on for Opus 5.5 and its text is not shown; the chat stream sends a `thinking` event so the UI can show a "Thinking…" state.
+- Thinking is always on for Opus 5.5 and its text is not shown; the chat stream sends a `thinking` event so the UI can show a "Thinkingג€¦" state.
 - Without `ANTHROPIC_API_KEY`, the server uses `PlaceholderProvider`, which streams an explanation instead of failing. A message containing "search" makes it show a sample search, to test the tool display.
 - Web research: every chat request includes Anthropic's server-side tools `web_search_20260209` and `web_fetch_20260209` (max 10 uses each per reply; they include dynamic filtering, so don't add a separate `code_execution` tool). `pause_turn` is resumed by sending the paused assistant content back unchanged (up to 5 times). Result drafts run without tools.
-- Tool calls are stored per message (`messages.tool_calls`, JSON `ToolCall[]`: query or URL, status, result titles/URLs) and streamed as `tool` events. Raw search results are not kept in history; instead each assistant turn in later prompts ends with a `[Sources consulted for this reply: …]` list (`withSources` in `dag/prompt.ts`), so follow-ups and result drafts can cite them.
+- Tool calls are stored per message (`messages.tool_calls`, JSON `ToolCall[]`: query or URL, status, result titles/URLs) and streamed as `tool` events. Raw search results are not kept in history; instead each assistant turn in later prompts ends with a `[Sources consulted for this reply: ג€¦]` list (`withSources` in `dag/prompt.ts`), so follow-ups and result drafts can cite them.
 
 ## Prompt construction (apps/server/src/dag)
-- One fixed system prompt for every node. Node-specific framing goes into the conversation: a `[A new branch starts here: …]` user turn where a branch begins, and a `[Merge node …]` user turn carrying the branch results.
+- One fixed system prompt for every node. Node-specific framing goes into the conversation: a `[A new branch starts here: ג€¦]` user turn where a branch begins, and a `[Merge node ג€¦]` user turn carrying the branch results.
 - Cache breakpoint on the last inherited turn (siblings share it) plus top-level automatic caching for the growing conversation.
 - Merge base = lowest common ancestor of the merged branches. Merged branches contribute only `formatResult(...)` text.
 | Frontend | React + Vite |
@@ -72,10 +72,10 @@ Why Claude Code: Anthropic's terms don't allow Claude.ai subscription logins in 
 Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/artifact/B2ZDmYmj6V8C8tnf7nGw13).
 
 - **Main window = the graph.** Nodes are cards (status chip, title, last message or result summary, message count). Auto-laid out top to bottom; pan and zoom; Fit button.
-- **Clicking a node opens its chat full-window**, replacing the graph (a view switch, not a dialog or side panel). The header has a "← Graph" button (and Esc) plus a breadcrumb of ancestors. Returning to the graph keeps the previous pan/zoom.
+- **Clicking a node opens its chat full-window**, replacing the graph (a view switch, not a dialog or side panel). The header has a "ג† Graph" button (and Esc) plus a breadcrumb of ancestors. Returning to the graph keeps the previous pan/zoom.
 - Chat view: inherited context collapsed at the top (message count and token estimate), collapsible tool calls, the result block once finished, a composer, and Fork / Finish branch actions.
-- Fork: a dialog where you write each branch's first message; the branch title is derived from it (`titleFromPrompt`, first line, ~80 chars). Creating the branches starts all of them working in parallel, then returns to the graph.
-- Activity indicator on open nodes (graph cards and chat header): "Working…" while the model replies, "● Your turn" when waiting for you, "! No reply" if the last message is yours and nothing is running (failed or stopped early). Forked/finished nodes show their status instead. The graph refreshes every 1.5 s while any node is working.
+- Fork: a dialog where you write each branch's first message (starts with one field; + Add branch for more; forking an already-forked node again adds more children); the branch title is derived from it (`titleFromPrompt`, first line, ~80 chars). Creating the branches starts all of them working in parallel, then returns to the graph.
+- Activity indicator on open nodes (graph cards and chat header): "Workingג€¦" while the model replies, "ג— Your turn" when waiting for you, "! No reply" if the last message is yours and nothing is running (failed or stopped early). Forked/finished nodes show their status instead. The graph refreshes every 1.5 s while any node is working.
 - Finish: the LLM drafts the result (Findings / Evidence & sources / Open questions / Confidence); the user edits and approves it.
 - Merge: right-click finished nodes in the graph to toggle them for merge (the card shows a "Selected for merge" badge; right-clicking an unfinished node shakes it and shows a hint), then "Merge selected" opens a preview (base context + results, tokens saved compared with full transcripts, title, framing prompt), then opens the new merged node.
 - Edges: solid = inherits full context; dashed with a "result" label = merge edge that passes only the result.
@@ -85,8 +85,8 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - Each project has a working folder: `projects.folder`, or by default `<data>/projects/<id>/` (the user will be able to choose it later, e.g. their LaTeX repo). Managed data lives in `<folder>/.harness/` (with a `.gitignore` of `*`); uploads go to `.harness/uploads/` under safe, unique names (`paper.pdf`, `paper-2.pdf`).
 - `POST /projects/:id/uploads` (multipart field `file`, max 50 MB) returns an `Attachment { name, path, size }`. Messages carry `attachments`; the server only accepts existing files in that project's uploads folder (`Workspaces.validate`).
 - Files are not inlined: `withAttachments` adds `[The user attached a file. Read it with the Read tool before answering: <absolute path>]` to the message (also in replayed history). Once read, the content is in the Claude Code session, so later forks inherit it without reading again (verified). The API provider has no Read tool, so attachments are Claude Code only for now.
-- Folders: `POST /projects/:id/uploads/folder` (fields `name`, then `path` + `file` pairs) copies a folder with its structure to `.harness/uploads/<name>/` (unique name, every path part made safe, so nothing lands outside it). Limits: 2,000 files, 200 MB. Hidden entries (`.git`, …), `node_modules`, `__MACOSX` are skipped (`isSkippedUploadName`). A folder attachment has `kind: 'folder'` and `fileCount`; the message note tells Claude to list it with Glob and read the relevant files (verified with a real LaTeX project).
-- Composer: paperclip button (files), folder button (`<input webkitdirectory>`, grouped by `groupPickedFolder`), or drop files and folders on the chat (`readDrop` walks the dropped folder tree via `webkitGetAsEntry`/`readEntries`; it must start during the drop event). Each item uploads immediately and shows as a chip ("thesis/ · 23 files · 1.2 MB"); Send waits for uploads. Sent messages show their attachments; file reads show as tool rows ("Read draft.tex", "Found files").
+- Folders: `POST /projects/:id/uploads/folder` (fields `name`, then `path` + `file` pairs) copies a folder with its structure to `.harness/uploads/<name>/` (unique name, every path part made safe, so nothing lands outside it). Limits: 2,000 files, 200 MB. Hidden entries (`.git`, ג€¦), `node_modules`, `__MACOSX` are skipped (`isSkippedUploadName`). A folder attachment has `kind: 'folder'` and `fileCount`; the message note tells Claude to list it with Glob and read the relevant files (verified with a real LaTeX project).
+- Composer: paperclip button (files), folder button (`<input webkitdirectory>`, grouped by `groupPickedFolder`), or drop files and folders on the chat (`readDrop` walks the dropped folder tree via `webkitGetAsEntry`/`readEntries`; it must start during the drop event). Each item uploads immediately and shows as a chip ("thesis/ ֲ· 23 files ֲ· 1.2 MB"); Send waits for uploads. Sent messages show their attachments; file reads show as tool rows ("Read draft.tex", "Found files").
 - `HARNESS_DATA_DIR` sets the data folder (database + default project folders); the browser-pane preview uses `data/preview/`.
 
 ### Replies run on the server (`apps/server/src/runs.ts`)

@@ -11,12 +11,14 @@ import { Textarea } from '@/components/ui/textarea'
  * Write each branch's first message. Creating the branches sends those messages right away,
  * so all branches start working in parallel; each is titled after its message.
  */
-export function ForkDialog({ node, inheritedTokens, onClose }: {
+export function ForkDialog({ node, inheritedTokens, existingBranches, onClose }: {
   node: DagNode
   inheritedTokens: number
+  /** Branches the node already has; forking again adds to them. */
+  existingBranches: number
   onClose: () => void
 }) {
-  const [prompts, setPrompts] = useState(['', ''])
+  const [prompts, setPrompts] = useState([''])
   const fork = useFork()
   const navigate = useNavigate()
 
@@ -30,9 +32,11 @@ export function ForkDialog({ node, inheritedTokens, onClose }: {
         <DialogHeader>
           <DialogTitle>Fork "{node.title}"</DialogTitle>
           <DialogDescription>
-            Write the first message for each branch. Each branch starts with this node's full context
+            Write the first message for each new branch. Each branch starts with this node's full context
             (~{inheritedTokens.toLocaleString()} tokens) and begins working as soon as you create it.
-            {node.status === 'open' && ' After forking, this node is frozen.'}
+            {existingBranches > 0
+              ? ` This node already has ${existingBranches} ${existingBranches === 1 ? 'branch; new ones are added next to it.' : 'branches; new ones are added next to them.'}`
+              : node.status === 'open' && ' After forking, this node is frozen; you can fork it again later to add more branches.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -75,9 +79,7 @@ export function ForkDialog({ node, inheritedTokens, onClose }: {
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" disabled={fork.isPending || filled.length === 0}>
-              {fork.isPending
-                ? 'Starting…'
-                : `Start ${filled.length || ''} ${filled.length === 1 ? 'branch' : 'branches'}`.replace('  ', ' ')}
+              {fork.isPending ? 'Starting…' : filled.length > 1 ? `Start ${filled.length} branches` : 'Start branch'}
             </Button>
           </DialogFooter>
         </form>
