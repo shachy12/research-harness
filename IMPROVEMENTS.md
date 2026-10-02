@@ -51,3 +51,11 @@ Titles taken from the first line of a prompt are often long and awkward ("Let un
 - **Automatic title:** once, right after a node's first reply, ask a small fast model for a 3–7 word title ("Linear-storage cube-root RC-PIR feasibility"). Claude Code: a throwaway `claude -p --model haiku --no-session-persistence` run given the prompt and the start of the reply; API provider: one small request. Costs a fraction of a cent and doesn't touch the node's conversation.
 - **Never overwrite the user:** store where a title came from (`title_source`: `prompt` | `model` | `user`). The model only replaces `prompt` titles; a user rename sets `user` and is final. Optional "Suggest a title" button to re-run it on demand.
 - Merge nodes: the same, based on the merge's first message.
+
+## 7. Remember what was read in each node
+Opening a node always jumps to the bottom. Each node should remember which assistant replies the user has read.
+- **Opening a node:** never opened → start at the top; opened before with unread replies → scroll to the start of the first unread reply; everything read → the end.
+- **Marking read:** a reply counts as read once its end has been on screen (an IntersectionObserver on a marker after each reply; short replies that fit count when seen). Monotonic: only moves forward.
+- **Storage:** server-side so it survives restarts and works in Electron later: a `read_upto` message id per node (append-only migration; the automatic pre-migration backup covers it), plus a small `PUT /nodes/:id/read` endpoint.
+- **Don't yank the view:** while a reply streams, follow it only if the user is already at the bottom; after sending a message, jump to the bottom.
+- **Graph:** an unread badge on cards ("2 new"), most useful after a fork when several branches finish while the user is elsewhere.
