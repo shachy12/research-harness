@@ -13,6 +13,7 @@ const ACTIVITY: Record<Activity, { label: string; className: string }> = {
   working: { label: 'Working…', className: 'bg-open-soft text-open tabular-nums' },
   yours: { label: '● Your turn', className: 'bg-merge-soft text-merge' },
   failed: { label: '! No reply', className: 'bg-destructive/10 text-destructive' },
+  limit: { label: '! Limit reached', className: 'bg-destructive/10 text-destructive' },
 }
 
 const chip = 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap'

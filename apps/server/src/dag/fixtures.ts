@@ -16,6 +16,8 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       id,
       projectId: 'p',
       title: `Title ${id}`,
+      titleSource: 'prompt',
+      promptTitle: `Title ${id}`,
       parentIds,
       status: spec.status ?? (spec.result ? 'finished' : 'open'),
       result: spec.result ?? null,

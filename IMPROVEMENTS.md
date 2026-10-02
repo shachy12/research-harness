@@ -2,19 +2,6 @@
 
 Ideas collected while using the harness. Not implemented yet; each entry notes what's needed so we can pick it up later.
 
-## 1. LaTeX support (prompt + GUI)
-Math in replies (`$x^2$`, `$$\sum_i …$$`) currently shows as raw text.
-- **GUI:** render math with `remark-math` + KaTeX in `apps/web/src/features/chat/Markdown.tsx`. Before rendering, convert `\(…\)` → `$…$` and `\[…\]` → `$$…$$` as a safety net (Claude sometimes uses those).
-- **Prompt:** add a formatting section to `SYSTEM_PROMPT` (`apps/server/src/dag/prompt.ts`): Markdown replies, tables for comparisons, `$…$` / `$$…$$` for math (not `\(…\)` / `\[…\]`), LaTeX *source* (document fragments, macros to copy) in ```` ```latex ```` code blocks so it is never rendered as math.
-- **Check:** Claude Code records the system prompt per session (`--system-prompt-snapshot`), so resumed/forked older sessions may keep the old prompt. Verify with the real CLI; the renderer's delimiter conversion covers them either way.
-- **Optional extras:** syntax highlighting for code blocks (including `latex`); Mermaid diagrams.
-- Rendering is client-side, so existing messages benefit too.
-
-## 2. Attach files to each branch when forking
-The fork dialog has one text field per branch; it should also take files/folders per branch, sent with that branch's first message.
-- **GUI:** per-branch attach button and drop zone in `ForkDialog` (reuse `useAttachments` and `AttachmentChip`); "Start" waits for uploads.
-- **API:** `forkSchema` gets `branches: { prompt, attachments }[]` (or `attachments` alongside `prompts`); the fork route validates them with `Workspaces.validate` and passes them to `runs.start(child, prompt, attachments)`, which already supports attachments.
-
 ## 3. Stream the result draft live when finishing a branch
 When closing a branch (Finish branch), the result summary should be written live, like chat replies. Currently it shows "Drafting the result…" until the whole draft arrives, which can take a while on Opus.
 - Show the model writing the draft as it goes, like replies in the chat, then turn it into the editable form when done.
@@ -45,13 +32,6 @@ When a reply lists several directions ("1. … 2. … 3. …"), the user wants t
   - **List detection:** take numbered and bulleted top-level items from the reply's Markdown (a sub-list belongs to its parent item); if a reply has several lists, let the user pick which one.
   - The same instruction field fits the MCP version: "fork for each of these and check …" becomes the instruction the agent passes along.
 
-## 6. Rename nodes, and model-written titles
-Titles taken from the first line of a prompt are often long and awkward ("Let understand the feasibility of this linear cube root rc-pir, we should start…").
-- **Manual rename (always wins):** click the title in the chat header to edit it; a "Rename" action on graph cards. The API already exists (`PATCH /nodes/:id`, `useRename` in `api/queries.ts`); only the UI is missing.
-- **Automatic title:** once, right after a node's first reply, ask a small fast model for a 3–7 word title ("Linear-storage cube-root RC-PIR feasibility"). Claude Code: a throwaway `claude -p --model haiku --no-session-persistence` run given the prompt and the start of the reply; API provider: one small request. Costs a fraction of a cent and doesn't touch the node's conversation.
-- **Never overwrite the user:** store where a title came from (`title_source`: `prompt` | `model` | `user`). The model only replaces `prompt` titles; a user rename sets `user` and is final. Optional "Suggest a title" button to re-run it on demand.
-- Merge nodes: the same, based on the merge's first message.
-
 ## 7. Remember what was read in each node
 Opening a node always jumps to the bottom. Each node should remember which assistant replies the user has read.
 - **Opening a node:** never opened → start at the top; opened before with unread replies → scroll to the start of the first unread reply; everything read → the end.
@@ -67,21 +47,6 @@ Choose the model (e.g. Opus 5.5 / Sonnet 5.5 / Haiku 4.5) and effort (low → ma
 - **Effort:** on the API, changing top-level effort mid-conversation also invalidates the cached conversation; Opus 5.5 / Sonnet 5.5 / Fable 5.1 support a per-message effort change that keeps the cache (beta `mid-conversation-output-config-2026-07-01`). Use that on the API provider. For Claude Code, pass `--effort` / `--model` when (re)starting the node's process; verify with the real CLI whether changing them on `--resume` keeps the cache, and warn accordingly.
 - **Storage:** `model` and `effort` per node (append-only migration). Changing them restarts the node's Claude Code process with the new flags (session kept).
 - **Side note:** each model's reasoning traces are tied to that model; after a switch, earlier turns' hidden reasoning isn't reused (the visible conversation is). Nothing to show the user, but expect the first reply after a switch to rethink from the transcript.
-
-## 9. Say clearly when the Claude Code limit is reached
-When the subscription limit runs out, the reply currently ends with "Claude Code stopped unexpectedly (exit code 1)" or the CLI's raw error text. The user should see what happened and when it comes back.
-- **Detect it from the stream, not the exit code:** the CLI emits `rate_limit_event` lines (`rate_limit_info: { status: allowed | allowed_warning | rejected, resetsAt, rateLimitType: five_hour | seven_day, isUsingOverage }`), and a failed turn's `result` has `is_error: true` with text like "You've hit your limit · resets …" / "usage limit reached". Assistant messages can also carry `error: "rate_limit"` (others: `billing_error`, `authentication_failed`). Seen in the installed CLI (2.1.287); capture a real limit hit (stdout lines) once to confirm the exact shape, and add it to `fake-claude.mjs` for tests.
-- **Error kinds:** classify into `usage_limit` (with reset time and which limit), `auth` (logged out → "run `claude` once in a terminal to sign in"), `billing`, and `other` (keep the current message + last stderr line). Same classification for the one-shot result-draft run.
-- **Monthly `-p` credit:** background runs use a separate monthly credit (see CLAUDE.md, Providers). Check what message the CLI gives when that one runs out and word it separately ("monthly Claude Code credit used up, resets on …").
-- **GUI:** a distinct banner on the reply instead of the generic error: "Claude usage limit reached — resets at 17:00 (in 2 h 10 min)", with Retry. Keep the partial reply as now. On the graph, nodes that failed this way show "Limit reached" instead of "! No reply".
-- **Warnings before it happens:** on `allowed_warning`, show a small note ("Close to your 5-hour limit") in the chat header, so the user can avoid starting a big fork of many parallel branches right then.
-- **Parallel branches:** when one reply hits the limit, the others will too. Don't let every running branch fail separately; say it once at the project level and offer "Retry all when it resets".
-
-## 10. One attach button for files and folders
-The composer has two buttons (paperclip for files, folder for folders).
-- **Browser limit:** a web page can't open one dialog that picks both: `<input type="file">` picks files, and with `webkitdirectory` picks one folder only. The newer `showOpenFilePicker` / `showDirectoryPicker` APIs are also separate.
-- **Web UI now:** one paperclip button that opens a small menu: "Files…" / "Folder…" (plus the hint "or drop files and folders here"; drop already accepts both at once).
-- **Electron later:** the native dialog (`dialog.showOpenDialog` with `openFile` + `openDirectory` + `multiSelections`) picks both in one dialog on macOS; on Windows and Linux Electron then shows a folder-only picker, so keep the menu there. Electron also gives real paths, so files already inside the project folder could be referenced without copying.
 
 ## 11. Shell and file-editing tools (discuss before implementing)
 Add a shell tool (Bash on macOS/Linux, PowerShell or Git Bash on Windows) and Write/Edit, e.g. to compile LaTeX, run scripts and edit the paper. Branches run in parallel in the same project folder, so writes can collide. **Design to be agreed with the user first.**
@@ -104,3 +69,11 @@ The code is mostly portable already (Node, `node:sqlite`, paths via `node:path`,
 - **Case-sensitive file systems (Linux):** unique upload names and path checks must not assume case-insensitivity (`Paper.pdf` vs `paper.pdf`).
 - **Electron packaging (roadmap step 3):** electron-builder targets `dmg` (+ code signing and notarization for macOS, needs an Apple Developer account), `AppImage`/`deb` for Linux, NSIS for Windows. Check `node:sqlite` in Electron's Node on each.
 - **Data folder:** use the OS's app-data location in the packaged app (`app.getPath('userData')`: `~/Library/Application Support/…`, `~/.config/…`, `%APPDATA%\…`) instead of the repo's `data/`; the dev setup keeps `data/`.
+
+## Done
+Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:
+- **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
+- **2. Files per branch when forking:** done.
+- **6. Rename and model-written titles:** done (pencil on cards and in the chat header, Suggest button, automatic title after the first reply, `title_source`).
+- **9. Clear "limit reached" message:** done (classified errors, banner with reset time, warning when close, Retry and Retry all). Left: capture a real limit hit to confirm the event shapes (and the monthly `-p` credit wording); retry automatically when the limit resets.
+- **10. One attach button:** done (paperclip with a Files/Folder menu).

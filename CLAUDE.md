@@ -49,7 +49,9 @@ Why Claude Code: Anthropic's terms don't allow Claude.ai subscription logins in 
 - Result drafts: a one-shot run with `--resume <node session> --fork-session --no-session-persistence --output-format json --json-schema …`; the answer is in `structured_output`. The CLI rejects the `$schema` line zod adds to JSON Schemas, so it is stripped.
 - Tool calls come from `assistant`/`tool_use` (WebSearch `input.query`, WebFetch `input.url`) and `user`/`tool_result` blocks; search result links are parsed from the `Links: [...]` JSON in the result text.
 - Windows notes: the npm package's postinstall (which places `claude.exe`) is blocked by npm 12; run `node install.cjs` in the package folder once. `findClaudeExecutable` uses `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe` directly (the `claude.ps1` shim is blocked by the PowerShell policy). Windows PowerShell drops empty-string arguments to native programs, so test the CLI from Node, not PowerShell.
-- Tests use `llm/fake-claude.mjs`, a fake CLI speaking the same protocol.
+- Tests use `llm/fake-claude.mjs`, a fake CLI speaking the same protocol (including a usage-limit hit and a warning).
+- Errors: `llm/errors.ts` `classifyError` turns CLI/API failures into a `ProviderError` with `kind` (`usage_limit` | `auth` | `billing` | `other`) and a user-facing message. The CLI reports the limit with `rate_limit_event` lines (`rate_limit_info: { status: allowed | allowed_warning | rejected, resetsAt (Unix s), rateLimitType: five_hour | seven_day, utilization (0–1, sent with warnings) }`), an `error` field on the assistant message ("rate_limit", text "You've hit your limit · resets …"), and a failed `result`. Shapes read from the installed CLI 2.1.287, not yet from a real limit hit. A failed turn kills the node's process so a retry starts clean.
+- Titles: `suggestTitle` runs `claude -p --model haiku --no-session-persistence --tools ''` (API provider: one Haiku 4.5 request).
 
 ## Model settings (anthropic provider)
 - Default model `claude-opus-5-5`, effort `high` (Opus 5.5's own default is `medium`, so it is set explicitly). Override with `HARNESS_MODEL` / `HARNESS_EFFORT`.
@@ -81,13 +83,28 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - Edges: solid = inherits full context; dashed with a "result" label = merge edge that passes only the result.
 - Considered and dropped: a split view (graph + side chat), and a canvas where every node is an inline chat.
 
+### Projects
+- Several projects, each its own graph (own root, nodes, folder). Sidebar (`features/projects/ProjectSidebar.tsx`, collapsible, remembered in localStorage) lists them most recently used first, with node counts and a dot while working; `+` / "New project" opens `NewProjectDialog`, the pencil renames.
+- API: `GET /projects` (`ProjectSummary[]`), `POST /projects` `{ name, folder? }` (new id, root "Main thread"), `PATCH /projects/:id` `{ name }`. No delete on purpose (it would remove research; add it later with a backup first).
+- `/` opens the last project (`lastProject.ts`, localStorage) or the most recently used one. The server only creates the `default` project when there are no projects at all.
+- A folder chosen at creation (`Workspaces.checkFolder`: full path, existing, not a drive root, not inside the data folder) is fixed: Claude Code sessions belong to their folder.
+- "Browse…" calls `POST /system/pick-folder`, which opens the OS's own folder dialog on this machine (`system/folder-picker.ts`; a web page can't get real paths): Windows uses the Explorer dialog (IFileOpenDialog via C# in `powershell -EncodedCommand`, owned by an invisible topmost window so it opens in front), macOS `osascript choose folder`, Linux zenity/kdialog. One dialog at a time. In Electron, `dialog.showOpenDialog` replaces it. Tests only compile the Windows code (`checkWindowsPicker`) so no dialog pops up.
+
 ### Project folders and attachments (`apps/server/src/workspace.ts`)
-- Each project has a working folder: `projects.folder`, or by default `<data>/projects/<id>/` (the user will be able to choose it later, e.g. their LaTeX repo). Managed data lives in `<folder>/.harness/` (with a `.gitignore` of `*`); uploads go to `.harness/uploads/` under safe, unique names (`paper.pdf`, `paper-2.pdf`).
+- Each project has a working folder: `projects.folder` (chosen when creating the project), or by default `<data>/projects/<id>/`. Managed data lives in `<folder>/.harness/` (with a `.gitignore` of `*`); uploads go to `.harness/uploads/` under safe, unique names (`paper.pdf`, `paper-2.pdf`).
 - `POST /projects/:id/uploads` (multipart field `file`, max 50 MB) returns an `Attachment { name, path, size }`. Messages carry `attachments`; the server only accepts existing files in that project's uploads folder (`Workspaces.validate`).
 - Files are not inlined: `withAttachments` adds `[The user attached a file. Read it with the Read tool before answering: <absolute path>]` to the message (also in replayed history). Once read, the content is in the Claude Code session, so later forks inherit it without reading again (verified). The API provider has no Read tool, so attachments are Claude Code only for now.
 - Folders: `POST /projects/:id/uploads/folder` (fields `name`, then `path` + `file` pairs) copies a folder with its structure to `.harness/uploads/<name>/` (unique name, every path part made safe, so nothing lands outside it). Limits: 2,000 files, 200 MB. Hidden entries (`.git`, …), `node_modules`, `__MACOSX` are skipped (`isSkippedUploadName`). A folder attachment has `kind: 'folder'` and `fileCount`; the message note tells Claude to list it with Glob and read the relevant files (verified with a real LaTeX project).
-- Composer: paperclip button (files), folder button (`<input webkitdirectory>`, grouped by `groupPickedFolder`), or drop files and folders on the chat (`readDrop` walks the dropped folder tree via `webkitGetAsEntry`/`readEntries`; it must start during the drop event). Each item uploads immediately and shows as a chip ("thesis/ · 23 files · 1.2 MB"); Send waits for uploads. Sent messages show their attachments; file reads show as tool rows ("Read draft.tex", "Found files").
+- Composer: one paperclip (`AttachMenu`) with a "Files… / Folder…" menu (a browser can't pick both in one dialog; the folder picker is `<input webkitdirectory>`, grouped by `groupPickedFolder`), or drop files and folders on the chat (`useDropZone` → `readDrop`, which walks the dropped folder tree via `webkitGetAsEntry`/`readEntries` and must start during the drop event).
+- Fork dialog: each branch has its own attach menu and drop zone (`BranchField` with its own `useAttachments`); `forkSchema` is `branches: { prompt, attachments }[]` and the server validates each branch's files. Each item uploads immediately and shows as a chip ("thesis/ · 23 files · 1.2 MB"); Send waits for uploads. Sent messages show their attachments; file reads show as tool rows ("Read draft.tex", "Found files").
 - `HARNESS_DATA_DIR` sets the data folder (database + default project folders); the browser-pane preview uses `data/preview/`.
+
+### Usage limit, retry, titles (`runs.ts`)
+- `RunManager` keeps the account's usage limit (`usage()`: `warning` | `reached`, `resetsAt`, `limitType`, `utilization`), from the provider's `limit` events and classified failures; a successful reply clears `reached`. It is in `GraphResponse.usage` / `NodeDetail.usage`; error events carry `kind` and `resetsAt`.
+- `POST /nodes/:id/retry` answers the node's last (unanswered) user message again without saving a new one (`planSession(..., { retry: true })`). A run's session id is saved only if the reply produced something (or succeeded), so a first reply that failed early leaves no session and the retry starts that conversation over.
+- UI: `UsageBanner` on the graph and in chats ("25% of your Claude weekly limit used" with a bar; it stands out from 75% or when the share is unknown), "! Limit reached" chips instead of "! No reply" while the limit is reached, a Retry box under an unanswered message, and "Retry all" on the graph.
+- Titles: `nodes.title_source` (`prompt` | `model` | `user`) and `nodes.prompt_title` (migration 5). Prompts always use `promptTitle` (the title at creation), so renaming never changes the model's context or its cache. After a node's first reply, `maybeTitle` asks the provider for a 3–7 word title (only over `prompt` titles; `cleanTitle` tidies it); `titlePending` keeps the graph/chat polling until it lands. Rename (`PATCH`, sets `user`) from the pencil on cards and in the chat header; the rename dialog's Suggest calls `POST /nodes/:id/title/suggest` (not saved). A merge sent without a title gets `defaultMergeTitle` with source `prompt`.
+- Placeholder test triggers: `[test:limit]` in a message acts as a reached limit, `[test:warning]` as a warning; replies echo the message so Markdown/math can be checked.
 
 ### Replies run on the server (`apps/server/src/runs.ts`)
 - `RunManager` runs one reply per node at a time, independent of any open page, and saves it when done (or what arrived, on failure/Stop). Fork and merge start their nodes' first messages through it.
@@ -104,24 +121,26 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 - Merge selection lives in a small external store (`features/merge/selection.ts`) so it survives opening a chat. Its actions read the store's current value, never a render-time copy.
 - The merge dialog sends the first message with the merge request; the server starts it, and the merged node's chat page attaches.
 - React runs effects twice in development: guard effects that trigger paid model calls with a ref (see `ResultDialog`).
+- Math: `Markdown` uses remark-math + rehype-katex. `lib/math.ts` `prepareMath` (tested) first converts `\(…\)`/`\[…\]`, escapes `$` that can't be inline math (Pandoc's rule, so "$5 and $10" stays text), puts a one-line `$$…$$` on its own lines so it displays, and leaves code alone. The system prompt asks for `$…$`/`$$…$$`, escaped prices, and LaTeX source in ```` ```latex ```` blocks.
 - Dark mode: `lib/theme.ts` toggles the `dark` class from the OS setting. Status colors are Tailwind tokens: `open`, `done`, `merge`, `frozen` (+ `-soft`), `canvas`, `edge`.
 - The browser-pane preview (`.claude/launch.json`) runs on its own ports (web 5180, server 8790 via `HARNESS_WEB_PORT` / `HARNESS_SERVER_PORT`) next to the user's dev server, with `HARNESS_DATA_DIR=data/preview` and the placeholder provider slowed down (`HARNESS_PLACEHOLDER_DELAY_MS=120`, ~6–8 s replies) so long-reply states can be tested. Testing never touches the real data, uploads, or model credit. (Variables set by the launcher win over `.env`.) When the pane isn't drawing, read cards with `textContent`, not `innerText`.
 
 ## Commands (run from the repo root)
 - `npm run dev`: starts the server (http://localhost:8787) and the web UI (http://localhost:5173, which proxies `/api` to the server)
-- `npm run typecheck`, `npm test`, `npm run lint`
+- `npm run typecheck`, `npm test` (server and web Vitest), `npm run lint`
+- On Windows, Vite's file watcher sometimes misses an edit (the preview keeps serving the old module): `touch` the file.
 - Add a dependency to one app: `npm install <pkg> -w @harness/web` (or `@harness/server`)
 - Add a shadcn component: `npx shadcn@latest add <name>` from `apps/web`. Generated files in `src/components/ui` are not linted. Base UI buttons rendered as links need `nativeButton={false}`.
 - Server env: `.env` at the repo root (see `.env.example`). The server port variable is `HARNESS_SERVER_PORT`, not `PORT`.
 
 ## Project structure
 npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Requires Node 24 LTS.
-- `apps/web`: React UI. `src/app` (router, AppShell with a sidebar slot), `src/features/*` (graph, chat, fork, result, merge; later projects, settings), `src/components/ui` (shadcn), `src/api` (typed server client).
+- `apps/web`: React UI. `src/app` (router, AppShell with the projects sidebar), `src/features/*` (projects, graph, chat, fork, result, merge, rename; later settings), `src/components/ui` (shadcn), `src/api` (typed server client).
 - `apps/server`: Hono backend. `routes/` (projects: graph, merge; nodes: detail, rename, chat stream, fork, draft/approve result), `dag/` (core context-assembly logic: pure functions, heavily tested with Vitest), `llm/` (provider interface, Anthropic adapter, placeholder), `tools/` (MCP, later), `db/` (`node:sqlite`, migrations via `PRAGMA user_version`, `Repository`). `createApp({ repo, llm })` takes its dependencies so tests use `:memory:` and a fake provider.
 - `apps/desktop`: Electron (later).
 - `packages/shared`: types/schemas shared by web and server.
 - `data/`: local SQLite file (gitignored).
-- Routes: `/projects/:id` (graph), `/projects/:id/nodes/:nodeId` (full-window chat), `/settings` (later).
+- Routes: `/` (opens the last project), `/projects/:id` (graph), `/projects/:id/nodes/:nodeId` (full-window chat), `/settings` (later).
 
 ## Roadmap
 1. MVP (done 2026-10-01): one project, graph view, full-window chat with real streaming (Claude through the provider interface), fork / finish / merge, SQLite persistence. API key from `.env`.

@@ -1,11 +1,56 @@
-import type { BranchResult, DagNode, GraphResponse, MergeBody, NodeDetail } from '@harness/shared'
+import type {
+  BranchResult,
+  CreateProjectBody,
+  DagNode,
+  ForkBody,
+  GraphResponse,
+  MergeBody,
+  NodeDetail,
+  Project,
+  ProjectSummary,
+} from '@harness/shared'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from './client'
 
 // Query keys: what each piece of cached server data is called.
 export const keys = {
+  projects: ['projects'] as const,
   graph: (projectId: string) => ['graph', projectId] as const,
   node: (nodeId: string) => ['node', nodeId] as const,
+}
+
+export function useProjects() {
+  return useQuery({
+    queryKey: keys.projects,
+    queryFn: ({ signal }) => api.get<ProjectSummary[]>('/projects', signal),
+    // Keep the sidebar's "working" dots current while any project is working.
+    refetchInterval: (query) => (query.state.data?.some((p) => p.running) ? 3000 : false),
+  })
+}
+
+export function useCreateProject() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: (body: CreateProjectBody) => api.post<Project>('/projects', body),
+    onSuccess: refresh,
+  })
+}
+
+export function useRenameProject() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: ({ projectId, name }: { projectId: string; name: string }) =>
+      api.patch<Project>(`/projects/${projectId}`, { name }),
+    onSuccess: refresh,
+  })
+}
+
+/** Open the operating system's folder dialog (on this machine, via the server); null if cancelled. */
+export function usePickFolder() {
+  return useMutation({
+    mutationFn: (startIn?: string) =>
+      api.post<{ path: string | null }>('/system/pick-folder', { title: 'Choose the working folder', startIn }),
+  })
 }
 
 export function useGraph(projectId: string) {
@@ -15,7 +60,8 @@ export function useGraph(projectId: string) {
     // Always reload when the graph opens (a reply may have started meanwhile), and while any node
     // is working, keep refreshing so the cards' "Working…" / "Your turn" stay current.
     staleTime: 0,
-    refetchInterval: (query) => (query.state.data?.nodes.some((n) => n.running) ? 1500 : false),
+    // Also while a model-written title is on its way, so it shows up without a reload.
+    refetchInterval: (query) => (query.state.data?.nodes.some((n) => n.running || n.titlePending) ? 1500 : false),
   })
 }
 
@@ -23,6 +69,7 @@ export function useNodeDetail(nodeId: string) {
   return useQuery({
     queryKey: keys.node(nodeId),
     queryFn: ({ signal }) => api.get<NodeDetail>(`/nodes/${nodeId}`, signal),
+    refetchInterval: (query) => (query.state.data?.titlePending ? 1500 : false),
   })
 }
 
@@ -30,6 +77,7 @@ export function useNodeDetail(nodeId: string) {
 export function useRefreshAll() {
   const queryClient = useQueryClient()
   return () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: keys.projects }),
     queryClient.invalidateQueries({ queryKey: ['graph'] }),
     queryClient.invalidateQueries({ queryKey: ['node'] }),
   ])
@@ -38,9 +86,24 @@ export function useRefreshAll() {
 export function useFork() {
   const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: ({ nodeId, prompts }: { nodeId: string; prompts: string[] }) =>
-      api.post<DagNode[]>(`/nodes/${nodeId}/fork`, { prompts }),
+    mutationFn: ({ nodeId, branches }: { nodeId: string; branches: ForkBody['branches'] }) =>
+      api.post<DagNode[]>(`/nodes/${nodeId}/fork`, { branches }),
     onSuccess: refresh,
+  })
+}
+
+/** Answer a node's last message again (its reply failed or was stopped before writing anything). */
+export function useRetry() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: (nodeId: string) => api.post(`/nodes/${nodeId}/retry`),
+    onSettled: refresh,
+  })
+}
+
+export function useSuggestTitle() {
+  return useMutation({
+    mutationFn: (nodeId: string) => api.post<{ title: string }>(`/nodes/${nodeId}/title/suggest`),
   })
 }
 

@@ -1,4 +1,4 @@
-import { type NodeDetail, type NodeSummary, lowestCommonAncestor } from '@harness/shared'
+import { type NodeDetail, type NodeSummary, defaultMergeTitle, lowestCommonAncestor } from '@harness/shared'
 import { useQueries } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
@@ -28,7 +28,8 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
   const parents = parentIds.map((id) => byId.get(id)!).filter(Boolean)
 
   const baseId = lowestCommonAncestor((id) => byId.get(id)!, parentIds)
-  const [title, setTitle] = useState(() => `Synthesis: ${parents.map((p) => p.title).join(' + ')}`.slice(0, 120))
+  const defaultTitle = defaultMergeTitle(parents.map((p) => p.title))
+  const [title, setTitle] = useState(defaultTitle)
   const [framing, setFraming] = useState(DEFAULT_FRAMING)
 
   // Details of the base node (its full context) and of each branch (its transcript, to show what's saved).
@@ -49,7 +50,8 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
 
   const create = () =>
     merge.mutate(
-      { parentIds, title: title.trim() || 'Synthesis', prompt: framing.trim() },
+      // An unchanged default title is left to the server, so a model-written title can replace it later.
+      { parentIds, title: title.trim() && title.trim() !== defaultTitle ? title.trim() : undefined, prompt: framing.trim() },
       {
         onSuccess: (node) => {
           selection.clear()
@@ -97,6 +99,9 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
         <div className="grid gap-1.5">
           <Label htmlFor="merge-title">Node title</Label>
           <Input id="merge-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+          {title.trim() === defaultTitle && (
+            <span className="text-xs text-muted-foreground">Keep this and a short title is written after the first reply.</span>
+          )}
         </div>
         <div className="grid gap-1.5">
           <Label htmlFor="merge-framing">First message</Label>

@@ -1,4 +1,4 @@
-import type { BranchResult, ToolCall } from '@harness/shared';
+import type { BranchResult, ToolCall, UsageLimit } from '@harness/shared';
 import type { ChatRequest } from '../dag/prompt.ts';
 import type { SessionPlan } from '../dag/session.ts';
 
@@ -8,7 +8,9 @@ export type ReplyEvent =
   /** A tool call started (status 'running') or finished; later events replace earlier ones with the same id. */
   | { type: 'tool'; call: ToolCall }
   /** The provider's session for this node (session-based providers); the server stores it on the node. */
-  | { type: 'session'; sessionId: string };
+  | { type: 'session'; sessionId: string }
+  /** The provider reported the usage limit: close to it, reached, or fine again (null). */
+  | { type: 'limit'; limit: UsageLimit | null };
 
 /**
  * Everything a provider might need for one model call. Stateless providers (the API) use `request`,
@@ -36,6 +38,11 @@ export interface LLMProvider {
   streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent>;
   /** Write a branch's result report from its full context; must not change the node's conversation. */
   draftResult(ctx: ReplyContext, signal: AbortSignal): Promise<BranchResult>;
+  /**
+   * A short title (3–7 words) for a conversation, from its first message and the start of the
+   * reply. Runs on a small, cheap model and leaves the node's conversation untouched.
+   */
+  suggestTitle?(input: { prompt: string; reply: string; workDir: string }, signal: AbortSignal): Promise<string>;
   /** The node won't receive more messages for now (forked, finished): free any resources held for it. */
   release?(nodeId: string): void;
   /** The server is shutting down. */

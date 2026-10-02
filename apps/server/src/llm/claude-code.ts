@@ -6,7 +6,9 @@ import { type BranchResult, type ToolCall, branchResultSchema } from '@harness/s
 import { z } from 'zod/v4';
 import { SYSTEM_PROMPT } from '../dag/prompt.ts';
 import { type SessionPlan, firstMessage } from '../dag/session.ts';
+import { classifyError, toIsoTime } from './errors.ts';
 import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
+import { TITLE_SYSTEM_PROMPT, titleRequest } from './title.ts';
 
 /**
  * Runs the Claude Code CLI in the background with the user's own Claude login.
@@ -76,6 +78,10 @@ export class ClaudeCodeProvider implements LLMProvider {
     signal.addEventListener('abort', onAbort, { once: true });
     try {
       yield* proc.send(text);
+    } catch (err) {
+      // Start over after a failure: a retry plans its session afresh.
+      this.release(ctx.nodeId);
+      throw err;
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
@@ -94,14 +100,29 @@ export class ClaudeCodeProvider implements LLMProvider {
       ...this.commonArgs(),
     ];
     const prompt = plan.mode === 'resume' ? ctx.message : firstMessage(plan, ctx.message);
-    const output = await runOnce(this.options, ctx.workDir, args, prompt, signal);
-
-    const parsed = JSON.parse(output) as { is_error?: boolean; result?: string; structured_output?: unknown };
-    if (parsed.is_error) throw new Error(parsed.result || 'Claude Code could not draft the result.');
+    const parsed = await runJson(this.options, ctx.workDir, args, prompt, signal);
+    if (parsed.is_error) throw classifyError(new Error(parsed.result || 'Claude Code could not draft the result.'));
     const value = parsed.structured_output ?? tryJson(parsed.result);
     const result = branchResultSchema.safeParse(value);
     if (!result.success) throw new Error('The model could not draft a result for this branch. Write it by hand instead.');
     return result.data;
+  }
+
+  async suggestTitle({ prompt, reply, workDir }: { prompt: string; reply: string; workDir: string }, signal: AbortSignal): Promise<string> {
+    // A small model, no tools, nothing saved: a fraction of a normal reply.
+    const args = [
+      '-p',
+      '--model', 'haiku',
+      '--no-session-persistence',
+      '--output-format', 'json',
+      '--tools', '',
+      '--system-prompt', TITLE_SYSTEM_PROMPT,
+      '--setting-sources', '',
+      '--strict-mcp-config',
+    ];
+    const parsed = await runJson(this.options, workDir, args, titleRequest(prompt, reply), signal);
+    if (parsed.is_error) throw classifyError(new Error(parsed.result || 'Claude Code could not suggest a title.'));
+    return parsed.result ?? '';
   }
 
   release(nodeId: string): void {
@@ -162,7 +183,7 @@ class LiveProcess {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly idleMs: number;
   private turn: Channel<ReplyEvent> | null = null;
-  private turnState = { wroteText: false, calls: new Map<string, ToolCall>() };
+  private turnState: TurnState = newTurnState();
   private idleTimer: NodeJS.Timeout | null = null;
   private stderr = '';
   private exited = false;
@@ -183,7 +204,10 @@ class LiveProcess {
       this.clearIdle();
       onExit();
       const detail = this.stderr.trim().split('\n').at(-1);
-      this.finishTurn(new Error(`Claude Code stopped unexpectedly (exit code ${code})${detail ? `: ${detail}` : ''}`));
+      const error = classifyError(new Error(detail || 'no details'), this.turnState.resetsAt);
+      this.finishTurn(error.kind === 'other'
+        ? new Error(`Claude Code stopped unexpectedly (exit code ${code})${detail ? `: ${detail}` : ''}`)
+        : error);
     });
   }
 
@@ -192,7 +216,7 @@ class LiveProcess {
     if (this.turn) throw new Error('A reply is already being generated');
     this.clearIdle();
     this.turn = new Channel<ReplyEvent>();
-    this.turnState = { wroteText: false, calls: new Map() };
+    this.turnState = newTurnState();
     this.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n');
     return this.turn;
   }
@@ -215,7 +239,10 @@ class LiveProcess {
     if (event.type === 'result') {
       const result = event as ResultEvent;
       const failed = result.is_error || result.subtype !== 'success';
-      this.finishTurn(failed ? new Error(result.result || `Claude Code error: ${result.subtype}`) : undefined);
+      // A usage limit, a missing login etc. arrive as a failed result (and as an `error` on the
+      // assistant message); classifyError turns them into a message the user can act on.
+      const text = result.result || this.turnState.apiError || `Claude Code error: ${result.subtype}`;
+      this.finishTurn(failed ? classifyError(new Error(text), this.turnState.resetsAt) : undefined);
       return;
     }
     for (const out of mapEvent(event, this.turnState)) turn.push(out);
@@ -244,20 +271,56 @@ type ContentBlock =
 
 type ResultEvent = { type: 'result'; subtype: string; is_error?: boolean; result?: string; session_id?: string };
 
+/** Sent when the account's usage limit changes: fine, close to it, or reached. */
+type RateLimitEvent = {
+  type: 'rate_limit_event';
+  rate_limit_info: {
+    status: 'allowed' | 'allowed_warning' | 'rejected';
+    resetsAt?: number | string | null;
+    rateLimitType?: string | null;
+    /** Share of the limit used, 0–1 (sent with warnings). */
+    utilization?: number | null;
+  };
+};
+
 type CliEvent =
   | { type: 'system'; subtype: string; session_id?: string }
   | { type: 'stream_event'; event: { type: string; content_block?: { type: string }; delta?: { type: string; text?: string } } }
-  | { type: 'assistant' | 'user'; message: { content: ContentBlock[] | string } }
+  | { type: 'assistant' | 'user'; message: { content: ContentBlock[] | string }; error?: string }
   | ResultEvent
+  | RateLimitEvent
   | { type: string };
 
+export interface TurnState {
+  wroteText: boolean;
+  calls: Map<string, ToolCall>;
+  /** When the usage limit resets, from a rate-limit event this turn. */
+  resetsAt: string | null;
+  /** The error the CLI attached to an assistant message (e.g. "rate_limit"), with its text. */
+  apiError: string | null;
+}
+
+export const newTurnState = (): TurnState => ({ wroteText: false, calls: new Map(), resetsAt: null, apiError: null });
+
 /** Translate one CLI event into our reply events. Exported for tests. */
-export function mapEvent(
-  event: CliEvent,
-  state: { wroteText: boolean; calls: Map<string, ToolCall> },
-): ReplyEvent[] {
+export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
   if (event.type === 'system' && 'subtype' in event && event.subtype === 'init' && 'session_id' in event && event.session_id) {
     return [{ type: 'session', sessionId: event.session_id }];
+  }
+
+  if (event.type === 'rate_limit_event' && 'rate_limit_info' in event && event.rate_limit_info) {
+    const info = event.rate_limit_info;
+    const resetsAt = toIsoTime(info.resetsAt);
+    const limitType = info.rateLimitType ?? null;
+    const utilization = typeof info.utilization === 'number' && Number.isFinite(info.utilization) ? info.utilization : null;
+    if (info.status === 'rejected') {
+      state.resetsAt = resetsAt;
+      return [{ type: 'limit', limit: { status: 'reached', resetsAt, limitType, utilization: utilization ?? 1 } }];
+    }
+    if (info.status === 'allowed_warning') {
+      return [{ type: 'limit', limit: { status: 'warning', resetsAt, limitType, utilization } }];
+    }
+    return [{ type: 'limit', limit: null }];
   }
 
   if (event.type === 'stream_event' && 'event' in event) {
@@ -275,6 +338,11 @@ export function mapEvent(
   }
 
   if ((event.type === 'assistant' || event.type === 'user') && 'message' in event && Array.isArray(event.message.content)) {
+    if ('error' in event && event.error) {
+      // The CLI writes the error as the message's text, e.g. "You've hit your limit · resets 5pm".
+      const text = event.message.content.flatMap((b) => (b.type === 'text' && 'text' in b ? [b.text] : [])).join(' ');
+      state.apiError = text || event.error;
+    }
     const out: ReplyEvent[] = [];
     for (const block of event.message.content) {
       if (block.type === 'tool_use' && 'name' in block && TOOL_NAMES[block.name]) {
@@ -328,6 +396,18 @@ export function parseSearchLinks(text: string): { title: string; url: string }[]
   return [];
 }
 
+type OneShotResult = { is_error?: boolean; result?: string; structured_output?: unknown };
+
+/** Run the CLI once in `--output-format json` mode and parse its answer. */
+async function runJson(options: ClaudeCodeOptions, cwd: string, args: string[], prompt: string, signal: AbortSignal): Promise<OneShotResult> {
+  const output = await runOnce(options, cwd, args, prompt, signal);
+  try {
+    return JSON.parse(output) as OneShotResult;
+  } catch {
+    throw new Error(`Claude Code returned something unexpected: ${output.slice(0, 200)}`);
+  }
+}
+
 /** Run the CLI once with the prompt on stdin and return its stdout. */
 function runOnce(options: ClaudeCodeOptions, cwd: string, args: string[], prompt: string, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -344,8 +424,13 @@ function runOnce(options: ClaudeCodeOptions, cwd: string, args: string[], prompt
     child.on('error', reject);
     child.on('close', (code) => {
       signal.removeEventListener('abort', onAbort);
-      if (code === 0 && stdout.trim()) resolve(stdout);
-      else reject(new Error(`Claude Code failed (exit code ${code}): ${stderr.trim().split('\n').at(-1) ?? ''}`));
+      // A failed run may still print its JSON answer (is_error: true) on stdout; the caller reads it.
+      if (stdout.trim().startsWith('{')) resolve(stdout);
+      else {
+        const detail = stderr.trim().split('\n').at(-1) ?? '';
+        const error = classifyError(new Error(detail || 'no details'));
+        reject(error.kind === 'other' ? new Error(`Claude Code failed (exit code ${code}): ${detail}`) : error);
+      }
     });
     child.stdin.end(prompt);
   });

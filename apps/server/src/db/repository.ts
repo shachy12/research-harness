@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Attachment, BranchResult, DagNode, Message, NodeStatus, Project, Role, ToolCall } from '@harness/shared';
+import type { Attachment, BranchResult, DagNode, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
@@ -8,6 +8,7 @@ interface ProjectRow { id: string; name: string; folder: string | null; created_
 interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
+  title_source: TitleSource; prompt_title: string | null;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string; created_at: string;
@@ -18,6 +19,8 @@ const toNode = (r: NodeRow): DagNode => ({
   id: r.id,
   projectId: r.project_id,
   title: r.title,
+  titleSource: r.title_source,
+  promptTitle: r.prompt_title ?? r.title,
   parentIds: JSON.parse(r.parent_ids) as string[],
   status: r.status,
   result: r.result ? (JSON.parse(r.result) as BranchResult) : null,
@@ -55,13 +58,32 @@ export class Repository {
     return row ? toProject(row) : null;
   }
 
-  /** Create a project with an empty root node. */
-  createProject(id: string, name: string, rootTitle: string): Project {
+  /** All projects with their node count and last activity, most recently used first. */
+  listProjects(): (Project & { nodeCount: number; updatedAt: string })[] {
+    const rows = this.db
+      .prepare(
+        `SELECT p.*,
+                (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count,
+                COALESCE((SELECT MAX(m.created_at) FROM messages m JOIN nodes n ON n.id = m.node_id
+                          WHERE n.project_id = p.id), p.created_at) AS updated_at
+         FROM projects p
+         ORDER BY updated_at DESC, p.rowid`,
+      )
+      .all() as unknown as (ProjectRow & { node_count: number; updated_at: string })[];
+    return rows.map((r) => ({ ...toProject(r), nodeCount: r.node_count, updatedAt: r.updated_at }));
+  }
+
+  /** Create a project with an empty root node. `folder` null means the default location. */
+  createProject(id: string, name: string, rootTitle: string, folder: string | null = null): Project {
     return this.transaction(() => {
-      this.db.prepare('INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)').run(id, name, now());
+      this.db.prepare('INSERT INTO projects (id, name, folder, created_at) VALUES (?, ?, ?, ?)').run(id, name, folder, now());
       this.createNode({ projectId: id, title: rootTitle, parentIds: [] });
       return this.getProject(id)!;
     });
+  }
+
+  setProjectName(id: string, name: string): void {
+    this.db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id);
   }
 
   /** Delete every node and message in the project and start again from an empty root. */
@@ -86,16 +108,18 @@ export class Repository {
     return rows.map(toNode);
   }
 
-  createNode(input: { projectId: string; title: string; parentIds: string[] }): DagNode {
+  createNode(input: { projectId: string; title: string; parentIds: string[]; titleSource?: TitleSource }): DagNode {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO nodes (id, project_id, title, parent_ids, status, result, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)')
-      .run(id, input.projectId, input.title, JSON.stringify(input.parentIds), 'open', now());
+      .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?)`)
+      .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds), now());
     return this.getNode(id)!;
   }
 
-  setTitle(id: string, title: string): void {
-    this.db.prepare('UPDATE nodes SET title = ? WHERE id = ?').run(title, id);
+  /** Rename a node. `prompt_title` stays as it was, so the model's context doesn't change. */
+  setTitle(id: string, title: string, source: TitleSource): void {
+    this.db.prepare('UPDATE nodes SET title = ?, title_source = ? WHERE id = ?').run(title, source, id);
   }
 
   setStatus(id: string, status: NodeStatus): void {

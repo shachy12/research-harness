@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Attachment, Project } from '@harness/shared';
 
@@ -23,6 +23,24 @@ export class Workspaces {
 
   uploadsOf(project: Project): string {
     return path.join(this.folderOf(project), '.harness', 'uploads');
+  }
+
+  /**
+   * Check a folder the user chose for a new project: an existing folder, given as a full path, not a
+   * whole drive, and not inside the app's data folder (which holds the database and backups).
+   * Returns its full real path.
+   */
+  checkFolder(folder: string): string | { error: string } {
+    if (!path.isAbsolute(folder)) return { error: 'Give the full path of the folder, e.g. C:\\Users\\me\\thesis' };
+    if (!existsSync(folder) || !statSync(folder).isDirectory()) return { error: `"${folder}" is not an existing folder` };
+    const real = realpathSync(folder);
+    if (path.parse(real).root === real) return { error: 'Choose a folder, not a whole drive' };
+    const data = path.resolve(this.dataDir);
+    const relative = path.relative(data, real);
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+      return { error: "That folder is inside the app's data folder; choose another one" };
+    }
+    return real;
   }
 
   /** Create the folder structure if needed; returns the working folder. */

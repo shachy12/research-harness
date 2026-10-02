@@ -14,7 +14,9 @@ import type { RouteDeps } from '../app.ts';
 import { inheritedItems } from '../dag/context.ts';
 import { DRAFT_RESULT_INSTRUCTION, buildChatRequest } from '../dag/prompt.ts';
 import { planSession } from '../dag/session.ts';
+import { classifyError } from '../llm/errors.ts';
 import type { ReplyContext } from '../llm/index.ts';
+import { cleanTitle } from '../llm/title.ts';
 import type { RunManager } from '../runs.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
@@ -81,13 +83,36 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
         childIds: graph.children(node.id).map((n) => n.id),
         running: runs.isRunning(node.id),
         run: runs.status(node.id),
+        titlePending: runs.isTitling(node.id),
+        usage: runs.usage(),
       });
     })
 
+    // Rename. A title the user chose is final: the model never replaces it.
     .patch('/:nodeId', zValidator('json', renameNodeSchema), (c) => {
       const node = requireNode(c.req.param('nodeId'));
-      repo.setTitle(node.id, c.req.valid('json').title);
+      repo.setTitle(node.id, c.req.valid('json').title, 'user');
       return c.json(repo.getNode(node.id)!);
+    })
+
+    // Ask a small model for a short title (not saved; the rename dialog offers it).
+    .post('/:nodeId/title/suggest', async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      if (!llm.suggestTitle) throw new HttpError(501, 'This model provider cannot suggest titles.');
+      const messages = repo.listMessages(node.id);
+      const prompt = messages.find((m) => m.role === 'user')?.content;
+      if (!prompt) throw new HttpError(400, 'This node has no messages to name it after.');
+      const reply = messages.find((m) => m.role === 'assistant')?.content ?? '';
+      const workDir = workspaces.prepare(repo.getProject(node.projectId)!);
+      try {
+        const title = cleanTitle(await llm.suggestTitle({ prompt, reply, workDir }, c.req.raw.signal));
+        if (!title) throw new Error('The model did not suggest a usable title.');
+        return c.json({ title });
+      } catch (err) {
+        const error = classifyError(err);
+        runs.noteFailure(error);
+        throw new HttpError(502, error.message);
+      }
     })
 
     // Send a user message: starts the reply on the server and streams it (see ChatStreamEvent).
@@ -106,27 +131,38 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
       return watchRun(c, runs, c.req.param('nodeId'));
     })
 
+    // Answer the last message again after its reply failed or was stopped before writing anything.
+    .post('/:nodeId/retry', (c) => {
+      runs.retry(requireNode(c.req.param('nodeId')).id);
+      return c.json({ ok: true });
+    })
+
     // Stop the running reply; what arrived so far is kept.
     .post('/:nodeId/stop', (c) => {
       runs.stop(requireNode(c.req.param('nodeId')).id);
       return c.json({ ok: true });
     })
 
-    // Create branches, one per prompt, and start each one working on its prompt right away.
+    // Create branches and start each one working on its first message (with its files) right away.
     // Forking freezes an open node so its history stays fixed.
     .post('/:nodeId/fork', zValidator('json', forkSchema), (c) => {
       const parent = requireNode(c.req.param('nodeId'));
       if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
 
-      const { prompts } = c.req.valid('json');
+      const project = repo.getProject(parent.projectId)!;
+      const branches = c.req.valid('json').branches.map(({ prompt, attachments }) => {
+        const checked = workspaces.validate(project, attachments);
+        if ('error' in checked) throw new HttpError(400, checked.error);
+        return { prompt, attachments: checked };
+      });
       const children = repo.transaction(() => {
         if (parent.status === 'open') repo.setStatus(parent.id, 'frozen');
-        return prompts.map((prompt) =>
+        return branches.map(({ prompt }) =>
           repo.createNode({ projectId: parent.projectId, title: titleFromPrompt(prompt), parentIds: [parent.id] }),
         );
       });
       llm.release?.(parent.id); // the parent receives no more messages
-      children.forEach((child, i) => runs.start(child.id, prompts[i]));
+      children.forEach((child, i) => runs.start(child.id, branches[i].prompt, branches[i].attachments));
       return c.json(children, 201);
     })
 
@@ -152,8 +188,10 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
         return c.json(await llm.draftResult(ctx, c.req.raw.signal));
       } catch (err) {
         console.error(`[draft] node ${node.id}:`, err);
+        const error = classifyError(err);
+        runs.noteFailure(error);
         // The dialog shows this and offers to write the result by hand.
-        throw new HttpError(502, err instanceof Error ? err.message : 'Drafting the result failed');
+        throw new HttpError(502, error.message);
       }
     })
 

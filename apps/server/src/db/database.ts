@@ -47,6 +47,14 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
   UPDATE nodes SET session_id = NULL;
   `,
+  // 5: where a title came from (the model may replace 'prompt' titles, never 'user' ones), and the
+  // title a node was created with, which prompts keep using after a rename.
+  `
+  ALTER TABLE nodes ADD COLUMN title_source TEXT NOT NULL DEFAULT 'prompt'
+    CHECK (title_source IN ('prompt', 'model', 'user'));
+  ALTER TABLE nodes ADD COLUMN prompt_title TEXT;
+  UPDATE nodes SET prompt_title = title;
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

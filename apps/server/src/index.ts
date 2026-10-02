@@ -20,8 +20,8 @@ if (daily) console.log(`daily backup: ${daily}`);
 const backup = (label: string) => backupDatabase(db, backupDir, label);
 
 const repo = new Repository(db);
-// Until the projects sidebar exists, everything lives in one default project.
-if (!repo.getProject('default')) repo.createProject('default', 'My research', 'Main thread');
+// A first start gets one project to begin with; more are created from the sidebar.
+if (repo.listProjects().length === 0) repo.createProject('default', 'My research', 'Main thread');
 
 const llm = providerFromEnv();
 const workspaces = new Workspaces(dataDir);
@@ -35,5 +35,5 @@ serve({ fetch: app.fetch, port }, (info) => {
   console.log(`server listening on http://localhost:${info.port}`);
   console.log(`database: ${dbFile} (backups in ${backupDir})`);
   console.log(`model: ${llm.label}`);
-  console.log(`project folders: ${workspaces.folderOf(repo.getProject('default')!)} (default project)`);
+  console.log(`projects: ${repo.listProjects().map((p) => `${p.name} (${workspaces.folderOf(p)})`).join(', ')}`);
 });

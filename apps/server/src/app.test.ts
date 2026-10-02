@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, NodeDetail } from '@harness/shared';
+import type { Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, NodeDetail, Project, ProjectSummary } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.ts';
 import type { ChatRequest } from './dag/prompt.ts';
@@ -18,6 +18,11 @@ class FakeProvider implements LLMProvider {
   readonly label = 'fake';
   requests: ChatRequest[] = [];
   private gate: (() => void) | null = null;
+  /** The next reply fails with this error, after reporting its session. */
+  failNext: Error | null = null;
+  /** What suggestTitle answers (null: the provider can't suggest titles). */
+  title: string | null = null;
+  titleCalls = 0;
 
   release() {
     this.gate?.();
@@ -30,6 +35,9 @@ class FakeProvider implements LLMProvider {
     this.contexts.push(ctx);
     this.requests.push(request);
     yield { type: 'session', sessionId: 'session-1' };
+    const failure = this.failNext;
+    this.failNext = null;
+    if (failure) throw failure;
     yield { type: 'thinking' };
     if (message.includes('search')) {
       const call = { id: 'call-1', name: 'web_search', input: 'memory papers', status: 'running' as const, results: [] };
@@ -51,6 +59,12 @@ class FakeProvider implements LLMProvider {
     this.requests.push(request);
     return { findings: 'drafted', evidence: '', openQuestions: '', confidence: 'medium' };
   }
+
+  suggestTitle = async (): Promise<string> => {
+    this.titleCalls++;
+    if (this.title === null) throw new Error('no title');
+    return this.title;
+  };
 }
 
 const RESULT: BranchResult = { findings: 'It works', evidence: 'tests', openQuestions: '', confidence: 'high' };
@@ -92,8 +106,9 @@ async function settle(nodeId: string) {
 }
 
 /** Fork, and wait for the branches' first replies. */
-async function fork(nodeId: string, prompts: string[]) {
-  const { data } = await call<DagNode[]>('POST', `/nodes/${nodeId}/fork`, { prompts });
+async function fork(nodeId: string, prompts: string[], attachments: Attachment[][] = []) {
+  const branches = prompts.map((prompt, i) => ({ prompt, attachments: attachments[i] ?? [] }));
+  const { data } = await call<DagNode[]>('POST', `/nodes/${nodeId}/fork`, { branches });
   for (const child of data) await settle(child.id);
   return data;
 }
@@ -375,8 +390,137 @@ describe('API', () => {
     expect((await detail(rootId)).messages.map((m) => m.content)).toContain('Precious research');
   });
 
-  it('renames a node', async () => {
-    const { data } = await call<DagNode>('PATCH', `/nodes/${rootId}`, { title: 'Renamed' });
-    expect(data.title).toBe('Renamed');
+  it('renames a node; prompts keep the title it was created with', async () => {
+    await chat(rootId, 'Scope it');
+    const [a] = await fork(rootId, ['Survey retrieval methods']);
+    const { data } = await call<DagNode>('PATCH', `/nodes/${a.id}`, { title: 'Renamed' });
+    expect(data).toMatchObject({ title: 'Renamed', titleSource: 'user', promptTitle: 'Survey retrieval methods' });
+
+    await chat(a.id, 'More');
+    const prompt = llm.requests.at(-1)!.turns.map((t) => t.content).join('\n');
+    expect(prompt).toContain('A new branch starts here: "Survey retrieval methods"');
+    expect(prompt).not.toContain('Renamed');
+  });
+
+  it('lets a small model title a node after its first reply, never over a user title', async () => {
+    llm.title = '"Retrieval Methods Survey."';
+    await chat(rootId, 'Scope it');
+    const titleOf = async (id: string) => (await detail(id)).node;
+    for (let i = 0; i < 50 && (await titleOf(rootId)).titleSource === 'prompt'; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(await titleOf(rootId)).toMatchObject({ title: 'Retrieval Methods Survey', titleSource: 'model', promptTitle: 'Main thread' });
+
+    // Only after the first reply.
+    await chat(rootId, 'Again');
+    expect(llm.titleCalls).toBe(1);
+
+    // A branch the user renamed before its first reply finished keeps the user's title.
+    const [a] = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, { branches: [{ prompt: 'slow branch' }] }).then((r) => r.data);
+    await call('PATCH', `/nodes/${a.id}`, { title: 'Mine' });
+    llm.release();
+    await settle(a.id);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await titleOf(a.id)).toMatchObject({ title: 'Mine', titleSource: 'user' });
+  });
+
+  it('suggests a title on request without saving it', async () => {
+    llm.title = 'Suggested Title';
+    await chat(rootId, 'Scope it');
+    const { data } = await call<{ title: string }>('POST', `/nodes/${rootId}/title/suggest`);
+    expect(data.title).toBe('Suggested Title');
+  });
+
+  it('reports a reached usage limit, keeps no session, and retries the message', async () => {
+    llm.failNext = new Error("You've hit your limit · resets 5pm");
+    const events = await chat(rootId, 'Scope it');
+    expect(events.at(-1)).toMatchObject({ type: 'error', kind: 'usage_limit', error: expect.stringContaining('usage limit') });
+
+    let graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+    expect(graph.usage).toMatchObject({ status: 'reached' });
+    expect(graph.nodes[0]).toMatchObject({ lastRole: 'user', sessionId: null }); // a fresh start on retry
+
+    expect((await call('POST', `/nodes/${rootId}/retry`)).status).toBe(200);
+    await settle(rootId);
+    const d = await detail(rootId);
+    expect(d.messages.map((m) => [m.role, m.content])).toEqual([['user', 'Scope it'], ['assistant', 'Hello there']]);
+    expect(d.node.sessionId).toBe('session-1');
+    expect(llm.contexts.at(-1)!.message).toBe('Scope it'); // the same message, sent once more
+    graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+    expect(graph.usage).toBeNull(); // a reply went through
+
+    // Nothing to retry once the last message has its reply.
+    expect((await call('POST', `/nodes/${rootId}/retry`)).status).toBe(409);
+  });
+
+  it('says plainly when Claude is not signed in', async () => {
+    llm.failNext = new Error('Invalid API key · Please run /login');
+    const events = await chat(rootId, 'Scope it');
+    expect(events.at(-1)).toMatchObject({ type: 'error', kind: 'auth', error: expect.stringContaining('not signed in') });
+  });
+
+  it('forks with files for each branch', async () => {
+    await chat(rootId, 'Scope it');
+    const { data: paper } = await upload('paper.tex', 'x');
+    const [a, b] = await fork(rootId, ['Read the paper', 'No files'], [[paper]]);
+    expect((await detail(a.id)).messages[0].attachments).toEqual([paper]);
+    expect((await detail(b.id)).messages[0].attachments).toEqual([]);
+    expect(llm.contexts.find((c) => c.nodeId === a.id)!.message).toContain(paper.path);
+
+    const bad = await call('POST', `/nodes/${b.id}/fork`, {
+      branches: [{ prompt: 'x', attachments: [{ name: 'hosts', path: 'C:\\Windows\\hosts', size: 1 }] }],
+    });
+    expect(bad.status).toBe(400);
+  });
+
+  it('creates projects, each with its own root, and lists the most recently used first', async () => {
+    const { status, data: test } = await call<Project>('POST', '/projects', { name: 'Testing' });
+    expect(status).toBe(201);
+    expect(test).toMatchObject({ name: 'Testing', folder: null });
+
+    const graph = (await call<GraphResponse>('GET', `/projects/${test.id}/graph`)).data;
+    expect(graph.nodes.map((n) => [n.title, n.parentIds])).toEqual([['Main thread', []]]);
+    await chat(graph.nodes[0].id, 'Hi'); // used last, so listed first
+
+    const list = (await call<ProjectSummary[]>('GET', '/projects')).data;
+    expect(list.map((p) => [p.name, p.nodeCount, p.running])).toEqual([['Testing', 1, false], ['Test', 1, false]]);
+    // The other project is untouched.
+    expect((await call<GraphResponse>('GET', '/projects/default/graph')).data.nodes[0].messageCount).toBe(0);
+
+    const renamed = await call<Project>('PATCH', `/projects/${test.id}`, { name: 'Sandbox' });
+    expect(renamed.data.name).toBe('Sandbox');
+    expect((await call('POST', '/projects', { name: '  ' })).status).toBe(400);
+  });
+
+  it('creates a project in a folder the user chose, and refuses unsuitable folders', async () => {
+    const folder = mkdtempSync(path.join(tmpdir(), 'harness-thesis-'));
+    const { status, data } = await call<Project>('POST', '/projects', { name: 'Thesis', folder });
+    expect(status).toBe(201);
+    expect(path.resolve(data.folder!)).toBe(path.resolve(realpathSync(folder)));
+    expect(existsSync(path.join(folder, '.harness', '.gitignore'))).toBe(true);
+
+    for (const bad of ['relative/path', path.join(folder, 'missing'), path.parse(folder).root]) {
+      expect((await call('POST', '/projects', { name: 'Bad', folder: bad })).status).toBe(400);
+    }
+  });
+
+  it('opens the folder dialog on this machine and returns the chosen folder', async () => {
+    const asked: unknown[] = [];
+    const withPicker = createApp({ repo, llm, workspaces, pickFolder: async (opts) => (asked.push(opts), 'D:\\Thesis') });
+    const res = await withPicker.request('/api/system/pick-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Working folder' }),
+    });
+    expect(await res.json()).toEqual({ path: 'D:\\Thesis' });
+    expect(asked).toEqual([{ title: 'Working folder' }]);
+  });
+
+  it('gives a merged node a default title the model may replace, unless the user wrote one', async () => {
+    await chat(rootId, 'Scope it');
+    const [a, b] = await fork(rootId, ['A', 'B']);
+    await call('PUT', `/nodes/${a.id}/result`, RESULT);
+    await call('PUT', `/nodes/${b.id}/result`, RESULT);
+    const auto = await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Go' });
+    expect(auto.data).toMatchObject({ title: 'Synthesis: A + B', titleSource: 'prompt' });
+    await settle(auto.data.id);
   });
 });

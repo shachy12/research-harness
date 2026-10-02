@@ -1,23 +1,27 @@
 import { type Attachment, type DagNode, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
-import { FolderIcon, PaperclipIcon } from 'lucide-react'
+import { PencilIcon } from 'lucide-react'
 import { Fragment, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { useGraph, useNodeDetail } from '@/api/queries'
+import { useGraph, useNodeDetail, useRetry } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
+import { UsageBanner } from '@/components/UsageBanner'
 import { activityOf } from '@/lib/activity'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ForkDialog } from '@/features/fork/ForkDialog'
+import { RenameDialog } from '@/features/rename/RenameDialog'
 import { ResultBlock } from '@/features/result/ResultBlock'
 import { ResultDialog } from '@/features/result/ResultDialog'
-import { groupPickedFolder, readDrop } from '@/lib/dropped-files'
+import { describeReset, limitName } from '@/lib/limit'
 import { contextTokens } from '@/lib/tokens'
+import { useDropZone } from '@/lib/useDropZone'
 import { useNow } from '@/lib/useNow'
-import { AttachmentChip } from './AttachmentChip'
+import { AttachMenu } from './AttachMenu'
+import { PendingAttachments } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
 import { useAttachments } from './useAttachments'
 import { MessageView } from './MessageView'
-import { useChatStream } from './useChatStream'
+import { type StreamError, useChatStream } from './useChatStream'
 
 /** One component instance per node, so streaming state never leaks between nodes. */
 export function ChatPage() {
@@ -25,7 +29,7 @@ export function ChatPage() {
   return <ChatView key={nodeId} projectId={projectId!} nodeId={nodeId!} />
 }
 
-type DialogKind = 'fork' | 'result' | null
+type DialogKind = 'fork' | 'result' | 'rename' | null
 
 function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) {
   const detail = useNodeDetail(nodeId)
@@ -76,6 +80,7 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
         />
       )}
       {dialog === 'result' && <ResultDialog node={node} onClose={() => setDialog(null)} />}
+      {dialog === 'rename' && <RenameDialog node={node} onClose={() => setDialog(null)} />}
     </div>
   )
 }
@@ -84,12 +89,12 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const { node, messages, inherited, childIds } = detail
   const stream = useChatStream(node.id)
   const files = useAttachments(node.projectId)
+  const retry = useRetry()
   const [draft, setDraft] = useState('')
-  const [dragging, setDragging] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
-  const folderInput = useRef<HTMLInputElement>(null)
   const canWrite = node.status === 'open'
+  // Drop files and folders anywhere on the chat to attach them to the next message.
+  const drop = useDropZone(files.addPicked, canWrite)
 
   // The streamed copies are shown until the refetched saved messages replace them, so nothing appears twice.
   const [sentFiles, setSentFiles] = useState<Attachment[]>([])
@@ -139,33 +144,13 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
   const hasReply = messages.some((m) => m.role === 'assistant')
   const canFinish = node.status === 'open' && node.parentIds.length > 0
-
-  // Drop files anywhere on the chat to attach them to the next message.
-  const dropProps = canWrite
-    ? {
-        onDragOver: (e: React.DragEvent) => {
-          if (!e.dataTransfer.types.includes('Files')) return
-          e.preventDefault()
-          setDragging(true)
-        },
-        onDragLeave: (e: React.DragEvent) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false)
-        },
-        onDrop: (e: React.DragEvent) => {
-          e.preventDefault()
-          setDragging(false)
-          // Files and whole folders; readDrop must start during the event (the browser clears it after).
-          void readDrop(e.dataTransfer).then((picked) => {
-            if (picked.files.length) files.addFiles(picked.files)
-            if (picked.folders.length) files.addFolders(picked.folders)
-          })
-        },
-      }
-    : {}
+  // The last message is yours and nothing is answering it: the reply failed or was stopped early.
+  const unanswered = canWrite && !working && messages.at(-1)?.role === 'user'
+  const limitReached = detail.usage?.status === 'reached'
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col" {...dropProps}>
-      {dragging && (
+    <div className="relative flex min-h-0 flex-1 flex-col" {...drop.props}>
+      {drop.dragging && (
         <div className="pointer-events-none absolute inset-2 z-10 grid place-items-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-primary">
           Drop files or folders to attach them to your next message
         </div>
@@ -173,14 +158,28 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold text-balance">{node.title}</h1>
+            <h1 className="text-xl font-semibold text-balance">
+              {node.title}
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="ml-1 align-middle text-muted-foreground"
+                aria-label="Rename"
+                title="Rename"
+                onClick={() => onDialog('rename')}
+              >
+                <PencilIcon />
+              </Button>
+            </h1>
             <StatusChip
               status={node.status}
-              activity={activityOf(node.status, stream.active || detail.running, messages.at(-1)?.role ?? null)}
+              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached)}
               elapsed={elapsed}
             />
             {node.parentIds.length > 1 && <MergeChip />}
           </div>
+
+          <UsageBanner usage={detail.usage} />
 
           <InheritedContext items={inherited} />
 
@@ -206,7 +205,22 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
               {elapsed && <span className="shrink-0">· {elapsed}</span>}
             </p>
           )}
-          {stream.error && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{stream.error}</p>}
+          {unanswered ? (
+            <NoReply
+              error={stream.error}
+              limit={limitReached ? detail.usage : null}
+              retrying={retry.isPending}
+              retryError={retry.error?.message}
+              onRetry={() => {
+                stream.clearError()
+                retry.mutate(node.id)
+              }}
+            />
+          ) : (
+            stream.error && (
+              <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{stream.error.message}</p>
+            )
+          )}
 
           {node.result && <ResultBlock result={node.result} onEdit={() => onDialog('result')} />}
           <div ref={endRef} />
@@ -223,67 +237,9 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
                 submit()
               }}
             >
-              {files.files.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {files.files.map((f) => (
-                    <AttachmentChip
-                      key={f.key}
-                      name={f.name}
-                      size={f.size}
-                      kind={f.kind}
-                      fileCount={f.fileCount}
-                      status={f.status}
-                      error={f.error}
-                      onRemove={() => files.remove(f.key)}
-                    />
-                  ))}
-                </div>
-              )}
+              <PendingAttachments files={files.files} onRemove={files.remove} />
               <div className="flex items-end gap-2">
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                hidden
-                accept=".pdf,.tex,.bib,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.gif,.webp"
-                onChange={(e) => {
-                  if (e.target.files?.length) files.addFiles(e.target.files)
-                  e.target.value = '' // allow picking the same file again
-                }}
-              />
-              <input
-                ref={folderInput}
-                type="file"
-                hidden
-                // Folder picker; React has no typed prop for this browser attribute.
-                {...{ webkitdirectory: '' }}
-                onChange={(e) => {
-                  if (e.target.files?.length) files.addFolders(groupPickedFolder(e.target.files))
-                  e.target.value = ''
-                }}
-              />
-              <div className="flex flex-col gap-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-sm"
-                  aria-label="Attach files"
-                  title="Attach files (PDF, LaTeX, text, images) — or drop them on the chat"
-                  onClick={() => fileInput.current?.click()}
-                >
-                  <PaperclipIcon />
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-sm"
-                  aria-label="Attach a folder"
-                  title="Attach a folder (e.g. a LaTeX project) — or drop folders on the chat"
-                  onClick={() => folderInput.current?.click()}
-                >
-                  <FolderIcon />
-                </Button>
-              </div>
+              <AttachMenu onFiles={files.addFiles} onFolders={files.addFolders} />
               <Textarea
                 aria-label="Message"
                 rows={2}
@@ -335,6 +291,32 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/** The last message got no reply: say why (when known) and offer to send it again. */
+function NoReply({ error, limit, retrying, retryError, onRetry }: {
+  error: StreamError | null
+  limit: NodeDetail['usage']
+  retrying: boolean
+  retryError?: string
+  onRetry: () => void
+}) {
+  const now = useNow(true, 30_000)
+  const resetsAt = error?.resetsAt ?? limit?.resetsAt
+  const message =
+    error?.kind === 'usage_limit' || (!error && limit)
+      ? `Claude ${limit ? limitName(limit) : 'usage limit'} reached${resetsAt ? `: it resets at ${describeReset(resetsAt, now)}` : ''}. Retry once it has reset.`
+      : (error?.message ?? 'No reply: it failed or was stopped before writing anything.')
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      <span className="min-w-0 flex-1">{message}</span>
+      <Button size="sm" variant="outline" className="bg-background text-foreground" disabled={retrying} onClick={onRetry}>
+        {retrying ? 'Retrying…' : 'Retry'}
+      </Button>
+      {retryError && <span className="basis-full">{retryError}</span>}
     </div>
   )
 }

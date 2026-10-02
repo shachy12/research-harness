@@ -1,10 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
   type GraphResponse,
+  type ProjectSummary,
+  createProjectSchema,
+  renameProjectSchema,
   MAX_FOLDER_BYTES,
   MAX_FOLDER_FILES,
   MAX_UPLOAD_BYTES,
   type NodeSummary,
+  defaultMergeTitle,
   mergeSchema,
 } from '@harness/shared';
 import { Hono } from 'hono';
@@ -13,6 +18,36 @@ import { conflict, HttpError, notFound } from './errors.ts';
 
 export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps) {
   return new Hono()
+    .get('/', (c) =>
+      c.json<ProjectSummary[]>(
+        repo.listProjects().map((p) => ({
+          ...p,
+          running: repo.listNodes(p.id).some((n) => runs.isRunning(n.id)),
+        })),
+      ),
+    )
+
+    // A new project starts with an empty root node. Its folder is fixed from now on.
+    .post('/', zValidator('json', createProjectSchema), (c) => {
+      const { name, folder } = c.req.valid('json');
+      let chosen: string | null = null;
+      if (folder) {
+        const checked = workspaces.checkFolder(folder);
+        if (typeof checked !== 'string') throw new HttpError(400, checked.error);
+        chosen = checked;
+      }
+      const project = repo.createProject(randomUUID(), name, 'Main thread', chosen);
+      workspaces.prepare(project);
+      return c.json(project, 201);
+    })
+
+    .patch('/:projectId', zValidator('json', renameProjectSchema), (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      repo.setProjectName(project.id, c.req.valid('json').name);
+      return c.json(repo.getProject(project.id)!);
+    })
+
     // Upload a file (multipart field "file"). It is copied into the project's .harness/uploads/ and
     // can then be attached to a message; the model reads it from there.
     .post('/:projectId/uploads', async (c) => {
@@ -70,9 +105,10 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps
           lastRole: last?.role ?? null,
           running: runs.isRunning(node.id),
           run: runs.status(node.id),
+          titlePending: runs.isTitling(node.id),
         };
       });
-      return c.json<GraphResponse>({ project, nodes });
+      return c.json<GraphResponse>({ project, nodes, usage: runs.usage() });
     })
 
     // Create a merge node from finished branches and start it working on its first message.
@@ -82,12 +118,16 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps
       const parentIds = [...new Set(c.req.valid('json').parentIds)];
       if (parentIds.length < 2) throw new HttpError(400, 'Select at least two different branches');
 
-      for (const id of parentIds) {
+      const parents = parentIds.map((id) => {
         const parent = repo.getNode(id);
         if (!parent || parent.projectId !== projectId) throw notFound(`Node ${id}`);
         if (parent.status !== 'finished') throw conflict(`"${parent.title}" is not finished yet`);
-      }
-      const node = repo.createNode({ projectId, title, parentIds });
+        return parent;
+      });
+      // A title the user wrote is final; the default one may be replaced by a model-written title.
+      const node = title
+        ? repo.createNode({ projectId, title, parentIds, titleSource: 'user' })
+        : repo.createNode({ projectId, title: defaultMergeTitle(parents.map((p) => p.title)), parentIds });
       runs.start(node.id, prompt);
       return c.json(node, 201);
     })

@@ -1,7 +1,14 @@
-import type { Attachment, ChatStreamEvent, ToolCall } from '@harness/shared'
+import type { Attachment, ChatStreamEvent, ErrorKind, ToolCall } from '@harness/shared'
 import { useEffect, useRef, useState } from 'react'
 import { stopReply, streamChat, watchChat } from '@/api/client'
 import { useRefreshAll } from '@/api/queries'
+
+/** Why the reply failed; `kind` and `resetsAt` say more when the server knows (e.g. the usage limit). */
+export interface StreamError {
+  message: string
+  kind?: ErrorKind
+  resetsAt?: string | null
+}
 
 export interface StreamState {
   /** The user message being answered (shown until the saved version arrives with the refetch). */
@@ -20,7 +27,7 @@ export interface StreamState {
    */
   baseline: number
   active: boolean
-  error: string | null
+  error: StreamError | null
 }
 
 const IDLE: StreamState = {
@@ -60,7 +67,7 @@ export function useChatStream(nodeId: string) {
         setState((s) => ({ ...s, thinking: false, toolCalls: upsert(s.toolCalls, event.call) }))
         break
       case 'error':
-        setState((s) => ({ ...s, error: event.error }))
+        setState((s) => ({ ...s, error: { message: event.error, kind: event.kind, resetsAt: event.resetsAt } }))
         break
     }
   }
@@ -75,7 +82,7 @@ export function useChatStream(nodeId: string) {
       await start(abort.signal)
     } catch (err) {
       if (abort.signal.aborted) return // this watch was dropped; the reply goes on without it
-      setState((s) => ({ ...s, error: err instanceof Error ? err.message : 'Sending failed' }))
+      setState((s) => ({ ...s, error: { message: err instanceof Error ? err.message : 'Sending failed' } }))
     }
     if (abort.signal.aborted) return
     await refresh()
@@ -97,5 +104,7 @@ export function useChatStream(nodeId: string) {
       return () => mine?.abort()
     },
     stop: () => void stopReply(nodeId),
+    /** Forget the last error (e.g. when retrying). */
+    clearError: () => setState((s) => ({ ...s, error: null })),
   }
 }

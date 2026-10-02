@@ -20,7 +20,9 @@ export const SYSTEM_PROMPT = `You are a research assistant in a workspace where 
 A conversation can be forked into branches, each exploring one sub-question with the full context of the conversation before it.
 When a branch is finished, its result (findings, evidence, open questions, confidence) is merged back into a later node; the branch transcript is not.
 Notes in square brackets mark where a branch starts or where branch results are merged in.
-You can search the web and fetch pages. Use them for anything that depends on current or specific facts, and cite your sources with links.`;
+You can search the web and fetch pages. Use them for anything that depends on current or specific facts, and cite your sources with links.
+
+Formatting: write Markdown; use tables for comparisons. Write math as $…$ inline and $$…$$ for displayed equations (not \\(…\\) or \\[…\\]), and escape dollar signs that are not math (\\$5). When giving LaTeX source for the user to copy (document fragments, macros, tables), put it in a \`\`\`latex code block so it is shown as code, not rendered.`;
 
 export function branchStartNote(title: string): string {
   return `[A new branch starts here: "${title}". It explores this sub-question using the conversation above as context. Stay focused on it; the findings will be summarized and merged back later.]`;
@@ -29,9 +31,9 @@ export function branchStartNote(title: string): string {
 export function resultsTurn(seg: Extract<Segment, { kind: 'results' }>): string {
   const blocks = seg.branches
     .filter((b) => b.result)
-    .map((b) => formatResult(b.title, b.result!));
+    .map((b) => formatResult(b.promptTitle, b.result!));
   return [
-    `[Merge node "${seg.mergeNode.title}". The following branches were explored separately and are merged here. Only their final results are included, not their transcripts.]`,
+    `[Merge node "${seg.mergeNode.promptTitle}". The following branches were explored separately and are merged here. Only their final results are included, not their transcripts.]`,
     ...blocks,
   ].join('\n\n');
 }
@@ -73,7 +75,7 @@ export function segmentTurns(seg: Segment): ChatTurn[] {
         content: m.role === 'user' ? withAttachments(m.content, m.attachments) : withSources(m),
       }));
     case 'branch-start':
-      return [{ role: 'user', content: branchStartNote(seg.node.title) }];
+      return [{ role: 'user', content: branchStartNote(seg.node.promptTitle) }];
     case 'results':
       return [{ role: 'user', content: resultsTurn(seg) }];
   }

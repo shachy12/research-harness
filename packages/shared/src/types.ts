@@ -41,10 +41,19 @@ export interface BranchResult {
   confidence: Confidence;
 }
 
+/** Where a node's title came from. The model only replaces `prompt` titles; a user rename is final. */
+export type TitleSource = 'prompt' | 'model' | 'user';
+
 export interface DagNode {
   id: string;
   projectId: string;
   title: string;
+  titleSource: TitleSource;
+  /**
+   * The title the node was created with. Prompts use this one, so renaming a node never changes
+   * what the model sees (or invalidates its prompt cache).
+   */
+  promptTitle: string;
   /** Empty for the root, one id for a normal branch, two or more for a merge node. */
   parentIds: string[];
   status: NodeStatus;
@@ -87,6 +96,15 @@ export type ContextItem =
 
 // ---- API responses ----
 
+/** A project as listed in the sidebar. */
+export interface ProjectSummary extends Project {
+  nodeCount: number;
+  /** Some node in the project is writing a reply. */
+  running: boolean;
+  /** The newest message (or the project's creation), for sorting. */
+  updatedAt: string;
+}
+
 /** A node as shown on a graph card. */
 export interface NodeSummary extends DagNode {
   messageCount: number;
@@ -97,6 +115,8 @@ export interface NodeSummary extends DagNode {
   running: boolean;
   /** When the running reply started and what it is doing; null when not running. */
   run: RunStatus | null;
+  /** A model-written title is on its way (refresh to show it). */
+  titlePending: boolean;
 }
 
 export interface RunStatus {
@@ -108,6 +128,24 @@ export interface RunStatus {
 export interface GraphResponse {
   project: Project;
   nodes: NodeSummary[];
+  usage: UsageLimit | null;
+}
+
+/** Why a model call failed, so the UI can say it plainly. */
+export type ErrorKind = 'usage_limit' | 'auth' | 'billing' | 'other';
+
+/**
+ * The Claude usage limit, as last reported: close to it (`warning`) or reached. Account-wide, so
+ * it applies to every node. Null when nothing is known or the limit has reset.
+ */
+export interface UsageLimit {
+  status: 'warning' | 'reached';
+  /** When it resets (ISO time), if known. */
+  resetsAt: string | null;
+  /** e.g. 'five_hour', 'seven_day' (Claude Code), if known. */
+  limitType: string | null;
+  /** How much of the limit is used, 0–1, if the provider said (Claude Code does with its warnings). */
+  utilization: number | null;
 }
 
 export interface NodeDetail {
@@ -119,6 +157,8 @@ export interface NodeDetail {
   /** The model is writing a reply right now (attach with GET /api/nodes/:id/stream). */
   running: boolean;
   run: RunStatus | null;
+  titlePending: boolean;
+  usage: UsageLimit | null;
 }
 
 /**
@@ -137,7 +177,7 @@ export type ChatStreamEvent =
   /** A tool call started or got its results; replaces any earlier event with the same call id. */
   | { type: 'tool'; call: ToolCall }
   | { type: 'done'; message: Message }
-  | { type: 'error'; error: string };
+  | { type: 'error'; error: string; kind?: ErrorKind; resetsAt?: string | null };
 
 export interface ApiError {
   error: string;

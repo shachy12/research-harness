@@ -3,6 +3,7 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { type BranchResult, type ToolCall, branchResultSchema } from '@harness/shared';
 import type { ChatTurn } from '../dag/prompt.ts';
 import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
+import { TITLE_SYSTEM_PROMPT, titleRequest } from './title.ts';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -22,6 +23,9 @@ const RESEARCH_TOOLS: Anthropic.Beta.BetaToolUnion[] = [
   { type: 'web_search_20260209', name: 'web_search', max_uses: 10 },
   { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 10 },
 ];
+
+// Small and fast: titles cost a fraction of a cent.
+const TITLE_MODEL = 'claude-haiku-4-5-20251001';
 
 // A long server-side tool loop can pause; we resume it this many times at most.
 const MAX_CONTINUATIONS = 5;
@@ -164,5 +168,18 @@ export class AnthropicProvider implements LLMProvider {
       throw new Error('The model could not draft a result for this branch. Write it by hand instead.');
     }
     return response.parsed_output;
+  }
+
+  async suggestTitle({ prompt, reply }: { prompt: string; reply: string }, signal: AbortSignal): Promise<string> {
+    const response = await this.client.messages.create(
+      {
+        model: TITLE_MODEL,
+        max_tokens: 50,
+        system: TITLE_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: titleRequest(prompt, reply) }],
+      },
+      { signal },
+    );
+    return response.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
   }
 }

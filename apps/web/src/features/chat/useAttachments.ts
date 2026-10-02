@@ -1,7 +1,7 @@
 import { type Attachment, MAX_FOLDER_BYTES, MAX_FOLDER_FILES, MAX_UPLOAD_BYTES } from '@harness/shared'
 import { useState } from 'react'
 import { uploadFile, uploadFolder } from '@/api/client'
-import type { PickedFolder } from '@/lib/dropped-files'
+import type { PickedFolder, PickedItems } from '@/lib/dropped-files'
 
 export interface PendingFile {
   key: string
@@ -67,6 +67,11 @@ export function useAttachments(projectId: string) {
     files,
     addFiles,
     addFolders,
+    /** Files and folders from a drop. */
+    addPicked: (picked: PickedItems) => {
+      if (picked.files.length) addFiles(picked.files)
+      if (picked.folders.length) addFolders(picked.folders)
+    },
     remove: (key: string) => setFiles((list) => list.filter((f) => f.key !== key)),
     clear: () => setFiles([]),
     ready: files.flatMap((f) => (f.status === 'ready' && f.attachment ? [f.attachment] : [])),

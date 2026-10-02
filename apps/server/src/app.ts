@@ -5,6 +5,8 @@ import { HttpError } from './routes/errors.ts';
 import { nodeRoutes } from './routes/nodes.ts';
 import { projectRoutes } from './routes/projects.ts';
 import { RunManager } from './runs.ts';
+import { systemRoutes } from './routes/system.ts';
+import { pickFolder } from './system/folder-picker.ts';
 import type { Workspaces } from './workspace.ts';
 
 export interface AppDeps {
@@ -13,15 +15,22 @@ export interface AppDeps {
   workspaces: Workspaces;
   /** Back up the database (e.g. before "Start over"); returns the backup's path. Absent in tests. */
   backup?: (label: string) => string;
+  /** Show the OS folder dialog (tests pass a fake). */
+  pickFolder?: typeof pickFolder;
 }
 
 export interface RouteDeps extends AppDeps {
   runs: RunManager;
+  pickFolder: typeof pickFolder;
 }
 
 // Dependencies are passed in, so tests can use an in-memory database and a fake model.
 export function createApp(deps: AppDeps) {
-  const routeDeps: RouteDeps = { ...deps, runs: new RunManager(deps.repo, deps.llm, deps.workspaces) };
+  const routeDeps: RouteDeps = {
+    ...deps,
+    runs: new RunManager(deps.repo, deps.llm, deps.workspaces),
+    pickFolder: deps.pickFolder ?? pickFolder,
+  };
   return new Hono()
     .basePath('/api')
     .onError((err, c) => {
@@ -31,7 +40,8 @@ export function createApp(deps: AppDeps) {
     })
     .get('/health', (c) => c.json({ ok: true, model: deps.llm.label }))
     .route('/projects', projectRoutes(routeDeps))
-    .route('/nodes', nodeRoutes(routeDeps));
+    .route('/nodes', nodeRoutes(routeDeps))
+    .route('/system', systemRoutes(routeDeps));
 }
 
 export type AppType = ReturnType<typeof createApp>;

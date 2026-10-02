@@ -112,6 +112,47 @@ describe('ClaudeCodeProvider', () => {
     expect(log().filter((e) => e.argv)).toHaveLength(2);
   });
 
+  it('explains a reached usage limit, with its reset time, and starts fresh next time', async () => {
+    const signal = new AbortController().signal;
+    const events: ReplyEvent[] = [];
+    const failed = (async () => {
+      for await (const e of provider.streamReply(ctx('hit-limit please', NEW), signal)) events.push(e);
+    })();
+    await expect(failed).rejects.toMatchObject({
+      kind: 'usage_limit',
+      resetsAt: new Date(1790000000 * 1000).toISOString(),
+      message: expect.stringContaining("You've hit your limit"),
+    });
+    expect(events).toContainEqual({
+      type: 'limit',
+      limit: { status: 'reached', resetsAt: new Date(1790000000 * 1000).toISOString(), limitType: 'five_hour', utilization: 1 },
+    });
+    await collect(provider.streamReply(ctx('ok', NEW), signal));
+    expect(log().filter((e) => e.argv)).toHaveLength(2); // the failed process was not reused
+  });
+
+  it('passes on a warning when close to the limit, with how much is used', async () => {
+    const events = await collect(provider.streamReply(ctx('warn me', NEW), new AbortController().signal));
+    expect(events).toContainEqual({
+      type: 'limit',
+      limit: { status: 'warning', resetsAt: new Date(1790000000 * 1000).toISOString(), limitType: 'seven_day', utilization: 0.25 },
+    });
+    expect(replyText(events)).toBe('echo: warn me');
+  });
+
+  it('explains a usage limit when drafting a result', async () => {
+    const plan: SessionPlan = { mode: 'resume', sessionId: 'SA', preamble: null, transcript: [] };
+    await expect(provider.draftResult(ctx('hit-limit', plan), new AbortController().signal)).rejects.toMatchObject({ kind: 'usage_limit' });
+  });
+
+  it('suggests a title with a small model, without tools or a saved session', async () => {
+    const title = await provider.suggestTitle({ prompt: 'Compare A and B', reply: 'A is…', workDir: dir }, new AbortController().signal);
+    expect(title).toBe('"Fake Title."'); // cleaned up by the caller
+    const [run] = log();
+    expect(run.argv).toEqual(expect.arrayContaining(['--model', 'haiku', '--no-session-persistence', '--tools', '']));
+    expect(run.prompt).toContain('Compare A and B');
+  });
+
   it('drafts a result in a throwaway fork', async () => {
     const plan: SessionPlan = { mode: 'resume', sessionId: 'SA', preamble: null, transcript: [] };
     const result = await provider.draftResult(ctx('write the result', plan), new AbortController().signal);

@@ -23,13 +23,19 @@ export interface SessionPlan {
 
 const turnsOf = (segments: Segment[]) => segments.flatMap(segmentTurns);
 
-export function planSession(graph: GraphReader, nodeId: string): SessionPlan {
+/**
+ * `retry`: the node's last message is a saved user message that got no reply and is being sent
+ * again, so plan as if it weren't saved yet.
+ */
+export function planSession(graph: GraphReader, nodeId: string, { retry = false } = {}): SessionPlan {
   const node = graph.node(nodeId);
   if (node.sessionId) return { mode: 'resume', sessionId: node.sessionId, preamble: null, transcript: [] };
 
   // Messages exist but no session (written by another provider): replay everything as a transcript.
-  if (graph.messages(nodeId).length > 0) {
-    return { mode: 'new', sessionId: null, preamble: null, transcript: turnsOf(fullSegments(graph, nodeId)) };
+  const earlier = graph.messages(nodeId).length - (retry ? 1 : 0);
+  if (earlier > 0) {
+    const transcript = turnsOf(fullSegments(graph, nodeId));
+    return { mode: 'new', sessionId: null, preamble: null, transcript: retry ? transcript.slice(0, -1) : transcript };
   }
 
   if (node.parentIds.length === 0) return { mode: 'new', sessionId: null, preamble: null, transcript: [] };
@@ -37,7 +43,7 @@ export function planSession(graph: GraphReader, nodeId: string): SessionPlan {
   // The session to copy: the parent's, or for a merge node, the base's (where the merged branches forked).
   const inherited = inheritedSegments(graph, nodeId);
   const results = inherited.find((s) => s.kind === 'results');
-  const preamble = results ? resultsTurn(results) : branchStartNote(node.title);
+  const preamble = results ? resultsTurn(results) : branchStartNote(node.promptTitle);
   const sourceSegments = results ? inherited.slice(0, -1) : inherited;
   const sourceId = results ? baseOf(inherited) : node.parentIds[0];
   const source = sourceId ? graph.node(sourceId) : null;

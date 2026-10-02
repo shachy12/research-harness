@@ -19,6 +19,17 @@ if (flag('--input-format') === 'stream-json') {
     if (text.includes('crash')) process.exit(3);
 
     out({ type: 'system', subtype: 'init', session_id: sessionId });
+    if (text.includes('hit-limit')) {
+      // What the CLI sends when the usage limit is reached.
+      const limitText = "You've hit your limit · resets 5pm";
+      out({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1790000000, rateLimitType: 'five_hour' } });
+      out({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: limitText }] } });
+      out({ type: 'result', subtype: 'success', is_error: true, result: limitText, session_id: sessionId });
+      return;
+    }
+    if (text.includes('warn')) {
+      out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', resetsAt: 1790000000, rateLimitType: 'seven_day', utilization: 0.25 } });
+    }
     if (text.includes('search')) {
       out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'WebSearch', input: { query: 'q' } }] } });
       out({
@@ -49,6 +60,14 @@ if (flag('--input-format') === 'stream-json') {
   process.stdin.on('data', (d) => (prompt += d));
   process.stdin.on('end', () => {
     log({ argv, prompt });
+    if (prompt.includes('hit-limit')) {
+      out({ type: 'result', subtype: 'success', is_error: true, result: "You've hit your limit · resets 5pm" });
+      return;
+    }
+    if (argv.includes('haiku')) {
+      out({ type: 'result', subtype: 'success', is_error: false, result: '"Fake Title."' });
+      return;
+    }
     out({
       type: 'result',
       subtype: 'success',

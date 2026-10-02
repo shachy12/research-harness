@@ -1,5 +1,6 @@
 import type { NodeSummary } from '@harness/shared'
 import { Handle, type Node, type NodeProps, Position } from '@xyflow/react'
+import { PencilIcon } from 'lucide-react'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
 import { formatElapsed } from '@harness/shared'
 import { activityOf } from '@/lib/activity'
@@ -12,6 +13,9 @@ export type CardData = {
   mergeSelected: boolean
   /** Changes each time the card should shake (right-click on a node that can't be merged). */
   shakeKey: number
+  /** The Claude usage limit is reached: a node without a reply shows that instead of "No reply". */
+  limitReached: boolean
+  onRename: (node: NodeSummary) => void
 }
 export type CardNode = Node<CardData, 'card'>
 
@@ -19,7 +23,7 @@ export type CardNode = Node<CardData, 'card'>
 const hiddenHandle = '!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent'
 
 export function NodeCard({ data }: NodeProps<CardNode>) {
-  const { summary: n, mergeSelected, shakeKey } = data
+  const { summary: n, mergeSelected, shakeKey, limitReached, onRename } = data
   const now = useNow(n.running)
   const elapsed = n.run ? formatElapsed(now - Date.parse(n.run.startedAt)) : undefined
 
@@ -28,7 +32,7 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
       key={shakeKey}
       style={{ width: CARD_WIDTH, height: CARD_HEIGHT }}
       className={cn(
-        'flex cursor-pointer flex-col gap-1.5 overflow-hidden rounded-xl border bg-card px-3 py-2.5 shadow-sm transition-colors hover:border-edge',
+        'group flex cursor-pointer flex-col gap-1.5 overflow-hidden rounded-xl border bg-card px-3 py-2.5 shadow-sm transition-colors hover:border-edge',
         mergeSelected && 'border-merge ring-3 ring-merge-soft',
         n.running && !mergeSelected && 'border-open/60',
         shakeKey > 0 && 'animate-shake',
@@ -36,11 +40,25 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
     >
       <Handle type="target" position={Position.Top} isConnectable={false} className={hiddenHandle} />
       <div className="flex items-center gap-1.5">
-        <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole)} elapsed={elapsed} />
+        <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole, limitReached)} elapsed={elapsed} />
         {n.parentIds.length > 1 && <MergeChip />}
         <span className="ml-auto font-mono text-[11px] text-muted-foreground">{n.messageCount} msg</span>
       </div>
-      <div className="line-clamp-1 text-sm font-semibold">{n.title}</div>
+      <div className="flex min-w-0 items-center gap-1">
+        <div className="line-clamp-1 min-w-0 text-sm font-semibold" title={n.title}>{n.title}</div>
+        <button
+          type="button"
+          aria-label={`Rename "${n.title}"`}
+          title="Rename"
+          className="nodrag shrink-0 rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100"
+          onClick={(e) => {
+            e.stopPropagation() // don't open the chat
+            onRename(n)
+          }}
+        >
+          <PencilIcon className="size-3.5" />
+        </button>
+      </div>
       {mergeSelected ? (
         <div className="self-start rounded-full bg-merge-soft px-2 py-0.5 text-[11px] font-semibold text-merge">
           ⑃ Selected for merge

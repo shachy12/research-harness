@@ -12,11 +12,14 @@ import {
 } from '@xyflow/react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
-import { useGraph } from '@/api/queries'
+import { useGraph, useRefreshAll } from '@/api/queries'
+import { api } from '@/api/client'
+import { UsageBanner } from '@/components/UsageBanner'
 import { Button } from '@/components/ui/button'
 import { RotateCcwIcon } from 'lucide-react'
 import { MergeDialog } from '@/features/merge/MergeDialog'
 import { useMergeSelection } from '@/features/merge/selection'
+import { RenameDialog } from '@/features/rename/RenameDialog'
 import { layoutGraph } from './layout'
 import { type CardNode, NodeCard } from './NodeCard'
 import { ResetDialog } from './ResetDialog'
@@ -43,7 +46,10 @@ function GraphView({ projectId }: { projectId: string }) {
   const [hint, setHint] = useState<string | null>(null)
   const [mergeOpen, setMergeOpen] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
+  const [renaming, setRenaming] = useState<NodeSummary | null>(null)
+  const [retrying, setRetrying] = useState(false)
   const flow = useReactFlow()
+  const refresh = useRefreshAll()
 
   const summaries = useMemo(() => graph.data?.nodes ?? [], [graph.data])
   const finishedIds = useMemo(
@@ -55,7 +61,20 @@ function GraphView({ projectId }: { projectId: string }) {
     if (graph.data) selection.keepOnly(finishedIds)
   }, [graph.data, finishedIds, selection])
 
-  const { nodes, edges } = useMemo(() => toFlow(summaries, selection.ids, shake), [summaries, selection.ids, shake])
+  const usage = graph.data?.usage ?? null
+  const limitReached = usage?.status === 'reached'
+  const { nodes, edges } = useMemo(
+    () => toFlow(summaries, selection.ids, shake, limitReached, setRenaming),
+    [summaries, selection.ids, shake, limitReached],
+  )
+  // Open nodes whose last message got no reply (failed, stopped, or hit the limit).
+  const unanswered = summaries.filter((n) => n.status === 'open' && !n.running && n.lastRole === 'user')
+  const retryAll = async () => {
+    setRetrying(true)
+    await Promise.allSettled(unanswered.map((n) => api.post(`/nodes/${n.id}/retry`)))
+    await refresh()
+    setRetrying(false)
+  }
 
   // Fit the view the first time, and whenever the number of nodes changed since the last visit.
   const memory = viewMemory.get(projectId)
@@ -106,6 +125,20 @@ function GraphView({ projectId }: { projectId: string }) {
       >
         <Background gap={20} size={1.2} color="var(--edge)" />
         <Controls showInteractive={false} position="top-right" />
+        {(usage || unanswered.length > 1) && (
+          <Panel position="top-center" className="max-w-[min(640px,calc(100vw-2rem))]">
+            {usage ? (
+              <UsageBanner usage={usage} className="bg-card shadow-sm">
+                {unanswered.length > 0 && limitReached && <RetryAll count={unanswered.length} busy={retrying} onClick={retryAll} />}
+              </UsageBanner>
+            ) : (
+              <div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2 text-sm shadow-sm">
+                <span>{unanswered.length} branches have no reply.</span>
+                <RetryAll count={unanswered.length} busy={retrying} onClick={retryAll} />
+              </div>
+            )}
+          </Panel>
+        )}
         <Panel position="top-left" className="flex flex-col items-start gap-2">
           <div className="pointer-events-none flex flex-col gap-1 rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-2">
@@ -151,6 +184,8 @@ function GraphView({ projectId }: { projectId: string }) {
         />
       )}
 
+      {renaming && <RenameDialog node={renaming} onClose={() => setRenaming(null)} />}
+
       {mergeOpen && (
         <MergeDialog
           projectId={projectId}
@@ -163,7 +198,21 @@ function GraphView({ projectId }: { projectId: string }) {
   )
 }
 
-function toFlow(summaries: NodeSummary[], selected: string[], shake: { id: string; key: number } | null) {
+function RetryAll({ count, busy, onClick }: { count: number; busy: boolean; onClick: () => void }) {
+  return (
+    <Button size="sm" variant="outline" className="bg-card text-foreground" disabled={busy} onClick={onClick}>
+      {busy ? 'Retrying…' : count === 1 ? 'Retry it' : `Retry all ${count}`}
+    </Button>
+  )
+}
+
+function toFlow(
+  summaries: NodeSummary[],
+  selected: string[],
+  shake: { id: string; key: number } | null,
+  limitReached: boolean,
+  onRename: (node: NodeSummary) => void,
+) {
   const positions = layoutGraph(summaries)
   const nodes: CardNode[] = summaries.map((summary) => ({
     id: summary.id,
@@ -173,6 +222,8 @@ function toFlow(summaries: NodeSummary[], selected: string[], shake: { id: strin
       summary,
       mergeSelected: selected.includes(summary.id),
       shakeKey: shake?.id === summary.id ? shake.key : 0,
+      limitReached,
+      onRename,
     },
   }))
 

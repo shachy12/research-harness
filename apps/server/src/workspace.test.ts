@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Project } from '@harness/shared';
@@ -13,6 +13,17 @@ const bytes = (text: string) => new TextEncoder().encode(text);
 beforeEach(() => {
   dataDir = mkdtempSync(path.join(tmpdir(), 'harness-ws-'));
   workspaces = new Workspaces(dataDir);
+});
+
+describe('checkFolder', () => {
+  it("refuses the app's data folder and anything inside it", () => {
+    const data = mkdtempSync(path.join(tmpdir(), 'harness-data-'));
+    mkdirSync(path.join(data, 'projects'));
+    const ws = new Workspaces(data);
+    expect(ws.checkFolder(data)).toHaveProperty('error');
+    expect(ws.checkFolder(path.join(data, 'projects'))).toHaveProperty('error');
+    expect(typeof ws.checkFolder(tmpdir())).toBe('string');
+  });
 });
 
 describe('Workspaces', () => {
@@ -55,6 +66,17 @@ describe('Workspaces', () => {
   });
 });
 
+describe('checkFolder', () => {
+  it("refuses the app's data folder and anything inside it", () => {
+    const data = mkdtempSync(path.join(tmpdir(), 'harness-data-'));
+    mkdirSync(path.join(data, 'projects'));
+    const ws = new Workspaces(data);
+    expect(ws.checkFolder(data)).toHaveProperty('error');
+    expect(ws.checkFolder(path.join(data, 'projects'))).toHaveProperty('error');
+    expect(typeof ws.checkFolder(tmpdir())).toBe('string');
+  });
+});
+
 describe('folders', () => {
   it('saves a folder with its structure under an unused name', () => {
     const files = [
@@ -91,6 +113,17 @@ describe('folders', () => {
     ]);
     // A folder deeper inside an upload is not an attachment by itself.
     expect(workspaces.validate(project, [{ name: 'sub', path: path.join(saved.path, 'sub'), size: 0 }])).toHaveProperty('error');
+  });
+});
+
+describe('checkFolder', () => {
+  it("refuses the app's data folder and anything inside it", () => {
+    const data = mkdtempSync(path.join(tmpdir(), 'harness-data-'));
+    mkdirSync(path.join(data, 'projects'));
+    const ws = new Workspaces(data);
+    expect(ws.checkFolder(data)).toHaveProperty('error');
+    expect(ws.checkFolder(path.join(data, 'projects'))).toHaveProperty('error');
+    expect(typeof ws.checkFolder(tmpdir())).toBe('string');
   });
 });
 

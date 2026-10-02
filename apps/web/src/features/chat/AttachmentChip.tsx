@@ -1,6 +1,28 @@
 import { FolderIcon, LoaderIcon, PaperclipIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
 import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import type { PendingFile } from './useAttachments'
+
+/** The files and folders waiting to be sent with a message, each removable. */
+export function PendingAttachments({ files, onRemove }: { files: PendingFile[]; onRemove: (key: string) => void }) {
+  if (files.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {files.map((f) => (
+        <AttachmentChip
+          key={f.key}
+          name={f.name}
+          size={f.size}
+          kind={f.kind}
+          fileCount={f.fileCount}
+          status={f.status}
+          error={f.error}
+          onRemove={() => onRemove(f.key)}
+        />
+      ))}
+    </div>
+  )
+}
 
 /** A file or folder on a message, or one waiting to be sent (uploading, ready, or failed with a reason). */
 export function AttachmentChip({ name, size, kind = 'file', fileCount, status = 'ready', error, onRemove }: {

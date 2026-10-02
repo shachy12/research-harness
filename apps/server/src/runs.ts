@@ -1,8 +1,19 @@
-import { type Attachment, type ChatStreamEvent, type Message, type RunStatus, type ToolCall, toolActivity } from '@harness/shared';
+import {
+  type Attachment,
+  type ChatStreamEvent,
+  type DagNode,
+  type Message,
+  type RunStatus,
+  type ToolCall,
+  type UsageLimit,
+  toolActivity,
+} from '@harness/shared';
 import { buildChatRequest, withAttachments } from './dag/prompt.ts';
-import { planSession } from './dag/session.ts';
+import { type SessionPlan, planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
-import type { LLMProvider } from './llm/index.ts';
+import { type ProviderError, classifyError } from './llm/errors.ts';
+import type { LLMProvider, ReplyContext } from './llm/index.ts';
+import { cleanTitle } from './llm/title.ts';
 import { conflict, notFound } from './routes/errors.ts';
 import type { Workspaces } from './workspace.ts';
 
@@ -16,10 +27,11 @@ interface Run {
   text: string;
   toolCalls: Map<string, ToolCall>;
   thinking: boolean;
+  /** The provider's session, saved once the reply has produced something (see execute). */
+  sessionId: string | null;
   listeners: Set<Listener>;
   abort: AbortController;
 }
-
 
 /**
  * Runs model replies on the server, one per node at a time, independent of any open page.
@@ -31,6 +43,10 @@ export class RunManager {
   private readonly repo: Repository;
   private readonly llm: LLMProvider;
   private readonly workspaces: Workspaces;
+  /** The account's usage limit as last reported (it applies to every node). */
+  private limit: UsageLimit | null = null;
+  /** Nodes whose model-written title is being generated. */
+  private readonly titling = new Set<string>();
 
   constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces) {
     this.repo = repo;
@@ -48,37 +64,41 @@ export class RunManager {
     return run ? { startedAt: run.startedAt, activity: run.activity } : null;
   }
 
+  isTitling(nodeId: string): boolean {
+    return this.titling.has(nodeId);
+  }
+
+  /** The usage limit, if close to it or reached; null once a known reset time has passed. */
+  usage(): UsageLimit | null {
+    if (this.limit?.resetsAt && Date.parse(this.limit.resetsAt) <= Date.now()) this.limit = null;
+    return this.limit;
+  }
+
+  /** Record a failed model call made outside a run (e.g. a result draft), in case it hit the limit. */
+  noteFailure(error: ProviderError): void {
+    if (error.kind === 'usage_limit') this.limitReached(error.resetsAt);
+  }
+
   /**
    * Save the user message and start the reply in the background. Returns the saved message.
    * Attachments must already be validated (`Workspaces.validate`).
    */
   start(nodeId: string, content: string, attachments: Attachment[] = []): Message {
-    const node = this.repo.getNode(nodeId);
-    if (!node) throw notFound('Node');
-    if (node.status === 'frozen') throw conflict('This node was forked, so it is frozen. Continue in one of its branches.');
-    if (node.status === 'finished') throw conflict('This branch is finished.');
-    if (this.runs.has(nodeId)) throw conflict('A reply is already being generated for this node.');
-
+    const node = this.requireWritable(nodeId);
     // Plan the provider session before saving the message (it depends on what the node had so far).
     const session = planSession(this.repo.snapshot(node.projectId), nodeId);
-    const workDir = this.workspaces.prepare(this.repo.getProject(node.projectId)!);
     const userMessage = this.repo.addMessage(nodeId, 'user', content, { attachments });
-    const request = buildChatRequest(this.repo.snapshot(node.projectId), nodeId);
-    const message = withAttachments(content, attachments);
-
-    const run: Run = {
-      nodeId,
-      startedAt: new Date().toISOString(),
-      activity: 'Starting',
-      text: '',
-      toolCalls: new Map(),
-      thinking: false,
-      listeners: new Set(),
-      abort: new AbortController(),
-    };
-    this.runs.set(nodeId, run);
-    void this.execute(run, { nodeId, workDir, request, message, session });
+    this.launch(node, session, withAttachments(content, attachments));
     return userMessage;
+  }
+
+  /** Answer the node's last message again: it got no reply (the reply failed or was stopped early). */
+  retry(nodeId: string): void {
+    const node = this.requireWritable(nodeId);
+    const graph = this.repo.snapshot(node.projectId);
+    const last = graph.messages(nodeId).at(-1);
+    if (last?.role !== 'user') throw conflict('The last message already has a reply.');
+    this.launch(node, planSession(graph, nodeId, { retry: true }), withAttachments(last.content, last.attachments));
   }
 
   /**
@@ -107,14 +127,44 @@ export class RunManager {
     this.runs.get(nodeId)?.abort.abort();
   }
 
-  private async execute(run: Run, ctx: Parameters<LLMProvider['streamReply']>[0]): Promise<void> {
+  private requireWritable(nodeId: string): DagNode {
+    const node = this.repo.getNode(nodeId);
+    if (!node) throw notFound('Node');
+    if (node.status === 'frozen') throw conflict('This node was forked, so it is frozen. Continue in one of its branches.');
+    if (node.status === 'finished') throw conflict('This branch is finished.');
+    if (this.runs.has(nodeId)) throw conflict('A reply is already being generated for this node.');
+    return node;
+  }
+
+  /** Start answering the node's last (already saved) user message. */
+  private launch(node: DagNode, session: SessionPlan, message: string): void {
+    const workDir = this.workspaces.prepare(this.repo.getProject(node.projectId)!);
+    const request = buildChatRequest(this.repo.snapshot(node.projectId), node.id);
+    const run: Run = {
+      nodeId: node.id,
+      startedAt: new Date().toISOString(),
+      activity: 'Starting',
+      text: '',
+      toolCalls: new Map(),
+      thinking: false,
+      sessionId: null,
+      listeners: new Set(),
+      abort: new AbortController(),
+    };
+    this.runs.set(node.id, run);
+    void this.execute(run, { nodeId: node.id, workDir, request, message, session });
+  }
+
+  private async execute(run: Run, ctx: ReplyContext): Promise<void> {
     const emit = (event: ChatStreamEvent) => run.listeners.forEach((l) => l(event));
-    let failure: string | null = null;
+    let failure: ProviderError | null = null;
 
     try {
       for await (const event of this.llm.streamReply(ctx, run.abort.signal)) {
         if (event.type === 'session') {
-          this.repo.setSessionId(run.nodeId, event.sessionId);
+          run.sessionId = event.sessionId;
+        } else if (event.type === 'limit') {
+          this.limit = event.limit;
         } else if (event.type === 'thinking') {
           run.thinking = true;
           run.activity = 'Thinking';
@@ -133,20 +183,63 @@ export class RunManager {
     } catch (err) {
       if (!run.abort.signal.aborted) {
         console.error(`[run] node ${run.nodeId}:`, err);
-        failure = err instanceof Error ? err.message : 'The model request failed';
+        failure = classifyError(err, this.limit?.resetsAt ?? null);
       }
     }
 
     // Save the reply, or whatever arrived before a failure or Stop
     // (unless the node itself is gone, e.g. the project was reset mid-reply).
     this.runs.delete(run.nodeId);
-    const hasContent = run.text || run.toolCalls.size > 0;
-    const saved = hasContent && this.repo.getNode(run.nodeId)
+    const hasContent = run.text !== '' || run.toolCalls.size > 0;
+    const node = this.repo.getNode(run.nodeId);
+    // Keep the session only if the reply got somewhere. A first reply that failed before writing
+    // anything leaves no session behind, so a retry starts that conversation over cleanly.
+    if (node && run.sessionId && (hasContent || !failure)) this.repo.setSessionId(run.nodeId, run.sessionId);
+    const saved = hasContent && node
       ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()] })
       : null;
 
-    if (failure) emit({ type: 'error', error: failure });
-    else if (saved) emit({ type: 'done', message: saved });
-    else emit({ type: 'error', error: 'Stopped before any reply arrived.' });
+    if (failure) {
+      if (failure.kind === 'usage_limit') this.limitReached(failure.resetsAt);
+      emit({ type: 'error', error: failure.message, kind: failure.kind, resetsAt: failure.resetsAt });
+    } else if (saved) {
+      if (this.limit?.status === 'reached') this.limit = null; // a reply went through, so it has reset
+      emit({ type: 'done', message: saved });
+      if (node) this.maybeTitle(node, ctx.workDir);
+    } else {
+      emit({ type: 'error', error: 'Stopped before any reply arrived.' });
+    }
+  }
+
+  private limitReached(resetsAt: string | null): void {
+    const known = this.limit?.status === 'reached' ? this.limit : null;
+    this.limit = {
+      status: 'reached',
+      resetsAt: resetsAt ?? known?.resetsAt ?? null,
+      limitType: known?.limitType ?? null,
+      utilization: 1,
+    };
+  }
+
+  /**
+   * After a node's first reply, let a small model replace a title taken from the prompt with a
+   * short one. Runs in the background; a rename by the user in the meantime wins.
+   */
+  private maybeTitle(node: DagNode, workDir: string): void {
+    if (node.titleSource !== 'prompt' || !this.llm.suggestTitle) return;
+    const messages = this.repo.listMessages(node.id);
+    if (messages.filter((m) => m.role === 'assistant').length !== 1) return;
+    const prompt = messages.find((m) => m.role === 'user')?.content ?? '';
+    const reply = messages.find((m) => m.role === 'assistant')?.content ?? '';
+
+    this.titling.add(node.id);
+    this.llm
+      .suggestTitle({ prompt, reply, workDir }, AbortSignal.timeout(90_000))
+      .then((raw) => {
+        const title = cleanTitle(raw);
+        if (title && this.repo.getNode(node.id)?.titleSource === 'prompt') this.repo.setTitle(node.id, title, 'model');
+      })
+      .catch((err: unknown) => console.error(`[title] node ${node.id}:`, err))
+      .finally(() => this.titling.delete(node.id));
   }
 }
