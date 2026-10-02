@@ -62,6 +62,16 @@ export const MIGRATIONS: string[] = [
   UPDATE nodes SET read_upto =
     (SELECT m.id FROM messages m WHERE m.node_id = nodes.id ORDER BY m.seq DESC LIMIT 1);
   `,
+  // 7: model and effort per node (NULL: the provider's default, so existing nodes keep working as
+  // before) and which model wrote each reply. projects.model / projects.effort were for a project
+  // default that was dropped again (the root node's setting plays that role); they stay unused.
+  `
+  ALTER TABLE nodes ADD COLUMN model TEXT;
+  ALTER TABLE nodes ADD COLUMN effort TEXT;
+  ALTER TABLE projects ADD COLUMN model TEXT;
+  ALTER TABLE projects ADD COLUMN effort TEXT;
+  ALTER TABLE messages ADD COLUMN model TEXT;
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

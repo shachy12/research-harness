@@ -1,14 +1,16 @@
-import { type NodeDetail, type NodeSummary, defaultMergeTitle, lowestCommonAncestor } from '@harness/shared'
+import { type NodeDetail, type NodeSummary, defaultMergeTitle, lowestCommonAncestor, mergeModelSettings } from '@harness/shared'
 import { useQueries } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { api } from '@/api/client'
-import { keys, useMerge } from '@/api/queries'
+import { keys, useMerge, useModels } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { ModelFields } from '@/features/model/ModelFields'
+import { type ModelSettings, describeSettings } from '@/features/model/modelSettings'
 import { contextTokens, estimateTokens, formatTokens, resultText } from '@/lib/tokens'
 import { useMergeSelection } from './selection'
 
@@ -31,6 +33,12 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
   const defaultTitle = defaultMergeTitle(parents.map((p) => p.title))
   const [title, setTitle] = useState(defaultTitle)
   const [framing, setFraming] = useState(DEFAULT_FRAMING)
+  // The same rule the server applies: the branches' setting, or the model first by name.
+  const catalog = useModels().data
+  const rule = catalog && mergeModelSettings(parents, { model: catalog.defaultModel, effort: catalog.defaultEffort })
+  // What the user picked in the dropdowns; null: still the rule's choice.
+  const [picked, setPicked] = useState<ModelSettings | null>(null)
+  const settings: ModelSettings | undefined = picked ?? (rule ? { model: rule.model, effort: rule.effort } : undefined)
 
   // Details of the base node (its full context) and of each branch (its transcript, to show what's saved).
   const details = useQueries({
@@ -51,7 +59,13 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
   const create = () =>
     merge.mutate(
       // An unchanged default title is left to the server, so a model-written title can replace it later.
-      { parentIds, title: title.trim() && title.trim() !== defaultTitle ? title.trim() : undefined, prompt: framing.trim() },
+      {
+        parentIds,
+        title: title.trim() && title.trim() !== defaultTitle ? title.trim() : undefined,
+        prompt: framing.trim(),
+        // Left out, the server applies the same rule.
+        ...(picked ?? {}),
+      },
       {
         onSuccess: (node) => {
           selection.clear()
@@ -95,6 +109,19 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
           Results add ~{formatTokens(resultTokens)} tokens. The full branch transcripts would have added ~
           {formatTokens(transcriptTokens)}.
         </p>
+
+        {catalog && rule && settings && (
+          <div className="grid gap-1.5">
+            <Label htmlFor="merge-model">Model</Label>
+            <ModelFields compact value={settings} catalog={catalog} onChange={setPicked} idPrefix="merge" />
+            {rule.mixedModels.length > 0 && !picked && (
+              <p role="status" className="rounded-lg border border-merge/40 bg-merge-soft px-3 py-2 text-sm text-merge">
+                The branches use different models ({rule.mixedModels.join(', ')}). The merged node uses{' '}
+                <b>{describeSettings(rule, catalog)}</b>, the first by name, unless you pick another above.
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="grid gap-1.5">
           <Label htmlFor="merge-title">Node title</Label>

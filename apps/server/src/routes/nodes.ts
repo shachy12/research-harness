@@ -1,10 +1,13 @@
 import { zValidator } from '@hono/zod-validator';
 import {
+  type Attachment,
   type ChatStreamEvent,
+  type Effort,
   type NodeDetail,
   branchResultSchema,
   forkSchema,
   markReadSchema,
+  modelSettingsSchema,
   renameNodeSchema,
   sendMessageSchema,
   titleFromPrompt,
@@ -66,7 +69,7 @@ function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStre
   });
 }
 
-export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
+export function nodeRoutes({ repo, llm, runs, workspaces, checkModel }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
@@ -93,6 +96,17 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
     .patch('/:nodeId', zValidator('json', renameNodeSchema), (c) => {
       const node = requireNode(c.req.param('nodeId'));
       repo.setTitle(node.id, c.req.valid('json').title, 'user');
+      return c.json(repo.getNode(node.id)!);
+    })
+
+    // Change the model and effort for the node's next replies (the history stays as it is).
+    .put('/:nodeId/model', zValidator('json', modelSettingsSchema), async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      if (node.status !== 'open') throw conflict('Only open nodes can change their model.');
+      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
+      const { model, effort } = c.req.valid('json');
+      await checkModel(model, effort);
+      repo.setModelSettings(node.id, model, effort);
       return c.json(repo.getNode(node.id)!);
     })
 
@@ -155,20 +169,25 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
 
     // Create branches and start each one working on its first message (with its files) right away.
     // Forking freezes an open node so its history stays fixed.
-    .post('/:nodeId/fork', zValidator('json', forkSchema), (c) => {
+    .post('/:nodeId/fork', zValidator('json', forkSchema), async (c) => {
       const parent = requireNode(c.req.param('nodeId'));
       if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
 
       const project = repo.getProject(parent.projectId)!;
-      const branches = c.req.valid('json').branches.map(({ prompt, title, attachments }) => {
+      const branches: { prompt: string; title: string; attachments: Attachment[]; model: string | null; effort: Effort | null }[] = [];
+      for (const { prompt, title, attachments, model, effort } of c.req.valid('json').branches) {
         const checked = workspaces.validate(project, attachments);
         if ('error' in checked) throw new HttpError(400, checked.error);
-        return { prompt, title: title ?? titleFromPrompt(prompt), attachments: checked };
-      });
+        // A branch keeps its parent's model and effort unless it was given its own.
+        const settings = { model: model === undefined ? parent.model : model, effort: effort === undefined ? parent.effort : effort };
+        if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
+        branches.push({ prompt, title: title ?? titleFromPrompt(prompt), attachments: checked, ...settings });
+      }
+      if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
       const children = repo.transaction(() => {
         if (parent.status === 'open') repo.setStatus(parent.id, 'frozen');
-        return branches.map(({ title }) =>
-          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id] }),
+        return branches.map(({ title, model, effort }) =>
+          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id], model, effort }),
         );
       });
       llm.release?.(parent.id); // the parent receives no more messages
@@ -193,6 +212,8 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
         request: buildChatRequest(graph, node.id, [{ role: 'user', content: DRAFT_RESULT_INSTRUCTION }]),
         message: DRAFT_RESULT_INSTRUCTION,
         session: planSession(graph, node.id),
+        model: node.model,
+        effort: node.effort,
       };
       try {
         return c.json(await llm.draftResult(ctx, c.req.raw.signal));

@@ -10,6 +10,7 @@ import {
   MAX_UPLOAD_BYTES,
   type NodeSummary,
   defaultMergeTitle,
+  mergeModelSettings,
   mergeSchema,
   unreadCount,
 } from '@harness/shared';
@@ -17,7 +18,7 @@ import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
-export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps) {
+export function projectRoutes({ repo, llm, runs, workspaces, backup, loadModels, checkModel }: RouteDeps) {
   return new Hono()
     .get('/', (c) =>
       c.json<ProjectSummary[]>(
@@ -115,9 +116,9 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps
     })
 
     // Create a merge node from finished branches and start it working on its first message.
-    .post('/:projectId/merge', zValidator('json', mergeSchema), (c) => {
+    .post('/:projectId/merge', zValidator('json', mergeSchema), async (c) => {
       const projectId = c.req.param('projectId');
-      const { title, prompt } = c.req.valid('json');
+      const { title, prompt, model, effort } = c.req.valid('json');
       const parentIds = [...new Set(c.req.valid('json').parentIds)];
       if (parentIds.length < 2) throw new HttpError(400, 'Select at least two different branches');
 
@@ -127,10 +128,16 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps
         if (parent.status !== 'finished') throw conflict(`"${parent.title}" is not finished yet`);
         return parent;
       });
+      // The model and effort chosen in the merge dialog; left out, the branches' setting, or if they
+      // differ, the model first by name (the dialog warns about it).
+      const catalog = await loadModels();
+      const { mixedModels: _mixed, ...rule } = mergeModelSettings(parents, { model: catalog.defaultModel, effort: catalog.defaultEffort });
+      const settings = { model: model === undefined ? rule.model : model, effort: effort === undefined ? rule.effort : effort };
+      if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
       // A title the user wrote is final; the default one may be replaced by a model-written title.
       const node = title
-        ? repo.createNode({ projectId, title, parentIds, titleSource: 'user' })
-        : repo.createNode({ projectId, title: defaultMergeTitle(parents.map((p) => p.title)), parentIds });
+        ? repo.createNode({ projectId, title, parentIds, titleSource: 'user', ...settings })
+        : repo.createNode({ projectId, title: defaultMergeTitle(parents.map((p) => p.title)), parentIds, ...settings });
       runs.start(node.id, prompt);
       return c.json(node, 201);
     })

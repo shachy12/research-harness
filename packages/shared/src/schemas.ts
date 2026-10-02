@@ -1,5 +1,6 @@
 // Request body schemas. The server validates with them; the web app can reuse them for forms.
 import { z } from 'zod/v4';
+import type { Effort } from './types.ts';
 
 export const branchResultSchema = z.object({
   findings: z.string().trim().min(1, 'Findings are required'),
@@ -56,9 +57,23 @@ export const markReadSchema = z.object({
   messageId: z.string().min(1),
 });
 
+/** Effort levels, lowest to highest. */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly Effort[];
+
+/** A model id (null: the provider's default). The server checks it against the provider's list. */
+const modelField = z.string().trim().min(1).max(100).nullable();
+const effortField = z.enum(EFFORTS).nullable();
+
+/** Change the model and effort a node's next replies use. */
+export const modelSettingsSchema = z.object({
+  model: modelField,
+  effort: effortField,
+});
+
 /**
  * Each branch's prompt is its first message (sent with its attachments). Its title is `title` when
  * given (a branch made from a list item is named after the item), else the prompt, shortened.
+ * `model` / `effort` left out means the parent's.
  */
 export const forkSchema = z.object({
   branches: z
@@ -66,6 +81,8 @@ export const forkSchema = z.object({
       prompt: z.string().trim().min(1),
       title: z.string().trim().min(1).max(200).optional(),
       attachments: z.array(attachmentSchema).max(20).default([]),
+      model: modelField.optional(),
+      effort: effortField.optional(),
     }))
     .min(1)
     .max(12),
@@ -73,12 +90,15 @@ export const forkSchema = z.object({
 
 /**
  * The merged node starts working on `prompt` (its first message) right away. Without a `title`, it
- * gets a default one that the model may later replace.
+ * gets a default one that the model may later replace. `model` / `effort` left out: the branches'
+ * setting, or if they differ, the model first by name (`mergeModelSettings`).
  */
 export const mergeSchema = z.object({
   parentIds: z.array(z.string().min(1)).min(2, 'Select at least two branches'),
   title: z.string().trim().min(1).max(200).optional(),
   prompt: z.string().trim().min(1, 'Write the first message'),
+  model: modelField.optional(),
+  effort: effortField.optional(),
 });
 
 /** A short node title from a prompt: its first line, cut at a word boundary. */
@@ -100,3 +120,4 @@ export type CreateProjectBody = z.infer<typeof createProjectSchema>;
 export type RenameNodeBody = z.infer<typeof renameNodeSchema>;
 export type ForkBody = z.infer<typeof forkSchema>;
 export type MergeBody = z.infer<typeof mergeSchema>;
+export type ModelSettingsBody = z.infer<typeof modelSettingsSchema>;

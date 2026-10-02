@@ -2,12 +2,12 @@ import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { type BranchResult, type ToolCall, branchResultSchema } from '@harness/shared';
+import { type BranchResult, type Effort, type ModelOption, type ToolCall, branchResultSchema } from '@harness/shared';
 import { z } from 'zod/v4';
 import { SYSTEM_PROMPT } from '../dag/prompt.ts';
 import { type SessionPlan, firstMessage } from '../dag/session.ts';
 import { classifyError, toIsoTime } from './errors.ts';
-import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
+import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './provider.ts';
 import { TITLE_SYSTEM_PROMPT, titleRequest } from './title.ts';
 
 /**
@@ -23,7 +23,13 @@ export interface ClaudeCodeOptions {
   command: string;
   /** Arguments placed before the CLI flags (tests run a fake CLI script through node). */
   prefixArgs?: string[];
-  model?: string;
+  /**
+   * Model and effort for nodes without their own setting. Always passed: left to the account, the
+   * model changes on its own (Opus to Sonnet after heavy use, seen 2026-10-02) and the CLI doesn't
+   * report its default effort.
+   */
+  model: string;
+  effort: Effort;
   /** Stop a node's process after this long without messages. */
   idleMs?: number;
 }
@@ -36,6 +42,15 @@ const PRE_APPROVED = 'WebSearch,WebFetch';
 
 // The CLI's schema validator rejects the `$schema` dialect line zod adds, so leave it out.
 const { $schema: _dialect, ...RESULT_JSON_SCHEMA } = z.toJSONSchema(branchResultSchema);
+// The CLI has no command that lists models; it accepts these full ids with --model. Haiku takes no effort.
+const ALL_EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const MODELS: ModelOption[] = [
+  { id: 'claude-opus-5-5', efforts: ALL_EFFORTS },
+  { id: 'claude-sonnet-5-5', efforts: ALL_EFFORTS },
+  { id: 'claude-fable-5-1', efforts: ALL_EFFORTS },
+  { id: 'claude-haiku-4-5', efforts: [] },
+];
+
 const TOOL_NAMES: Record<string, string> = {
   WebSearch: 'web_search',
   WebFetch: 'web_fetch',
@@ -43,6 +58,18 @@ const TOOL_NAMES: Record<string, string> = {
   Glob: 'find_files',
   Grep: 'search_files',
 };
+
+/**
+ * The environment for the CLI: ours, minus the variables a Claude Code session sets for its own
+ * child processes (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CLAUDE_EFFORT, …). They leak in when the
+ * server is started from inside Claude Code and change how the CLI behaves; with them, no run
+ * reused the prompt cache of another (measured 2026-10-02). CLAUDE_CONFIG_DIR and a login token
+ * the user set on purpose are kept.
+ */
+export function cliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const keep = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN']);
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !/^CLAUDE/i.test(key) || keep.has(key.toUpperCase())));
+}
 
 /** Locate the Claude Code CLI: HARNESS_CLAUDE_PATH, the npm global install on Windows, or `claude` on PATH. */
 export function findClaudeExecutable(env: NodeJS.ProcessEnv = process.env): string {
@@ -57,18 +84,37 @@ export function findClaudeExecutable(env: NodeJS.ProcessEnv = process.env): stri
 export class ClaudeCodeProvider implements LLMProvider {
   readonly label: string;
   private readonly options: ClaudeCodeOptions;
+  readonly kind = 'claude-code';
   private readonly live = new Map<string, LiveProcess>();
 
   constructor(options: ClaudeCodeOptions) {
     this.options = options;
-    this.label = `claude-code:${options.model ?? 'account default'}`;
+    this.label = 'Claude Code';
+  }
+
+  async models(): Promise<ModelCatalog> {
+    const known = MODELS.some((m) => m.id === this.options.model);
+    return {
+      // A HARNESS_MODEL alias such as "opus" is offered as it is, next to the full ids.
+      models: known ? MODELS : [{ id: this.options.model, efforts: ALL_EFFORTS }, ...MODELS],
+      defaultModel: this.options.model,
+      defaultEffort: this.options.effort,
+      forkKeepsCache: false,
+    };
   }
 
   async *streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+    const flags = this.modelArgs(ctx);
     let proc = this.live.get(ctx.nodeId);
+    // The model and effort are fixed when the process starts: after a change, restart it (the
+    // session resumes; the new model re-reads the history without the cache either way).
+    if (proc && proc.flags !== flags.join(' ')) {
+      this.release(ctx.nodeId);
+      proc = undefined;
+    }
     let text = ctx.message;
     if (!proc) {
-      proc = this.startProcess(ctx.nodeId, ctx.session, ctx.workDir);
+      proc = this.startProcess(ctx.nodeId, ctx.session, ctx.workDir, flags);
       // A resumed session already holds the context; otherwise send the preamble/transcript first.
       if (ctx.session.mode !== 'resume') text = firstMessage(ctx.session, ctx.message);
     }
@@ -98,6 +144,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--json-schema', JSON.stringify(RESULT_JSON_SCHEMA),
       '--tools', '',
       ...this.commonArgs(),
+      ...this.modelArgs(ctx),
     ];
     const prompt = plan.mode === 'resume' ? ctx.message : firstMessage(plan, ctx.message);
     const parsed = await runJson(this.options, ctx.workDir, args, prompt, signal);
@@ -140,11 +187,17 @@ export class ClaudeCodeProvider implements LLMProvider {
       // Ignore the user's own Claude Code settings, memory files and MCP servers.
       '--setting-sources', '',
       '--strict-mcp-config',
-      ...(this.options.model ? ['--model', this.options.model] : []),
     ];
   }
 
-  private startProcess(nodeId: string, plan: SessionPlan, workDir: string): LiveProcess {
+  /** --model / --effort for this node: its own setting, else the defaults. No effort for Haiku. */
+  private modelArgs(ctx: Pick<ReplyContext, 'model' | 'effort'>): string[] {
+    const model = ctx.model ?? this.options.model;
+    const takesEffort = MODELS.find((m) => m.id === model)?.efforts.length !== 0;
+    return ['--model', model, ...(takesEffort ? ['--effort', ctx.effort ?? this.options.effort] : [])];
+  }
+
+  private startProcess(nodeId: string, plan: SessionPlan, workDir: string, flags: string[]): LiveProcess {
     const args = [
       '-p',
       '--input-format', 'stream-json',
@@ -155,8 +208,9 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--tools', TOOLS,
       '--allowedTools', PRE_APPROVED,
       ...this.commonArgs(),
+      ...flags,
     ];
-    const proc = new LiveProcess(this.options, workDir, args, () => {
+    const proc = new LiveProcess(this.options, workDir, args, flags.join(' '), () => {
       if (this.live.get(nodeId) === proc) this.live.delete(nodeId);
     });
     this.live.set(nodeId, proc);
@@ -180,6 +234,8 @@ function tryJson(text: string | undefined): unknown {
 
 /** One long-lived CLI process. Turns run one at a time; each ends with a `result` event. */
 class LiveProcess {
+  /** The --model / --effort flags it was started with. */
+  readonly flags: string;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly idleMs: number;
   private turn: Channel<ReplyEvent> | null = null;
@@ -188,10 +244,12 @@ class LiveProcess {
   private stderr = '';
   private exited = false;
 
-  constructor(options: ClaudeCodeOptions, cwd: string, args: string[], onExit: () => void) {
+  constructor(options: ClaudeCodeOptions, cwd: string, args: string[], flags: string, onExit: () => void) {
+    this.flags = flags;
     this.idleMs = options.idleMs ?? 10 * 60_000;
     this.child = spawn(options.command, [...(options.prefixArgs ?? []), ...args], {
       cwd,
+      env: cliEnv(),
       windowsHide: true,
     });
     this.child.stderr.on('data', (d: Buffer) => {
@@ -242,6 +300,10 @@ class LiveProcess {
       // A usage limit, a missing login etc. arrive as a failed result (and as an `error` on the
       // assistant message); classifyError turns them into a message the user can act on.
       const text = result.result || this.turnState.apiError || `Claude Code error: ${result.subtype}`;
+      if (result.usage) {
+        const u = result.usage;
+        turn.push({ type: 'usage', usage: { input: u.input_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 } });
+      }
       this.finishTurn(failed ? classifyError(new Error(text), this.turnState.resetsAt) : undefined);
       return;
     }
@@ -269,7 +331,14 @@ type ContentBlock =
   | { type: 'tool_result'; tool_use_id: string; is_error?: boolean; content: string | { type: string; text?: string }[] }
   | { type: string };
 
-type ResultEvent = { type: 'result'; subtype: string; is_error?: boolean; result?: string; session_id?: string };
+type ResultEvent = {
+  type: 'result';
+  subtype: string;
+  is_error?: boolean;
+  result?: string;
+  session_id?: string;
+  usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+};
 
 /** Sent when the account's usage limit changes: fine, close to it, or reached. */
 type RateLimitEvent = {
@@ -284,7 +353,7 @@ type RateLimitEvent = {
 };
 
 type CliEvent =
-  | { type: 'system'; subtype: string; session_id?: string }
+  | { type: 'system'; subtype: string; session_id?: string; model?: string }
   | { type: 'stream_event'; event: { type: string; content_block?: { type: string }; delta?: { type: string; text?: string } } }
   | { type: 'assistant' | 'user'; message: { content: ContentBlock[] | string }; error?: string }
   | ResultEvent
@@ -304,8 +373,12 @@ export const newTurnState = (): TurnState => ({ wroteText: false, calls: new Map
 
 /** Translate one CLI event into our reply events. Exported for tests. */
 export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
-  if (event.type === 'system' && 'subtype' in event && event.subtype === 'init' && 'session_id' in event && event.session_id) {
-    return [{ type: 'session', sessionId: event.session_id }];
+  if (event.type === 'system' && 'subtype' in event && event.subtype === 'init') {
+    const init = event as { session_id?: string; model?: string };
+    return [
+      ...(init.session_id ? [{ type: 'session' as const, sessionId: init.session_id }] : []),
+      ...(init.model ? [{ type: 'model' as const, model: init.model }] : []),
+    ];
   }
 
   if (event.type === 'rate_limit_event' && 'rate_limit_info' in event && event.rate_limit_info) {
@@ -413,6 +486,7 @@ function runOnce(options: ClaudeCodeOptions, cwd: string, args: string[], prompt
   return new Promise((resolve, reject) => {
     const child = spawn(options.command, [...(options.prefixArgs ?? []), ...args], {
       cwd,
+      env: cliEnv(),
       windowsHide: true,
     });
     let stdout = '';

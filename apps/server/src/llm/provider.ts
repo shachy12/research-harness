@@ -1,4 +1,4 @@
-import type { BranchResult, ToolCall, UsageLimit } from '@harness/shared';
+import type { BranchResult, Effort, ModelOption, ToolCall, UsageLimit } from '@harness/shared';
 import type { ChatRequest } from '../dag/prompt.ts';
 import type { SessionPlan } from '../dag/session.ts';
 
@@ -10,7 +10,18 @@ export type ReplyEvent =
   /** The provider's session for this node (session-based providers); the server stores it on the node. */
   | { type: 'session'; sessionId: string }
   /** The provider reported the usage limit: close to it, reached, or fine again (null). */
-  | { type: 'limit'; limit: UsageLimit | null };
+  | { type: 'limit'; limit: UsageLimit | null }
+  /** The model actually answering (its full id), as the provider reports it; saved on the reply. */
+  | { type: 'model'; model: string }
+  /** Input tokens of the reply, split by prompt cache use (sent once, at the end; see check-cache). */
+  | { type: 'usage'; usage: TokenUsage };
+
+export interface TokenUsage {
+  /** Read without the cache. */
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
 
 /**
  * Everything a provider might need for one model call. Stateless providers (the API) use `request`,
@@ -25,6 +36,18 @@ export interface ReplyContext {
   /** Just the new user message, including any attachment note (or the draft instruction). */
   message: string;
   session: SessionPlan;
+  /** The node's model and effort; null means the provider's default. */
+  model: string | null;
+  effort: Effort | null;
+}
+
+/** The models a provider offers and what a node without its own setting uses. */
+export interface ModelCatalog {
+  models: ModelOption[];
+  defaultModel: string;
+  defaultEffort: Effort;
+  /** See ModelsResponse.forkKeepsCache. */
+  forkKeepsCache: boolean;
 }
 
 /**
@@ -32,8 +55,12 @@ export interface ReplyContext {
  * implements this with its own official SDK or CLI, so the rest of the app is provider-neutral.
  */
 export interface LLMProvider {
-  /** Shown in logs and the UI, e.g. "anthropic:claude-opus-5-5". */
+  /** The backend, shown in the header, e.g. "Claude Code" (models are chosen per node and project). */
   readonly label: string;
+  /** e.g. 'claude-code', 'anthropic', 'placeholder'. */
+  readonly kind: string;
+  /** The models the pickers offer (may ask the provider's API). */
+  models(): Promise<ModelCatalog>;
   /** Stream the assistant's reply to the new message. */
   streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent>;
   /** Write a branch's result report from its full context; must not change the node's conversation. */

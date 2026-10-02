@@ -1,11 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { type BranchResult, type ToolCall, branchResultSchema } from '@harness/shared';
+import { type BranchResult, type Effort, EFFORTS, type ModelOption, type ToolCall, branchResultSchema } from '@harness/shared';
 import type { ChatTurn } from '../dag/prompt.ts';
-import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
+import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './provider.ts';
 import { TITLE_SYSTEM_PROMPT, titleRequest } from './title.ts';
 
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type { Effort };
 
 export interface AnthropicOptions {
   apiKey?: string;
@@ -29,6 +29,9 @@ const TITLE_MODEL = 'claude-haiku-4-5-20251001';
 
 // A long server-side tool loop can pause; we resume it this many times at most.
 const MAX_CONTINUATIONS = 5;
+
+// The model list is asked from the API at most this often.
+const MODELS_TTL_MS = 60 * 60_000;
 
 function toMessages(turns: ChatTurn[]): Anthropic.Beta.BetaMessageParam[] {
   return turns.map((t) => ({
@@ -89,16 +92,36 @@ function toolUpdate(block: Anthropic.Beta.BetaContentBlock, calls: Map<string, T
 
 export class AnthropicProvider implements LLMProvider {
   readonly label: string;
+  readonly kind = 'anthropic';
   private readonly client: Anthropic;
   private readonly options: AnthropicOptions;
+  private modelList: { models: ModelOption[]; fetchedAt: number } | null = null;
 
   constructor(options: AnthropicOptions) {
     this.options = options;
     this.client = new Anthropic({ apiKey: options.apiKey });
-    this.label = `anthropic:${options.model}`;
+    this.label = 'Claude API';
   }
 
-  async *streamReply({ request }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  /** The account's models from the Models API, with the effort levels each supports. */
+  async models(): Promise<ModelCatalog> {
+    if (!this.modelList || Date.now() - this.modelList.fetchedAt > MODELS_TTL_MS) {
+      const models: ModelOption[] = [];
+      for await (const m of this.client.models.list()) {
+        const effort = m.capabilities?.effort;
+        models.push({ id: m.id, efforts: effort?.supported ? EFFORTS.filter((level) => effort[level]?.supported) : [] });
+      }
+      this.modelList = { models, fetchedAt: Date.now() };
+    }
+    return {
+      models: this.modelList.models,
+      defaultModel: this.options.model,
+      defaultEffort: this.options.effort,
+      forkKeepsCache: true,
+    };
+  }
+
+  async *streamReply({ request, model, effort }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     const messages = toMessages(request.turns);
     const calls = new Map<string, ToolCall>();
     let wroteText = false;
@@ -106,14 +129,14 @@ export class AnthropicProvider implements LLMProvider {
     for (let attempt = 0; attempt <= MAX_CONTINUATIONS; attempt++) {
       const stream = this.client.beta.messages.stream(
         {
-          model: this.options.model,
+          model: model ?? this.options.model,
           max_tokens: 64000,
           system: request.system,
           messages,
           tools: RESEARCH_TOOLS,
           // Also caches the growing conversation, so follow-up turns in the same node reuse it.
           cache_control: { type: 'ephemeral' },
-          output_config: { effort: this.options.effort },
+          output_config: this.effortConfig(model, effort),
           betas: [FALLBACK_BETA],
           fallbacks: 'default',
         },
@@ -136,6 +159,10 @@ export class AnthropicProvider implements LLMProvider {
       }
 
       const final = await stream.finalMessage();
+      // With a refusal fallback this can be another model than the one asked for.
+      if (attempt === 0) yield { type: 'model', model: final.model };
+      const u = final.usage;
+      yield { type: 'usage', usage: { input: u.input_tokens, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 } };
       if (final.stop_reason === 'pause_turn') {
         // The server paused a long tool loop. Send the partial turn back unchanged and it resumes.
         messages.push({ role: 'assistant', content: final.content as Anthropic.Beta.BetaContentBlockParam[] });
@@ -151,14 +178,14 @@ export class AnthropicProvider implements LLMProvider {
     yield { type: 'text', text: '\n\n[The research loop ran too long and was stopped. Ask a narrower question.]' };
   }
 
-  async draftResult({ request }: ReplyContext, signal: AbortSignal): Promise<BranchResult> {
+  async draftResult({ request, model, effort }: ReplyContext, signal: AbortSignal): Promise<BranchResult> {
     const response = await this.client.beta.messages.parse(
       {
-        model: this.options.model,
+        model: model ?? this.options.model,
         max_tokens: 16000,
         system: request.system,
         messages: toMessages(request.turns),
-        output_config: { effort: this.options.effort, format: zodOutputFormat(branchResultSchema) },
+        output_config: { ...this.effortConfig(model, effort), format: zodOutputFormat(branchResultSchema) },
         betas: [FALLBACK_BETA],
         fallbacks: 'default',
       },
@@ -168,6 +195,13 @@ export class AnthropicProvider implements LLMProvider {
       throw new Error('The model could not draft a result for this branch. Write it by hand instead.');
     }
     return response.parsed_output;
+  }
+
+  /** The effort to send, or none for a model known not to take one (e.g. Haiku 4.5). */
+  private effortConfig(model: string | null, effort: Effort | null): { effort?: Effort } {
+    const id = model ?? this.options.model;
+    const known = this.modelList?.models.find((m) => m.id === id);
+    return known && known.efforts.length === 0 ? {} : { effort: effort ?? this.options.effort };
   }
 
   async suggestTitle({ prompt, reply }: { prompt: string; reply: string }, signal: AbortSignal): Promise<string> {

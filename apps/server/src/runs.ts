@@ -29,6 +29,8 @@ interface Run {
   thinking: boolean;
   /** The provider's session, saved once the reply has produced something (see execute). */
   sessionId: string | null;
+  /** The model that answered, as the provider reported it. */
+  model: string | null;
   listeners: Set<Listener>;
   abort: AbortController;
 }
@@ -148,11 +150,12 @@ export class RunManager {
       toolCalls: new Map(),
       thinking: false,
       sessionId: null,
+      model: null,
       listeners: new Set(),
       abort: new AbortController(),
     };
     this.runs.set(node.id, run);
-    void this.execute(run, { nodeId: node.id, workDir, request, message, session });
+    void this.execute(run, { nodeId: node.id, workDir, request, message, session, model: node.model, effort: node.effort });
   }
 
   private async execute(run: Run, ctx: ReplyContext): Promise<void> {
@@ -163,6 +166,10 @@ export class RunManager {
       for await (const event of this.llm.streamReply(ctx, run.abort.signal)) {
         if (event.type === 'session') {
           run.sessionId = event.sessionId;
+        } else if (event.type === 'model') {
+          run.model = event.model;
+        } else if (event.type === 'usage') {
+          // Not shown or stored yet; scripts/check-cache reads it from the provider directly.
         } else if (event.type === 'limit') {
           this.limit = event.limit;
         } else if (event.type === 'thinking') {
@@ -196,7 +203,7 @@ export class RunManager {
     // anything leaves no session behind, so a retry starts that conversation over cleanly.
     if (node && run.sessionId && (hasContent || !failure)) this.repo.setSessionId(run.nodeId, run.sessionId);
     const saved = hasContent && node
-      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()] })
+      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()], model: run.model })
       : null;
 
     if (failure) {

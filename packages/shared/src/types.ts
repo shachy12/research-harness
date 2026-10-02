@@ -65,7 +65,38 @@ export interface DagNode {
    * that was never opened).
    */
   readUpto: string | null;
+  /**
+   * The model and effort this node's replies use; null means the provider's default. A new node
+   * copies them from its parent (a merge: from its merge base) unless it was given its own.
+   */
+  model: string | null;
+  effort: Effort | null;
   createdAt: string;
+}
+
+/** How hard the model thinks before answering (Claude's effort levels, lowest to highest). */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** A model the current provider can use, with the effort levels it accepts (empty: no effort setting). */
+export interface ModelOption {
+  id: string;
+  efforts: Effort[];
+}
+
+/** GET /api/models: what the model pickers offer. */
+export interface ModelsResponse {
+  /** 'claude-code' (subscription), 'anthropic' (API, pay per token) or 'placeholder'. */
+  provider: string;
+  models: ModelOption[];
+  /** What a node with no setting of its own uses (always sent to the provider, never left to the account). */
+  defaultModel: string;
+  defaultEffort: Effort;
+  /**
+   * Whether a branch's first reply can reuse its parent's prompt cache when both use the same
+   * model and effort. True on the API. False on Claude Code: a new or resumed CLI process doesn't
+   * reuse the cache of an earlier process (measured 2026-10-02), so a fork re-reads its history anyway.
+   */
+  forkKeepsCache: boolean;
 }
 
 export type Role = 'user' | 'assistant';
@@ -79,6 +110,8 @@ export interface Message {
   toolCalls: ToolCall[];
   /** Files attached to this message (user messages only). */
   attachments: Attachment[];
+  /** The model that wrote this reply, as the provider reported it (assistant messages; null on older ones). */
+  model: string | null;
   createdAt: string;
 }
 

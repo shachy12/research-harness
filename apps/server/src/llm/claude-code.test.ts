@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionPlan } from '../dag/session.ts';
-import { ClaudeCodeProvider, parseSearchLinks } from './claude-code.ts';
+import { ClaudeCodeProvider, cliEnv, parseSearchLinks } from './claude-code.ts';
 import type { ReplyContext, ReplyEvent } from './provider.ts';
 
 const FAKE_CLI = path.join(import.meta.dirname, 'fake-claude.mjs');
@@ -16,7 +16,7 @@ beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), 'harness-cc-'));
   logFile = path.join(dir, 'calls.jsonl');
   process.env.FAKE_CLAUDE_LOG = logFile;
-  provider = new ClaudeCodeProvider({ command: process.execPath, prefixArgs: [FAKE_CLI] });
+  provider = new ClaudeCodeProvider({ command: process.execPath, prefixArgs: [FAKE_CLI], model: 'claude-opus-5-5', effort: 'high' });
 });
 
 afterEach(() => provider.dispose());
@@ -33,6 +33,8 @@ const ctx = (message: string, session: SessionPlan, nodeId = 'n1'): ReplyContext
   message,
   session,
   request: { system: '', turns: [] },
+  model: null,
+  effort: null,
 });
 
 const NEW: SessionPlan = { mode: 'new', sessionId: null, preamble: null, transcript: [] };
@@ -66,6 +68,72 @@ describe('ClaudeCodeProvider', () => {
     const events = await collect(provider.streamReply(ctx('see the attached paper', NEW), new AbortController().signal));
     const calls = events.flatMap((e) => (e.type === 'tool' ? [e.call] : []));
     expect(calls.at(-1)).toMatchObject({ name: 'read_file', input: 'C:\\p\\.harness\\uploads\\paper.pdf', status: 'done', results: [] });
+  });
+
+  it("passes the node's model and effort, and restarts the process (resuming) when they change", async () => {
+    const signal = new AbortController().signal;
+    const first = await collect(provider.streamReply({ ...ctx('first', NEW), model: 'claude-sonnet-5-5', effort: 'low' }, signal));
+    expect(first).toContainEqual({ type: 'model', model: 'claude-sonnet-5-5' });
+    // Same settings: the running process answers.
+    await collect(provider.streamReply({ ...ctx('second', NEW), model: 'claude-sonnet-5-5', effort: 'low' }, signal));
+    const resume: SessionPlan = { mode: 'resume', sessionId: 'new-session', preamble: null, transcript: [] };
+    await collect(provider.streamReply({ ...ctx('third', resume), model: 'claude-opus-5-5', effort: 'max' }, signal));
+
+    const starts = log().filter((e) => e.argv).map((e) => e.argv!);
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).toEqual(expect.arrayContaining(['--model', 'claude-sonnet-5-5', '--effort', 'low']));
+    expect(starts[1]).toEqual(expect.arrayContaining(['--resume', 'new-session', '--model', 'claude-opus-5-5', '--effort', 'max']));
+    expect(log().filter((e) => e.message).map((e) => e.message)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('uses the default model and effort for nodes without their own, and no effort for Haiku', async () => {
+    provider = new ClaudeCodeProvider({ command: process.execPath, prefixArgs: [FAKE_CLI], model: 'claude-opus-5-5', effort: 'high' });
+    const signal = new AbortController().signal;
+    await collect(provider.streamReply(ctx('a', NEW, 'n1'), signal));
+    await collect(provider.streamReply({ ...ctx('b', NEW, 'n2'), model: 'claude-haiku-4-5' }, signal));
+    const [a, b] = log().filter((e) => e.argv).map((e) => e.argv!);
+    expect(a).toEqual(expect.arrayContaining(['--model', 'claude-opus-5-5', '--effort', 'high']));
+    expect(b).toEqual(expect.arrayContaining(['--model', 'claude-haiku-4-5']));
+    expect(b).not.toContain('--effort');
+  });
+
+  // The prompt cache only works across branches if their requests start identically. Two things
+  // broke that before (measured 2026-10-02): CLAUDE* variables leaking in from a parent Claude Code
+  // session, and any difference in the flags. scripts/check-cache.ts checks the real CLI.
+  describe('keeps forks cacheable', () => {
+    it('never passes a parent Claude Code session\'s CLAUDE* variables to the CLI', async () => {
+      const saved = { ...process.env };
+      Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'parent', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_EFFORT: 'medium' });
+      try {
+        await collect(provider.streamReply(ctx('hello', NEW), new AbortController().signal));
+      } finally {
+        for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+        Object.assign(process.env, saved);
+      }
+      const [start] = log() as { claudeEnv?: string[] }[];
+      expect(start.claudeEnv).toEqual([]);
+    });
+
+    it('starts sibling branches with the same flags and session, so their prompts share a prefix', async () => {
+      const signal = new AbortController().signal;
+      const fork = (title: string): SessionPlan => ({ mode: 'fork', sessionId: 'parent-session', preamble: `[Branch ${title}]`, transcript: [] });
+      const settings = { model: 'claude-sonnet-5-5', effort: 'high' } as const;
+      await collect(provider.streamReply({ ...ctx('question A', fork('A'), 'a'), ...settings }, signal));
+      await collect(provider.streamReply({ ...ctx('question B', fork('B'), 'b'), ...settings }, signal));
+      const [a, b] = log().filter((e) => e.argv).map((e) => e.argv!);
+      expect(a).toEqual(b);
+      expect(a).toEqual(expect.arrayContaining(['--resume', 'parent-session', '--fork-session']));
+    });
+
+    it('reports the reply\'s cache use', async () => {
+      const events = await collect(provider.streamReply(ctx('hello', NEW), new AbortController().signal));
+      expect(events).toContainEqual({ type: 'usage', usage: { input: 3, cacheRead: 100, cacheWrite: 20 } });
+    });
+  });
+
+  it('runs the CLI without the variables a parent Claude Code session sets', () => {
+    expect(cliEnv({ PATH: 'p', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', CLAUDE_EFFORT: 'medium', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k' }))
+      .toEqual({ PATH: 'p', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k' });
   });
 
   it('keeps one process per node across messages', async () => {

@@ -1,8 +1,8 @@
-import { type Attachment, type DagNode, titleFromPrompt } from '@harness/shared'
+import { type Attachment, type DagNode, type ModelsResponse, titleFromPrompt } from '@harness/shared'
 import { XIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { useFork } from '@/api/queries'
+import { useFork, useModels } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
@@ -10,7 +10,10 @@ import { Textarea } from '@/components/ui/textarea'
 import { AttachMenu } from '@/features/chat/AttachMenu'
 import { PendingAttachments } from '@/features/chat/AttachmentChip'
 import { useAttachments } from '@/features/chat/useAttachments'
+import { ModelFields } from '@/features/model/ModelFields'
+import { type ModelSettings, changesCache } from '@/features/model/modelSettings'
 import { composeBranchPrompt } from '@/lib/listItems'
+import { formatTokens } from '@/lib/tokens'
 import { useDropZone } from '@/lib/useDropZone'
 import { cn } from '@/lib/utils'
 
@@ -30,10 +33,13 @@ interface Branch {
   /** Finished uploads, reported by the branch's field. */
   attachments: Attachment[]
   uploading: boolean
+  /** Starts as the parent's model and effort. */
+  settings: ModelSettings
 }
 
 let nextId = 0
-const newBranch = (item: ForkItem | null = null): Branch => ({ id: nextId++, item, edited: null, attachments: [], uploading: false })
+const newBranch = (settings: ModelSettings, item: ForkItem | null = null): Branch =>
+  ({ id: nextId++, item, edited: null, attachments: [], uploading: false, settings })
 
 /**
  * Write each branch's first message, optionally with files. Creating the branches sends those
@@ -53,8 +59,12 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
   onClose: () => void
 }) {
   const [instruction, setInstruction] = useState('')
-  const [branches, setBranches] = useState<Branch[]>(() => (items?.length ? items.map(newBranch) : [newBranch()]))
+  const parentSettings: ModelSettings = { model: node.model, effort: node.effort }
+  const [branches, setBranches] = useState<Branch[]>(() =>
+    items?.length ? items.map((item) => newBranch(parentSettings, item)) : [newBranch(parentSettings)],
+  )
   const fork = useFork()
+  const catalog = useModels().data
   const navigate = useNavigate()
 
   const promptOf = (b: Branch) => b.edited ?? (b.item ? composeBranchPrompt(instruction, b.item.text) : '')
@@ -68,7 +78,13 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
     fork.mutate(
       {
         nodeId: node.id,
-        branches: filled.map((b) => ({ prompt: promptOf(b).trim(), title: b.item?.title, attachments: b.attachments })),
+        branches: filled.map((b) => ({
+          prompt: promptOf(b).trim(),
+          title: b.item?.title,
+          attachments: b.attachments,
+          // Left out, the server gives the branch its parent's setting.
+          ...(b.settings.model !== node.model || b.settings.effort !== node.effort ? b.settings : {}),
+        })),
       },
       { onSuccess: () => navigate(`/projects/${node.projectId}`) },
     )
@@ -124,6 +140,9 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
               projectId={node.projectId}
               branch={branch}
               prompt={promptOf(branch)}
+              catalog={catalog}
+              parentSettings={parentSettings}
+              contextTokens={inheritedTokens}
               autoFocus={i === 0 && !items?.length}
               onChange={(change) => update(branch.id, change)}
               onRemove={branches.length > 1 ? () => setBranches((list) => list.filter((b) => b.id !== branch.id)) : undefined}
@@ -135,7 +154,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => setBranches((list) => [...list, newBranch()])}
+              onClick={() => setBranches((list) => [...list, newBranch(parentSettings)])}
               disabled={branches.length >= 12}
             >
               + Add branch
@@ -155,12 +174,17 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
 }
 
 /** One branch: its first message and its files (uploaded right away, like in the chat). */
-function BranchField({ index, projectId, branch, prompt, autoFocus, onChange, onRemove, onSubmit }: {
+function BranchField({ index, projectId, branch, prompt, catalog, parentSettings, contextTokens, autoFocus, onChange, onRemove, onSubmit }: {
   index: number
   projectId: string
   branch: Branch
   /** The message as it will be sent (typed, or composed from the instruction and the item). */
   prompt: string
+  /** The models to choose from (not shown until loaded). */
+  catalog: ModelsResponse | undefined
+  parentSettings: ModelSettings
+  /** Estimated tokens of the context the branch starts with. */
+  contextTokens: number
   autoFocus: boolean
   onChange: (change: Partial<Branch>) => void
   onRemove?: () => void
@@ -229,6 +253,21 @@ function BranchField({ index, projectId, branch, prompt, autoFocus, onChange, on
       {prompt.trim() && (
         <span className="truncate text-xs text-muted-foreground">
           Title: {branch.item?.title ?? titleFromPrompt(prompt)}
+        </span>
+      )}
+      {catalog && (
+        <ModelFields
+          compact
+          value={branch.settings}
+          catalog={catalog}
+          onChange={(settings) => onChange({ settings })}
+          idPrefix={id}
+        />
+      )}
+      {/* On Claude Code every branch re-reads its context once anyway (a new CLI process), so there is nothing to warn about. */}
+      {catalog?.forkKeepsCache && changesCache(parentSettings, branch.settings, catalog) && (
+        <span role="status" className="text-xs text-merge">
+          A different model or effort than its parent: its first reply reads the ~{formatTokens(contextTokens)} tokens of context without the prompt cache.
         </span>
       )}
       {drop.dragging && (

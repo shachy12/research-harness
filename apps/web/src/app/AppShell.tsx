@@ -33,7 +33,7 @@ export function AppShell() {
           <span
             className={`ml-auto truncate rounded-full border px-2.5 py-0.5 text-xs ${health.isError ? 'text-destructive' : 'text-muted-foreground'}`}
           >
-            Model: {status}
+            {status}
           </span>
         </header>
         <main className="min-h-0 flex-1">

@@ -1,6 +1,6 @@
 import type { BranchResult } from '@harness/shared';
 import { ProviderError } from './errors.ts';
-import type { LLMProvider, ReplyContext, ReplyEvent } from './provider.ts';
+import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './provider.ts';
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -9,9 +9,11 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Replies explain how to connect a real model; a message mentioning "search" shows a sample
  * search, so the tool display can be tried out. Results are drafted from the last reply.
  * "[test:limit]" in a message acts as if the usage limit was reached, "[test:warning]" as if it is close.
+ * It offers Claude's model ids so the pickers can be tried out, and says which one it was asked for.
  */
 export class PlaceholderProvider implements LLMProvider {
   readonly label = 'placeholder (no API key)';
+  readonly kind = 'placeholder';
   private readonly wordDelayMs: number;
 
   /** `wordDelayMs` slows the reply down, e.g. to test what the UI shows during a long reply. */
@@ -19,7 +21,23 @@ export class PlaceholderProvider implements LLMProvider {
     this.wordDelayMs = wordDelayMs;
   }
 
-  async *streamReply({ request }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  async models(): Promise<ModelCatalog> {
+    const all = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+    return {
+      models: [
+        { id: 'claude-opus-5-5', efforts: [...all] },
+        { id: 'claude-sonnet-5-5', efforts: [...all] },
+        { id: 'claude-fable-5-1', efforts: [...all] },
+        { id: 'claude-haiku-4-5', efforts: [] },
+      ],
+      defaultModel: 'claude-opus-5-5',
+      defaultEffort: 'high',
+      forkKeepsCache: true,
+    };
+  }
+
+  async *streamReply({ request, model, effort }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+    yield { type: 'model', model: model ?? 'claude-opus-5-5' };
     const question = request.turns.at(-1)?.content ?? '';
     if (question.includes('[test:limit]')) {
       const resetsAt = new Date(Date.now() + 2 * 3600_000).toISOString();
@@ -44,6 +62,7 @@ export class PlaceholderProvider implements LLMProvider {
     const text =
       `No model is connected yet, so this is a placeholder reply. ` +
       `This node's prompt has ${request.turns.length} turns, including everything it inherits. ` +
+      `Asked for model ${model ?? 'default'}, effort ${effort ?? 'default'}. ` +
       `To get real answers, set ANTHROPIC_API_KEY in the .env file at the repository root and restart the server.` +
       // Echo the message, so formatting (Markdown, math) can be tried out.
       `\n\nYour message, rendered:\n\n${question.split('\n\n[')[0]}`;

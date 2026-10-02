@@ -1,6 +1,8 @@
+import type { Effort, ModelsResponse } from '@harness/shared';
 import { Hono } from 'hono';
 import type { Repository } from './db/repository.ts';
-import type { LLMProvider } from './llm/index.ts';
+import type { LLMProvider, ModelCatalog } from './llm/index.ts';
+import { classifyError } from './llm/errors.ts';
 import { HttpError } from './routes/errors.ts';
 import { nodeRoutes } from './routes/nodes.ts';
 import { projectRoutes } from './routes/projects.ts';
@@ -22,6 +24,33 @@ export interface AppDeps {
 export interface RouteDeps extends AppDeps {
   runs: RunManager;
   pickFolder: typeof pickFolder;
+  /** Throws a 400 unless the provider offers this model and the model takes this effort (null: default). */
+  checkModel: (model: string | null, effort: Effort | null) => Promise<void>;
+  /** The provider's model list and defaults, or a 502 the UI can show. */
+  loadModels: () => Promise<ModelCatalog>;
+}
+
+/** The provider's model list, or a 502 the UI can show if it can't be loaded. */
+async function loadModels(llm: LLMProvider) {
+  try {
+    return await llm.models();
+  } catch (err) {
+    console.error('[models]', err);
+    throw new HttpError(502, `Could not load the model list: ${classifyError(err).message}`);
+  }
+}
+
+function modelChecker(llm: LLMProvider): RouteDeps['checkModel'] {
+  return async (model, effort) => {
+    if (model === null && effort === null) return;
+    const catalog = await loadModels(llm);
+    const id = model ?? catalog.defaultModel;
+    const option = catalog.models.find((m) => m.id === id);
+    if (model !== null && !option) throw new HttpError(400, `Unknown model "${model}".`);
+    if (effort !== null && option && !option.efforts.includes(effort)) {
+      throw new HttpError(400, option.efforts.length ? `${option.id} takes effort ${option.efforts.join(', ')}.` : `${option.id} has no effort setting.`);
+    }
+  };
 }
 
 // Dependencies are passed in, so tests can use an in-memory database and a fake model.
@@ -30,6 +59,8 @@ export function createApp(deps: AppDeps) {
     ...deps,
     runs: new RunManager(deps.repo, deps.llm, deps.workspaces),
     pickFolder: deps.pickFolder ?? pickFolder,
+    checkModel: modelChecker(deps.llm),
+    loadModels: () => loadModels(deps.llm),
   };
   return new Hono()
     .basePath('/api')
@@ -39,6 +70,7 @@ export function createApp(deps: AppDeps) {
       return c.json({ error: 'Something went wrong on the server' }, 500);
     })
     .get('/health', (c) => c.json({ ok: true, model: deps.llm.label }))
+    .get('/models', async (c) => c.json<ModelsResponse>({ provider: deps.llm.kind, ...(await loadModels(deps.llm)) }))
     .route('/projects', projectRoutes(routeDeps))
     .route('/nodes', nodeRoutes(routeDeps))
     .route('/system', systemRoutes(routeDeps));

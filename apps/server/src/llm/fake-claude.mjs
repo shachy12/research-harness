@@ -12,13 +12,14 @@ const log = (entry) => appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringif
 const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');
 
 if (flag('--input-format') === 'stream-json') {
-  log({ argv, cwd: process.cwd() });
+  // Which CLAUDE* variables reached us (the provider must not pass a parent Claude Code session's on).
+  log({ argv, cwd: process.cwd(), claudeEnv: Object.keys(process.env).filter((k) => /^CLAUDE/i.test(k)) });
   createInterface({ input: process.stdin }).on('line', (line) => {
     const text = JSON.parse(line).message.content;
     log({ message: text });
     if (text.includes('crash')) process.exit(3);
 
-    out({ type: 'system', subtype: 'init', session_id: sessionId });
+    out({ type: 'system', subtype: 'init', session_id: sessionId, model: flag('--model') ?? 'claude-opus-5-5' });
     if (text.includes('hit-limit')) {
       // What the CLI sends when the usage limit is reached.
       const limitText = "You've hit your limit · resets 5pm";
@@ -52,7 +53,10 @@ if (flag('--input-format') === 'stream-json') {
     for (const word of ['echo: ', text.slice(-20)]) {
       out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: word } } });
     }
-    out({ type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: sessionId });
+    out({
+      type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: sessionId,
+      usage: { input_tokens: 3, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
+    });
   });
 } else {
   // One-shot mode (result drafts): read the prompt from stdin, answer with structured output.

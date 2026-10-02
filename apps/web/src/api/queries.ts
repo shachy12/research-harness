@@ -5,6 +5,8 @@ import type {
   ForkBody,
   GraphResponse,
   MergeBody,
+  ModelSettingsBody,
+  ModelsResponse,
   NodeDetail,
   Project,
   ProjectSummary,
@@ -17,6 +19,29 @@ export const keys = {
   projects: ['projects'] as const,
   graph: (projectId: string) => ['graph', projectId] as const,
   node: (nodeId: string) => ['node', nodeId] as const,
+  models: ['models'] as const,
+}
+
+/**
+ * The models the pickers offer. Reloaded now and then: on Claude Code the account's default model
+ * can change (e.g. Opus to Sonnet after heavy use), and the labels show the current default.
+ */
+export function useModels() {
+  return useQuery({
+    queryKey: keys.models,
+    queryFn: ({ signal }) => api.get<ModelsResponse>('/models', signal),
+    staleTime: 60_000,
+  })
+}
+
+/** Change the model and effort a node's next replies use. */
+export function useSetNodeModel() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: ({ nodeId, ...body }: { nodeId: string } & ModelSettingsBody) =>
+      api.put<DagNode>(`/nodes/${nodeId}/model`, body),
+    onSuccess: refresh,
+  })
 }
 
 export function useProjects() {

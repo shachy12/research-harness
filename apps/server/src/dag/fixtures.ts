@@ -23,6 +23,8 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       result: spec.result ?? null,
       sessionId: spec.sessionId ?? null,
       readUpto: null,
+      model: null,
+      effort: null,
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     (spec.messages ?? []).forEach((m, i) => {
@@ -34,6 +36,7 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
         content: rest.join(': '),
         toolCalls: [],
         attachments: [],
+        model: null,
         createdAt: '2026-01-01T00:00:00.000Z',
       });
     });

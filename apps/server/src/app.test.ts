@@ -1,13 +1,15 @@
 import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, NodeDetail, Project, ProjectSummary } from '@harness/shared';
+import type {
+  Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, ModelsResponse, NodeDetail, Project, ProjectSummary,
+} from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.ts';
 import type { ChatRequest } from './dag/prompt.ts';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
-import type { LLMProvider, ReplyContext, ReplyEvent } from './llm/index.ts';
+import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './llm/index.ts';
 import { Workspaces } from './workspace.ts';
 
 /**
@@ -16,6 +18,16 @@ import { Workspaces } from './workspace.ts';
  */
 class FakeProvider implements LLMProvider {
   readonly label = 'fake';
+  readonly kind = 'fake';
+
+  async models(): Promise<ModelCatalog> {
+    return {
+      models: [{ id: 'big', efforts: ['low', 'high'] }, { id: 'small', efforts: [] }],
+      defaultModel: 'big',
+      defaultEffort: 'high',
+      forkKeepsCache: true,
+    };
+  }
   requests: ChatRequest[] = [];
   private gate: (() => void) | null = null;
   /** The next reply fails with this error, after reporting its session. */
@@ -35,6 +47,7 @@ class FakeProvider implements LLMProvider {
     this.contexts.push(ctx);
     this.requests.push(request);
     yield { type: 'session', sessionId: 'session-1' };
+    yield { type: 'model', model: 'fake-model' };
     const failure = this.failNext;
     this.failNext = null;
     if (failure) throw failure;
@@ -561,6 +574,76 @@ describe('API', () => {
       expect(await unreadOf(branch.id)).toBe(1);
     });
   });
+  describe('model settings', () => {
+    it("lists the provider's models", async () => {
+      const { data } = await call<ModelsResponse>('GET', '/models');
+      expect(data).toMatchObject({ provider: 'fake', defaultModel: 'big', defaultEffort: 'high', forkKeepsCache: true });
+      expect(data.models.map((m) => m.id)).toEqual(['big', 'small']);
+    });
+
+    it("changes a node's model and effort for its next replies, checked against the list", async () => {
+      const put = (body: object) => call<DagNode>('PUT', `/nodes/${rootId}/model`, body);
+      expect((await put({ model: 'nope', effort: null })).status).toBe(400);
+      expect((await put({ model: 'big', effort: 'max' })).status).toBe(400); // big takes low or high
+      expect((await put({ model: 'small', effort: 'low' })).status).toBe(400); // small has no effort
+      const ok = await put({ model: 'big', effort: 'low' });
+      expect(ok.status).toBe(200);
+      expect(ok.data).toMatchObject({ model: 'big', effort: 'low' });
+
+      await chat(rootId, 'Hi');
+      expect(llm.contexts.at(-1)).toMatchObject({ model: 'big', effort: 'low' });
+      expect((await detail(rootId)).messages.at(-1)!.model).toBe('fake-model'); // what the provider reported
+
+      expect((await put({ model: null, effort: null })).data).toMatchObject({ model: null, effort: null });
+    });
+
+    it("branches copy their parent's settings unless given their own; frozen nodes keep theirs", async () => {
+      await call('PUT', `/nodes/${rootId}/model`, { model: 'big', effort: 'high' });
+      await chat(rootId, 'Scope it');
+      const { data } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
+        branches: [{ prompt: 'same' }, { prompt: 'other', model: 'small', effort: null }, { prompt: 'bad', model: 'nope' }],
+      });
+      expect(data).toEqual({ error: 'Unknown model "nope".' });
+      expect((await detail(rootId)).node.status).toBe('open'); // nothing was created
+
+      const created = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
+        branches: [{ prompt: 'same' }, { prompt: 'other', model: 'small', effort: null }],
+      });
+      const [same, other] = created.data;
+      for (const n of created.data) await settle(n.id);
+      expect(llm.contexts.at(-1)).toMatchObject({ model: 'small', effort: null });
+      expect(same).toMatchObject({ model: 'big', effort: 'high' });
+      expect(other).toMatchObject({ model: 'small', effort: null });
+      expect((await call('PUT', `/nodes/${rootId}/model`, { model: 'small', effort: null })).status).toBe(409);
+    });
+
+    it('a merged node takes its branches\' setting; with different models, the first by name', async () => {
+      await call('PUT', `/nodes/${rootId}/model`, { model: 'big', effort: 'low' });
+      await chat(rootId, 'Scope it');
+      const [a, b, c] = await fork(rootId, ['A', 'B', 'C']);
+      for (const n of [a, b, c]) await call('PUT', `/nodes/${n.id}/result`, RESULT);
+      const merge = async (ids: string[]) =>
+        (await call<DagNode>('POST', '/projects/default/merge', { parentIds: ids, prompt: 'Synthesize' })).data;
+
+      const same = await merge([a.id, b.id]);
+      expect(same).toMatchObject({ model: 'big', effort: 'low' });
+      await settle(same.id);
+
+      // c is switched to "small" before finishing (via the database: finished nodes can't change).
+      repo.setModelSettings(c.id, 'small', null);
+      const mixed = await merge([c.id, a.id]);
+      expect(mixed).toMatchObject({ model: 'big', effort: 'low' }); // "big" < "small"
+      await settle(mixed.id);
+
+      // Or the one chosen in the merge dialog (checked like any other).
+      const body = (extra: object) => ({ parentIds: [a.id, c.id], prompt: 'Synthesize', ...extra });
+      expect((await call('POST', '/projects/default/merge', body({ model: 'nope' }))).status).toBe(400);
+      const chosen = await call<DagNode>('POST', '/projects/default/merge', body({ model: 'small', effort: null }));
+      expect(chosen.data).toMatchObject({ model: 'small', effort: null });
+      await settle(chosen.data.id);
+    });
+  });
+
   it('names a branch after its given title, else after its prompt', async () => {
     await chat(rootId, 'Scope it');
     const { data } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {

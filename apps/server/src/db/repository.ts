@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Attachment, BranchResult, DagNode, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
+import type { Attachment, BranchResult, DagNode, Effort, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
@@ -9,9 +9,11 @@ interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
   title_source: TitleSource; prompt_title: string | null; read_upto: string | null;
+  model: string | null; effort: Effort | null;
 }
 interface MessageRow {
-  id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string; created_at: string;
+  id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
+  model: string | null; created_at: string;
 }
 
 const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, folder: r.folder, createdAt: r.created_at });
@@ -26,6 +28,8 @@ const toNode = (r: NodeRow): DagNode => ({
   result: r.result ? (JSON.parse(r.result) as BranchResult) : null,
   sessionId: r.session_id,
   readUpto: r.read_upto,
+  model: r.model,
+  effort: r.effort,
   createdAt: r.created_at,
 });
 const toMessage = (r: MessageRow): Message => ({
@@ -35,6 +39,7 @@ const toMessage = (r: MessageRow): Message => ({
   content: r.content,
   toolCalls: JSON.parse(r.tool_calls) as ToolCall[],
   attachments: JSON.parse(r.attachments) as Attachment[],
+  model: r.model,
   createdAt: r.created_at,
 });
 
@@ -109,13 +114,26 @@ export class Repository {
     return rows.map(toNode);
   }
 
-  createNode(input: { projectId: string; title: string; parentIds: string[]; titleSource?: TitleSource }): DagNode {
+  createNode(input: {
+    projectId: string;
+    title: string;
+    parentIds: string[];
+    titleSource?: TitleSource;
+    model?: string | null;
+    effort?: Effort | null;
+  }): DagNode {
     const id = randomUUID();
     this.db
-      .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?)`)
-      .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds), now());
+      .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, model, effort, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?)`)
+      .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds),
+        input.model ?? null, input.effort ?? null, now());
     return this.getNode(id)!;
+  }
+
+  /** The model and effort the node's next replies use (null: the provider's default). */
+  setModelSettings(id: string, model: string | null, effort: Effort | null): void {
+    this.db.prepare('UPDATE nodes SET model = ?, effort = ? WHERE id = ?').run(model, effort, id);
   }
 
   /** Rename a node. `prompt_title` stays as it was, so the model's context doesn't change. */
@@ -160,12 +178,16 @@ export class Repository {
     nodeId: string,
     role: Role,
     content: string,
-    { toolCalls = [], attachments = [] }: { toolCalls?: ToolCall[]; attachments?: Attachment[] } = {},
+    {
+      toolCalls = [],
+      attachments = [],
+      model = null,
+    }: { toolCalls?: ToolCall[]; attachments?: Attachment[]; model?: string | null } = {},
   ): Message {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, nodeId, role, content, JSON.stringify(toolCalls), JSON.stringify(attachments), now());
+      .prepare('INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, nodeId, role, content, JSON.stringify(toolCalls), JSON.stringify(attachments), model, now());
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as unknown as MessageRow;
     return toMessage(row);
   }

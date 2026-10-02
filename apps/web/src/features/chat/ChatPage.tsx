@@ -9,12 +9,13 @@ import { activityOf } from '@/lib/activity'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ForkDialog } from '@/features/fork/ForkDialog'
+import { NodeModelPicker } from '@/features/model/NodeModelPicker'
 import { RenameDialog } from '@/features/rename/RenameDialog'
 import { ResultBlock } from '@/features/result/ResultBlock'
 import { ResultDialog } from '@/features/result/ResultDialog'
 import { describeReset, limitName } from '@/lib/limit'
 import { itemTitle, resolveSelection } from '@/lib/listItems'
-import { contextTokens } from '@/lib/tokens'
+import { contextTokens, estimateTokens } from '@/lib/tokens'
 import { useDropZone } from '@/lib/useDropZone'
 import { useNow } from '@/lib/useNow'
 import { AttachMenu } from './AttachMenu'
@@ -75,6 +76,8 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   if (!detail.data || waitingForFresh) return <p className="p-6 text-sm text-muted-foreground">Loading…</p>
 
   const { node } = detail.data
+  // Everything the node's next prompt contains: what it inherits plus its own messages.
+  const historyTokens = contextTokens(detail.data.inherited) + detail.data.messages.reduce((s, m) => s + estimateTokens(m.content), 0)
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b px-4 py-2">
@@ -91,7 +94,7 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
       {(dialog === 'fork' || dialog === 'fork-selection') && (
         <ForkDialog
           node={node}
-          inheritedTokens={contextTokens(detail.data.inherited) + detail.data.messages.reduce((s, m) => s + Math.ceil(m.content.length / 4), 0)}
+          inheritedTokens={historyTokens}
           existingBranches={detail.data.childIds.length}
           items={
             dialog === 'fork-selection'
@@ -322,6 +325,15 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
               <Button variant="outline" size="sm" disabled={!hasReply || stream.active} onClick={() => onDialog('result')}>
                 ✓ Finish branch
               </Button>
+            )}
+            {canWrite && (
+              <NodeModelPicker
+                node={node}
+                replyCount={messages.filter((m) => m.role === 'assistant').length}
+                historyTokens={contextTokens(inherited) + messages.reduce((sum, m) => sum + estimateTokens(m.content), 0)}
+                lastReplyModel={messages.findLast((m) => m.role === 'assistant')?.model ?? null}
+                disabled={working}
+              />
             )}
           </div>
         </div>
