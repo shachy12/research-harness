@@ -84,6 +84,17 @@ The Claude Code provider depends on details a CLI update can change without noti
 - **Raising `testedUpTo`:** an opt-in live check (`npm run check:claude`) that runs the real CLI once per feature (stream a short reply, fork a session, a result draft with `--json-schema`, a web search) for a few cents of credit, then compares the events with what `fake-claude.mjs` sends. Save the real output as fixtures per version, so the fake CLI stays faithful.
 - **API provider too, briefly:** the SDK is pinned by `package-lock.json`, but model ids and beta headers (`server-side-fallback-2026-07-01`, the web tool versions) get retired. Classify "unknown beta"/"model not found" errors with a message that names what to update.
 
+## 15. Fork from whole sections (headings and bold lead-in lines)
+Today only list items and table rows can be picked. Models often lay out options as a bold line followed by bullets, e.g. in the Arithmetic PIR project: `**1. Reduce arithmetic to linear (the most promising first step).**` and then its bullets. The bold line is a plain paragraph, so the approach can't be picked as one unit: only its bullets can, one at a time.
+- **What counts as a section:**
+  - **A Markdown heading** (`#`…`######`): the heading plus everything up to the next heading of the same or a higher level (so a `##` section contains its `###` subsections).
+  - **A bold lead-in line**: a paragraph made only of bold text (an optional trailing `:` or `.` allowed), like the example above. It runs until the next bold lead-in line or any heading. This is how replies usually number their options.
+- **Picking:** hover and click the heading line (not the body) to pick the section; the whole section turns blue like a picked item. The body's own list items and rows stay pickable on their own. A picked section makes any picked item inside it "included" (the existing `resolveSelection` rule), and picking a section inside a picked section works the same way.
+- **Branch text and title:** the section's Markdown source (heading line + body), sliced by position from the same `prepareMath(text)` string as items. Title: the heading text with Markdown marks and numbering ("1.") removed, e.g. "Reduce arithmetic to linear (the most promising first step)"; `itemTitle` handles the rest.
+- **Implementation idea:** sections aren't elements in the rendered tree, so add a small remark/rehype plugin that groups the root's blocks into `<section>` wrappers with start/end offsets (like `remark-sectionize`), detecting bold lead-in paragraphs as a `paragraph` whose only child is `strong`. Then a `SelectableSection` with the shared `useSelectable`, and the heading as the click target. Section logic goes in `lib/listItems.ts` with tests (nested headings, a bold line inside a list item doesn't count, a heading level jump, a section at the end of the reply).
+- **Maybe:** ask the model in the system prompt to put alternative approaches under `###` headings, so sections are detected reliably.
+- Covers part of "pick whole paragraphs" from the Done notes on item 5.
+
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
