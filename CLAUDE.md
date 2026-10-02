@@ -129,5 +129,8 @@ npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Re
 3. Wrap in Electron.
 4. Later ideas: autonomous (subagent) branches the user can step into, merge templates (synthesize / compare / pick best), a per-node context-budget display.
 
+## Improvements backlog
+`IMPROVEMENTS.md` collects improvements the user wants later (documented, not implemented). Add new ideas there when the user asks to note them; implement only when asked.
+
 ## Working with the user
 The user is fluent in Python, not a web developer (last web work was the jQuery era). Explain web/TS/React concepts when introducing them, and relate them to Python where helpful.
