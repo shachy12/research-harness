@@ -1,7 +1,7 @@
 import type { ComponentProps, MouseEvent } from 'react'
 import { useState } from 'react'
 import type { ExtraProps } from 'react-markdown'
-import { isInside, itemSource, tableRowItem } from '@/lib/listItems'
+import { isInside, itemSource, sectionItem, tableRowItem } from '@/lib/listItems'
 import { cn } from '@/lib/utils'
 import { useListSelection } from './listSelection'
 
@@ -19,8 +19,16 @@ const INTERACTIVE = 'a, button, input, summary, select, textarea'
  * Not a pick: a click that ends a text selection (drag to copy), on a link or button, or the
  * second click of a double-click. That one undoes the first, so selecting a word by double-click
  * leaves the item as it was.
+ *
+ * With `handle` (a selector), only that part of the element reacts: a section is picked by its heading.
  */
-function useSelectable(messageId: string, start: number | undefined, end: number | undefined, build: () => Built) {
+function useSelectable(
+  messageId: string,
+  start: number | undefined,
+  end: number | undefined,
+  build: () => Built,
+  handle?: string,
+) {
   const selection = useListSelection()
   const [hover, setHover] = useState(false)
   if (!selection || start === undefined || end === undefined) return null
@@ -32,6 +40,10 @@ function useSelectable(messageId: string, start: number | undefined, end: number
     if (item) selection.toggle({ messageId, start, end, ...item })
   }
 
+  /** The pointer is on this element's own part, not on an item inside it (or, with a handle, off the handle). */
+  const ownTarget = (target: Element, element: Element) =>
+    target.closest('[data-selectable]') === element && (!handle || target.closest(handle)?.parentElement === element)
+
   return {
     picked,
     included,
@@ -39,11 +51,11 @@ function useSelectable(messageId: string, start: number | undefined, end: number
     props: {
       'data-selectable': '',
       onPointerOver: (e: React.PointerEvent<HTMLElement>) =>
-        setHover((e.target as Element).closest('[data-selectable]') === e.currentTarget),
+        setHover(ownTarget(e.target as Element, e.currentTarget)),
       onPointerLeave: () => setHover(false),
       onClick: (e: MouseEvent<HTMLElement>) => {
         const target = e.target as Element
-        if (target.closest('[data-selectable]') !== e.currentTarget) return // belongs to an item inside
+        if (!ownTarget(target, e.currentTarget)) return // belongs to an item inside, or off the handle
         if (target.closest(INTERACTIVE)) return
         if (e.detail === 2) toggle() // undo the first click of a double-click
         else if (e.detail === 1 && !window.getSelection()?.toString()) toggle()
@@ -102,5 +114,33 @@ export function SelectableTableRow({ node, children, className, messageId, markd
     >
       {children}
     </tr>
+  )
+}
+
+/**
+ * A section of a reply (see `rehypeSections`): a heading or bold lead-in line and what follows it.
+ * Clicking the heading picks the whole section; the items inside it stay pickable on their own.
+ */
+export function SelectableSection({ node, children, className, messageId, markdown, ...rest }: ComponentProps<'section'> &
+  ExtraProps & { messageId: string; markdown: string }) {
+  const start = node?.position?.start.offset
+  const end = node?.position?.end.offset
+  const s = useSelectable(messageId, start, end, () => sectionItem(markdown, start!, end!), '[data-section-head]')
+  if (!s) return <section className={className} {...rest}>{children}</section>
+
+  return (
+    <section
+      {...rest}
+      {...s.props}
+      className={cn(
+        className,
+        // Like a list item's: a layer behind the section, a little wider than the text.
+        'relative isolate before:absolute before:inset-y-0 before:-inset-x-2 before:-z-10 before:rounded-md before:transition-colors',
+        '[&>[data-section-head]]:cursor-pointer',
+        s.picked && !s.included ? 'before:bg-primary/15' : s.hover && 'before:bg-muted',
+      )}
+    >
+      {children}
+    </section>
   )
 }

@@ -73,6 +73,25 @@ export function itemTitle(item: string): string {
   return titleFromPrompt(plain || line)
 }
 
+/**
+ * A section (a heading or bold lead-in line and what follows it) as a branch item: its Markdown as
+ * written, titled by its heading without marks or numbering (`**1. Reduce to linear.**` → "Reduce to linear").
+ */
+export function sectionItem(markdown: string, start: number, end: number): { text: string; title: string } | null {
+  const text = markdown.slice(start, end).trim()
+  if (!text) return null
+  const head = text
+    .split('\n')[0]
+    .trim()
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/\s+#+$/, '') // closing hashes of a heading
+    .replace(/^(\*\*|__)(.+)\1\s*[:.]?$/, '$2') // a bold lead-in line
+    .trim()
+    .replace(/^(?:\d{1,3}|[A-Za-z])[.)]\s+/, '') // "1. ", "a) "
+    .replace(/[.:]$/, '')
+  return { text, title: itemTitle(head || text) }
+}
+
 /** Cells of one table row line: split on pipes that are not escaped, outer pipes dropped. */
 export function splitRow(line: string): string[] {
   const inner = line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '')

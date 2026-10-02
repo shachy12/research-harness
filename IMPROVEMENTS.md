@@ -70,7 +70,7 @@ A merged node starts from the merge base (the lowest common ancestor) plus the m
 - **Not chosen (for now):** pasting summaries of the intermediate nodes into the merge up front. That costs a model call per node at every merge even when unused, and frozen nodes have no result to reuse.
 - **Depends on** item 5's harness MCP server (`--mcp-config` + `--strict-mcp-config`, pre-approve only the harness tools).
 
-## 13. Supported Claude Code versions, and telling the user when theirs isn't
+## 16. Supported Claude Code versions, and telling the user when theirs isn't
 The Claude Code provider depends on details a CLI update can change without notice: flags (`--input-format stream-json`, `--include-partial-messages`, `--fork-session`, `--json-schema`, `--system-prompt`, `--setting-sources ''`, `--strict-mcp-config`, `--tools`), the stream-json event shapes (`system:init` with `session_id`, `stream_event` deltas, `tool_use`/`tool_result`, `rate_limit_event`, `result` with `structured_output`), and the text format of WebSearch results (`Links: [...]`). Today a breaking update would show up as odd failures mid-research.
 - **Define the range:** one constant in `llm/claude-code.ts`, e.g. `{ minimum: '2.1.287', testedUpTo: '2.1.287' }`.
   - Below `minimum`: **unsupported**. Don't start replies; say "Claude Code 2.0.x is too old for Harness; update it (`npm install -g @anthropic-ai/claude-code`, then run `node install.cjs` in the package folder on Windows)".
@@ -84,24 +84,14 @@ The Claude Code provider depends on details a CLI update can change without noti
 - **Raising `testedUpTo`:** an opt-in live check (`npm run check:claude`) that runs the real CLI once per feature (stream a short reply, fork a session, a result draft with `--json-schema`, a web search) for a few cents of credit, then compares the events with what `fake-claude.mjs` sends. Save the real output as fixtures per version, so the fake CLI stays faithful.
 - **API provider too, briefly:** the SDK is pinned by `package-lock.json`, but model ids and beta headers (`server-side-fallback-2026-07-01`, the web tool versions) get retired. Classify "unknown beta"/"model not found" errors with a message that names what to update.
 
-## 15. Fork from whole sections (headings and bold lead-in lines)
-Today only list items and table rows can be picked. Models often lay out options as a bold line followed by bullets, e.g. in the Arithmetic PIR project: `**1. Reduce arithmetic to linear (the most promising first step).**` and then its bullets. The bold line is a plain paragraph, so the approach can't be picked as one unit: only its bullets can, one at a time.
-- **What counts as a section:**
-  - **A Markdown heading** (`#`…`######`): the heading plus everything up to the next heading of the same or a higher level (so a `##` section contains its `###` subsections).
-  - **A bold lead-in line**: a paragraph made only of bold text (an optional trailing `:` or `.` allowed), like the example above. It runs until the next bold lead-in line or any heading. This is how replies usually number their options.
-- **Picking:** hover and click the heading line (not the body) to pick the section; the whole section turns blue like a picked item. The body's own list items and rows stay pickable on their own. A picked section makes any picked item inside it "included" (the existing `resolveSelection` rule), and picking a section inside a picked section works the same way.
-- **Branch text and title:** the section's Markdown source (heading line + body), sliced by position from the same `prepareMath(text)` string as items. Title: the heading text with Markdown marks and numbering ("1.") removed, e.g. "Reduce arithmetic to linear (the most promising first step)"; `itemTitle` handles the rest.
-- **Implementation idea:** sections aren't elements in the rendered tree, so add a small remark/rehype plugin that groups the root's blocks into `<section>` wrappers with start/end offsets (like `remark-sectionize`), detecting bold lead-in paragraphs as a `paragraph` whose only child is `strong`. Then a `SelectableSection` with the shared `useSelectable`, and the heading as the click target. Section logic goes in `lib/listItems.ts` with tests (nested headings, a bold line inside a list item doesn't count, a heading level jump, a section at the end of the reply).
-- **Maybe:** ask the model in the system prompt to put alternative approaches under `###` headings, so sections are detected reliably.
-- Covers part of "pick whole paragraphs" from the Done notes on item 5.
-
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
 - **2. Files per branch when forking:** done.
 - **6. Rename and model-written titles:** done (pencil on cards and in the chat header, Suggest button, automatic title after the first reply, `title_source`).
 - **7. Remember what was read in each node:** done (`read_upto` per node, opening position, "N new" badge on cards, follow-the-stream only at the bottom). Left: an unread marker line inside the chat at the first unread reply; marking read for results of finished branches.
-- **5 (part). Fork from list items and table rows:** done, without MCP (click list items or table rows in a reply, one instruction for all, one branch per pick; titles from the items; table rows carry their column names). Left: the agent-called `fork_branches` tool (the rest of item 5). Possible extras: pick whole paragraphs, keyboard picking, keep the selection when leaving the chat, a "select all rows/items" shortcut.
+- **5 (part). Fork from list items and table rows:** done, without MCP (click list items or table rows in a reply, one instruction for all, one branch per pick; titles from the items; table rows carry their column names). Left: the agent-called `fork_branches` tool (the rest of item 5). Possible extras: pick plain paragraphs, keyboard picking, keep the selection when leaving the chat, a "select all rows/items" shortcut.
+- **15. Fork from whole sections:** done (headings and bold lead-in lines; click the heading line to pick the section). Left: maybe ask the model in the system prompt to put alternative approaches under `###` headings.
 - **9. Clear "limit reached" message:** done (classified errors, banner with reset time and share used, e.g. "25% of your weekly limit used", Retry and Retry all). Left: capture a real limit hit to confirm the event shapes (and the monthly `-p` credit wording); retry automatically when the limit resets.
 - **10. One attach button:** done (paperclip with a Files/Folder menu).
 - **Multiple projects** (asked for directly, not a backlog item): done (sidebar, new project with an optional working folder picked in the OS folder dialog, rename, reopens the last project). Left: deleting a project (on purpose not built; it should back up first, like "Start over"); try the folder dialog on macOS and Linux (see item 12).
