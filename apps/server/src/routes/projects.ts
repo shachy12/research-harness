@@ -11,7 +11,7 @@ import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
-export function projectRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
+export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps) {
   return new Hono()
     // Upload a file (multipart field "file"). It is copied into the project's .harness/uploads/ and
     // can then be attached to a message; the model reads it from there.
@@ -96,6 +96,14 @@ export function projectRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
     .post('/:projectId/reset', (c) => {
       const project = repo.getProject(c.req.param('projectId'));
       if (!project) throw notFound('Project');
+      // Keep a copy of everything first; if that fails, delete nothing.
+      try {
+        const saved = backup?.('before-reset');
+        if (saved) console.log(`database backed up before reset: ${saved}`);
+      } catch (err) {
+        console.error('[reset] backup failed:', err);
+        throw new HttpError(500, 'Could not back up the database, so nothing was deleted.');
+      }
       for (const node of repo.listNodes(project.id)) {
         runs.stop(node.id); // stop running replies
         llm.release?.(node.id); // and their model processes

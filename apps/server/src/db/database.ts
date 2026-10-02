@@ -1,9 +1,12 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { backupDatabase } from './backup.ts';
 
 // Schema changes are appended here, never edited. PRAGMA user_version records how many have run.
-const MIGRATIONS: string[] = [
+// The user's research lives in this database: a migration must never delete or rewrite their
+// messages, results or nodes. (A backup is made before migrating anyway — see openDatabase.)
+export const MIGRATIONS: string[] = [
   `
   CREATE TABLE projects (
     id         TEXT PRIMARY KEY,
@@ -46,16 +49,26 @@ const MIGRATIONS: string[] = [
   `,
 ];
 
-/** Open (or create) the database and bring its schema up to date. Pass ':memory:' for tests. */
-export function openDatabase(file: string): DatabaseSync {
+/** Where backups of a database file go: `backups/` next to it. */
+export const backupDirOf = (file: string) => path.join(path.dirname(file), 'backups');
+
+/**
+ * Open (or create) the database and bring its schema up to date. Pass ':memory:' for tests.
+ * An existing database is backed up before any migration runs, so a bad migration can't lose data.
+ */
+export function openDatabase(file: string, migrations: string[] = MIGRATIONS): DatabaseSync {
   if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
 
   const { user_version: version } = db.prepare('PRAGMA user_version').get() as { user_version: number };
-  for (let i = version; i < MIGRATIONS.length; i++) {
+  if (file !== ':memory:' && version > 0 && version < migrations.length) {
+    const backup = backupDatabase(db, backupDirOf(file), `before-migration-v${version + 1}`);
+    console.log(`database backed up before migrating: ${backup}`);
+  }
+  for (let i = version; i < migrations.length; i++) {
     transaction(db, () => {
-      db.exec(MIGRATIONS[i]);
+      db.exec(migrations[i]);
       db.exec(`PRAGMA user_version = ${i + 1}`);
     });
   }

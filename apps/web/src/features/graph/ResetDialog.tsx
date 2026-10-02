@@ -18,7 +18,8 @@ export function ResetDialog({ projectId, nodeCount, onDone, onClose }: {
           <DialogTitle>Start over?</DialogTitle>
           <DialogDescription>
             This deletes all {nodeCount} {nodeCount === 1 ? 'node' : 'nodes'} in this project, with their messages and
-            results, and leaves an empty starting node. It can't be undone.
+            results, and leaves an empty starting node. A backup of the database is saved first (in{' '}
+            <code className="text-xs">data/backups/</code>), so it can be recovered if needed.
           </DialogDescription>
         </DialogHeader>
         {reset.isError && <p className="text-sm text-destructive">{reset.error.message}</p>}

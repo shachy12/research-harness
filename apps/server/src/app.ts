@@ -11,6 +11,8 @@ export interface AppDeps {
   repo: Repository;
   llm: LLMProvider;
   workspaces: Workspaces;
+  /** Back up the database (e.g. before "Start over"); returns the backup's path. Absent in tests. */
+  backup?: (label: string) => string;
 }
 
 export interface RouteDeps extends AppDeps {

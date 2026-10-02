@@ -129,6 +129,14 @@ npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Re
 3. Wrap in Electron.
 4. Later ideas: autonomous (subagent) branches the user can step into, merge templates (synthesize / compare / pick best), a per-node context-budget display.
 
+## Protecting the user's research (since 2026-10-02 the user does real research in this app)
+- `data/harness.db` holds real work. Never delete it, `data/projects/`, or `data/backups/`.
+- Backups (`apps/server/src/db/backup.ts`, consistent copies via `VACUUM INTO`, in `data/backups/`): before every migration (`before-migration-vN`, kept forever), before "Start over" (`before-reset`, kept forever; if the backup fails, nothing is deleted), once a day at startup (`daily`, newest 14 kept), and `manual` ones.
+- Migrations must never delete or rewrite the user's messages, results or nodes. Append-only, as before.
+- Before any risky change to real data (manual SQL, data fixes, schema experiments), make a manual backup first.
+- Testing never uses the real data: the browser preview uses `data/preview/`, scripts use a scratch `HARNESS_DATA_DIR`.
+- Not covered by these backups: uploaded files in `.harness/uploads/` (copies of the user's own files) and Claude Code's session files under `~/.claude/` (losing them only means a transcript replay). Backups are on the same disk.
+
 ## Improvements backlog
 `IMPROVEMENTS.md` collects improvements the user wants later (documented, not implemented). Add new ideas there when the user asks to note them; implement only when asked.
 

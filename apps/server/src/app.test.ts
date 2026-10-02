@@ -99,9 +99,10 @@ async function fork(nodeId: string, prompts: string[]) {
 }
 
 let workspaces: Workspaces;
+let repo: Repository;
 
 beforeEach(() => {
-  const repo = new Repository(openDatabase(':memory:'));
+  repo = new Repository(openDatabase(':memory:'));
   repo.createProject('default', 'Test', 'Main thread');
   llm = new FakeProvider();
   workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), 'harness-app-')));
@@ -356,6 +357,22 @@ describe('API', () => {
   it('rejects an upload without a file', async () => {
     const res = await app.request('/api/projects/default/uploads', { method: 'POST', body: new FormData() });
     expect(res.status).toBe(400);
+  });
+
+  it('backs up before a reset', async () => {
+    const labels: string[] = [];
+    const withBackup = createApp({ repo, llm, workspaces, backup: (label) => (labels.push(label), 'backup.db') });
+    expect((await withBackup.request('/api/projects/default/reset', { method: 'POST' })).status).toBe(200);
+    expect(labels).toEqual(['before-reset']);
+  });
+
+  it('deletes nothing if the backup before a reset fails', async () => {
+    await chat(rootId, 'Precious research');
+    const failing = createApp({ repo, llm, workspaces, backup: () => { throw new Error('disk full'); } });
+    const res = await failing.request('/api/projects/default/reset', { method: 'POST' });
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toContain('nothing was deleted');
+    expect((await detail(rootId)).messages.map((m) => m.content)).toContain('Precious research');
   });
 
   it('renames a node', async () => {
