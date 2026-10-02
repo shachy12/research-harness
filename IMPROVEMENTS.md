@@ -25,20 +25,7 @@ When a reply lists several directions ("1. … 2. … 3. …"), the user wants t
   - **API provider:** the same tool as a regular custom tool in the request, handled by our server in the reply loop.
 - **Timing:** the tool is called while the parent's reply is still running, but a fork freezes the parent and the branches should inherit the *whole* reply (including the list). So the call records the requested branches, and the harness creates and starts them right after the parent's reply finishes. The tool result tells the agent "N branches will start when this reply ends".
 - **Confirmation (recommended default):** show the agent's proposed branches in the fork dialog, pre-filled, for the user to edit, add files to (see item 2) or confirm, instead of starting them silently. A setting could allow auto-start later.
-- **Simpler first step (no MCP), the user likes this one:** a "Fork from this list" button on a reply that has a list, which opens the fork dialog pre-filled with one branch per list item. Covers most of the need and also works for replies that already exist.
-  - **Instruction for each item:** one field says what every branch should do with its item ("Explain each of these", "Check whether we can … for this one"). Each branch's first message = instruction + its item; `{item}` in the instruction places the item explicitly ("Compare {item} with our construction from §3").
-  - **Titles come from the items** (not the shared instruction), so branches stay distinguishable on the graph.
-  - **Review before starting:** a checkbox per item to skip some, each branch's resulting message editable, files per branch (item 2).
-  - **List detection:** take numbered and bulleted top-level items from the reply's Markdown (a sub-list belongs to its parent item); if a reply has several lists, let the user pick which one.
-  - The same instruction field fits the MCP version: "fork for each of these and check …" becomes the instruction the agent passes along.
-
-## 7. Remember what was read in each node
-Opening a node always jumps to the bottom. Each node should remember which assistant replies the user has read.
-- **Opening a node:** never opened → start at the top; opened before with unread replies → scroll to the start of the first unread reply; everything read → the end.
-- **Marking read:** a reply counts as read once its end has been on screen (an IntersectionObserver on a marker after each reply; short replies that fit count when seen). Monotonic: only moves forward.
-- **Storage:** server-side so it survives restarts and works in Electron later: a `read_upto` message id per node (append-only migration; the automatic pre-migration backup covers it), plus a small `PUT /nodes/:id/read` endpoint.
-- **Don't yank the view:** while a reply streams, follow it only if the user is already at the bottom; after sending a message, jump to the bottom.
-- **Graph:** an unread badge on cards ("2 new"), most useful after a fork when several branches finish while the user is elsewhere.
+- **Done (the no-MCP part):** see "Fork from list items and table rows" in CLAUDE.md; it was built as picking list items and table rows in replies instead of a "Fork from this list" button. What is left of this item is the MCP tool above.
 
 ## 8. Change model and effort while working (with a cache warning)
 Choose the model (e.g. Opus 5.5 / Sonnet 5.5 / Haiku 4.5) and effort (low → max) per node while working, not only in `.env`.
@@ -76,6 +63,8 @@ Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doi
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
 - **2. Files per branch when forking:** done.
 - **6. Rename and model-written titles:** done (pencil on cards and in the chat header, Suggest button, automatic title after the first reply, `title_source`).
+- **7. Remember what was read in each node:** done (`read_upto` per node, opening position, "N new" badge on cards, follow-the-stream only at the bottom). Left: an unread marker line inside the chat at the first unread reply; marking read for results of finished branches.
+- **5 (part). Fork from list items and table rows:** done, without MCP (click list items or table rows in a reply, one instruction for all, one branch per pick; titles from the items; table rows carry their column names). Left: the agent-called `fork_branches` tool (the rest of item 5). Possible extras: pick whole paragraphs, keyboard picking, keep the selection when leaving the chat, a "select all rows/items" shortcut.
 - **9. Clear "limit reached" message:** done (classified errors, banner with reset time and share used, e.g. "25% of your weekly limit used", Retry and Retry all). Left: capture a real limit hit to confirm the event shapes (and the monthly `-p` credit wording); retry automatically when the limit resets.
 - **10. One attach button:** done (paperclip with a Files/Folder menu).
 - **Multiple projects** (asked for directly, not a backlog item): done (sidebar, new project with an optional working folder picked in the OS folder dialog, rename, reopens the last project). Left: deleting a project (on purpose not built; it should back up first, like "Start over"); try the folder dialog on macOS and Linux (see item 12).

@@ -11,6 +11,7 @@ import {
   type NodeSummary,
   defaultMergeTitle,
   mergeSchema,
+  unreadCount,
 } from '@harness/shared';
 import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
@@ -97,12 +98,14 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup }: RouteDeps
 
       const graph = repo.snapshot(project.id);
       const nodes: NodeSummary[] = graph.allNodes().map((node) => {
-        const last = graph.messages(node.id).at(-1);
+        const messages = graph.messages(node.id);
+        const last = messages.at(-1);
         return {
           ...node,
-          messageCount: graph.messages(node.id).length,
+          messageCount: messages.length,
           lastMessage: last?.content ?? null,
           lastRole: last?.role ?? null,
+          unread: unreadCount(messages, node.readUpto),
           running: runs.isRunning(node.id),
           run: runs.status(node.id),
           titlePending: runs.isTitling(node.id),

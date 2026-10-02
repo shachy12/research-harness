@@ -45,6 +45,23 @@ describe('backups', () => {
     expect(projectNames(path.join(backupDirOf(file), backups[0].name))).toEqual(['Paper A']);
   });
 
+  it('treats existing nodes as read when the read position is added, and keeps their messages', () => {
+    const file = path.join(dir, 'harness.db');
+    const old = openDatabase(file, MIGRATIONS.slice(0, 5));
+    old.exec(`INSERT INTO projects (id, name, created_at) VALUES ('p', 'Paper', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('n', 'p', 'T', '[]', 'open', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('empty', 'p', 'E', '[]', 'open', 'now');
+      INSERT INTO messages (id, node_id, role, content, created_at) VALUES ('m1', 'n', 'user', 'q', 'now');
+      INSERT INTO messages (id, node_id, role, content, created_at) VALUES ('m2', 'n', 'assistant', 'a', 'now');`);
+    old.close();
+
+    const db = openDatabase(file);
+    const read = (id: string) => (db.prepare('SELECT read_upto FROM nodes WHERE id = ?').get(id) as { read_upto: string | null }).read_upto;
+    expect(read('n')).toBe('m2');
+    expect(read('empty')).toBeNull();
+    expect((db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n).toBe(2);
+  });
+
   it('makes no migration backup for a new or an up-to-date database', () => {
     const file = path.join(dir, 'harness.db');
     openDatabase(file).close(); // new

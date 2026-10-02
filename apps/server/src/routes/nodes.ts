@@ -4,6 +4,7 @@ import {
   type NodeDetail,
   branchResultSchema,
   forkSchema,
+  markReadSchema,
   renameNodeSchema,
   sendMessageSchema,
   titleFromPrompt,
@@ -95,6 +96,15 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
       return c.json(repo.getNode(node.id)!);
     })
 
+    // The user has read up to this message. Only moves forward, so a late or repeated call is harmless.
+    .put('/:nodeId/read', zValidator('json', markReadSchema), (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      const { messageId } = c.req.valid('json');
+      if (!repo.listMessages(node.id).some((m) => m.id === messageId)) throw notFound('Message');
+      repo.markRead(node.id, messageId);
+      return c.json({ ok: true });
+    })
+
     // Ask a small model for a short title (not saved; the rename dialog offers it).
     .post('/:nodeId/title/suggest', async (c) => {
       const node = requireNode(c.req.param('nodeId'));
@@ -150,15 +160,15 @@ export function nodeRoutes({ repo, llm, runs, workspaces }: RouteDeps) {
       if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
 
       const project = repo.getProject(parent.projectId)!;
-      const branches = c.req.valid('json').branches.map(({ prompt, attachments }) => {
+      const branches = c.req.valid('json').branches.map(({ prompt, title, attachments }) => {
         const checked = workspaces.validate(project, attachments);
         if ('error' in checked) throw new HttpError(400, checked.error);
-        return { prompt, attachments: checked };
+        return { prompt, title: title ?? titleFromPrompt(prompt), attachments: checked };
       });
       const children = repo.transaction(() => {
         if (parent.status === 'open') repo.setStatus(parent.id, 'frozen');
-        return branches.map(({ prompt }) =>
-          repo.createNode({ projectId: parent.projectId, title: titleFromPrompt(prompt), parentIds: [parent.id] }),
+        return branches.map(({ title }) =>
+          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id] }),
         );
       });
       llm.release?.(parent.id); // the parent receives no more messages

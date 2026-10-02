@@ -51,11 +51,20 @@ export const renameNodeSchema = z.object({
   title: z.string().trim().min(1).max(200),
 });
 
-/** Each branch's prompt is its first message (sent with its attachments) and, shortened, its title. */
+/** The last message of a node the user has seen. */
+export const markReadSchema = z.object({
+  messageId: z.string().min(1),
+});
+
+/**
+ * Each branch's prompt is its first message (sent with its attachments). Its title is `title` when
+ * given (a branch made from a list item is named after the item), else the prompt, shortened.
+ */
 export const forkSchema = z.object({
   branches: z
     .array(z.object({
       prompt: z.string().trim().min(1),
+      title: z.string().trim().min(1).max(200).optional(),
       attachments: z.array(attachmentSchema).max(20).default([]),
     }))
     .min(1)

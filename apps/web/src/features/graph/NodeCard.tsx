@@ -42,6 +42,11 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
       <div className="flex items-center gap-1.5">
         <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole, limitReached)} elapsed={elapsed} />
         {n.parentIds.length > 1 && <MergeChip />}
+        {n.unread > 0 && (
+          <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] leading-none font-semibold text-primary-foreground">
+            {n.unread} new
+          </span>
+        )}
         <span className="ml-auto font-mono text-[11px] text-muted-foreground">{n.messageCount} msg</span>
       </div>
       <div className="flex min-w-0 items-center gap-1">

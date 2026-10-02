@@ -4,7 +4,9 @@ import { AttachmentChip } from './AttachmentChip'
 import { Markdown } from './Markdown'
 import { ToolCalls } from './ToolCalls'
 
-export function MessageView({ role, text, toolCalls = [], attachments = [], streaming }: {
+export function MessageView({ id, role, text, toolCalls = [], attachments = [], streaming }: {
+  /** Saved messages carry their id so the chat can scroll to them and track what was read. */
+  id?: string
   role: Role
   text: string
   toolCalls?: ToolCall[]
@@ -12,7 +14,7 @@ export function MessageView({ role, text, toolCalls = [], attachments = [], stre
   streaming?: boolean
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1.5">
+    <div className="flex min-w-0 scroll-mt-4 flex-col gap-1.5" data-message-id={id}>
       <div className="text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
         {role === 'user' ? 'You' : 'Assistant'}
       </div>
@@ -32,9 +34,11 @@ export function MessageView({ role, text, toolCalls = [], attachments = [], stre
           <ToolCalls calls={toolCalls} />
           {text && (
             <div className={cn(streaming && 'after:animate-pulse after:text-primary after:content-["▍"]')}>
-              <Markdown text={text} />
+              <Markdown text={text} messageId={id} />
             </div>
           )}
+          {/* Once this end marker has been on screen, the reply counts as read. */}
+          {id && <div data-read-marker={id} aria-hidden="true" />}
         </>
       )}
     </div>

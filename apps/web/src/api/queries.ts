@@ -69,6 +69,9 @@ export function useNodeDetail(nodeId: string) {
   return useQuery({
     queryKey: keys.node(nodeId),
     queryFn: ({ signal }) => api.get<NodeDetail>(`/nodes/${nodeId}`, signal),
+    // Opening a chat always loads it fresh, even if it was fetched moments ago (the default
+    // staleTime would skip that): the opening scroll position depends on what has been read.
+    refetchOnMount: 'always',
     refetchInterval: (query) => (query.state.data?.titlePending ? 1500 : false),
   })
 }
@@ -98,6 +101,19 @@ export function useRetry() {
   return useMutation({
     mutationFn: (nodeId: string) => api.post(`/nodes/${nodeId}/retry`),
     onSettled: refresh,
+  })
+}
+
+/**
+ * Tell the server which reply the user has read up to. Only the graph is refetched (for the "N new"
+ * badges); refetching the open chat would just re-send what it already shows.
+ */
+export function useMarkRead() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ nodeId, messageId }: { nodeId: string; messageId: string }) =>
+      api.put(`/nodes/${nodeId}/read`, { messageId }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['graph'] }),
   })
 }
 

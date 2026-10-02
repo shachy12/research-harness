@@ -523,4 +523,54 @@ describe('API', () => {
     expect(auto.data).toMatchObject({ title: 'Synthesis: A + B', titleSource: 'prompt' });
     await settle(auto.data.id);
   });
+  describe('read position', () => {
+    const unreadOf = async (id: string) =>
+      (await call<GraphResponse>('GET', '/projects/default/graph')).data.nodes.find((n) => n.id === id)!.unread;
+
+    it('counts unread replies per node and moves forward only', async () => {
+      await chat(rootId, 'First');
+      await chat(rootId, 'Second');
+      const [first, firstReply, second, secondReply] = (await detail(rootId)).messages;
+      expect((await detail(rootId)).node.readUpto).toBeNull();
+      expect(await unreadOf(rootId)).toBe(2);
+
+      expect((await call('PUT', `/nodes/${rootId}/read`, { messageId: firstReply.id })).status).toBe(200);
+      expect(await unreadOf(rootId)).toBe(1);
+
+      await call('PUT', `/nodes/${rootId}/read`, { messageId: secondReply.id });
+      expect(await unreadOf(rootId)).toBe(0);
+
+      // An older message never moves it back.
+      await call('PUT', `/nodes/${rootId}/read`, { messageId: first.id });
+      await call('PUT', `/nodes/${rootId}/read`, { messageId: second.id });
+      expect((await detail(rootId)).node.readUpto).toBe(secondReply.id);
+    });
+
+    it('rejects messages that are not in the node', async () => {
+      await chat(rootId, 'Hi');
+      const [other] = await fork(rootId, ['Other']);
+      const otherMessage = (await detail(other.id)).messages[0];
+      expect((await call('PUT', `/nodes/${rootId}/read`, { messageId: otherMessage.id })).status).toBe(404);
+      expect((await call('PUT', `/nodes/${rootId}/read`, { messageId: 'nope' })).status).toBe(404);
+      expect((await detail(rootId)).node.readUpto).toBeNull();
+    });
+
+    it('flags the reply of a new branch as unread', async () => {
+      await chat(rootId, 'Scope it');
+      const [branch] = await fork(rootId, ['Look into A']);
+      expect(await unreadOf(branch.id)).toBe(1);
+    });
+  });
+  it('names a branch after its given title, else after its prompt', async () => {
+    await chat(rootId, 'Scope it');
+    const { data } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
+      branches: [
+        { prompt: 'Explain this direction.\n\nUse a hybrid argument', title: 'Use a hybrid argument' },
+        { prompt: 'Plain prompt becomes the title' },
+      ],
+    });
+    expect(data.map((n) => n.title)).toEqual(['Use a hybrid argument', 'Plain prompt becomes the title']);
+    expect(data.map((n) => n.promptTitle)).toEqual(['Use a hybrid argument', 'Plain prompt becomes the title']);
+    for (const child of data) await settle(child.id);
+  });
 });

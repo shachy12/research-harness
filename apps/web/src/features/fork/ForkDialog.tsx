@@ -10,45 +10,66 @@ import { Textarea } from '@/components/ui/textarea'
 import { AttachMenu } from '@/features/chat/AttachMenu'
 import { PendingAttachments } from '@/features/chat/AttachmentChip'
 import { useAttachments } from '@/features/chat/useAttachments'
+import { composeBranchPrompt } from '@/lib/listItems'
 import { useDropZone } from '@/lib/useDropZone'
 import { cn } from '@/lib/utils'
+
+/** A list item picked in the chat: the branch it becomes starts from its text and is named after it. */
+export interface ForkItem {
+  text: string
+  title: string
+}
 
 interface Branch {
   /** Stable id, so removing a branch keeps the others' state. */
   id: number
-  prompt: string
+  /** The list item this branch was made from; null for a branch written by hand. */
+  item: ForkItem | null
+  /** What the user typed over the message; null: it still follows the shared instruction. */
+  edited: string | null
   /** Finished uploads, reported by the branch's field. */
   attachments: Attachment[]
   uploading: boolean
 }
 
 let nextId = 0
-const newBranch = (): Branch => ({ id: nextId++, prompt: '', attachments: [], uploading: false })
+const newBranch = (item: ForkItem | null = null): Branch => ({ id: nextId++, item, edited: null, attachments: [], uploading: false })
 
 /**
  * Write each branch's first message, optionally with files. Creating the branches sends those
  * messages right away, so all branches start working in parallel; each is titled after its message.
+ *
+ * With `items` (list items picked in the chat) there is one branch per item. One instruction says
+ * what every branch does with its item; each branch's message is that instruction plus its item
+ * (the item goes where `{item}` is, if the instruction has it), and can be edited per branch. The
+ * branch is named after its item, not after the shared instruction.
  */
-export function ForkDialog({ node, inheritedTokens, existingBranches, onClose }: {
+export function ForkDialog({ node, inheritedTokens, existingBranches, items, onClose }: {
   node: DagNode
   inheritedTokens: number
   /** Branches the node already has; forking again adds to them. */
   existingBranches: number
+  items?: ForkItem[]
   onClose: () => void
 }) {
-  const [branches, setBranches] = useState<Branch[]>(() => [newBranch()])
+  const [instruction, setInstruction] = useState('')
+  const [branches, setBranches] = useState<Branch[]>(() => (items?.length ? items.map(newBranch) : [newBranch()]))
   const fork = useFork()
   const navigate = useNavigate()
 
+  const promptOf = (b: Branch) => b.edited ?? (b.item ? composeBranchPrompt(instruction, b.item.text) : '')
   const update = (id: number, change: Partial<Branch>) =>
     setBranches((list) => list.map((b) => (b.id === id ? { ...b, ...change } : b)))
-  const filled = branches.filter((b) => b.prompt.trim())
+  const filled = branches.filter((b) => promptOf(b).trim())
   const uploading = branches.some((b) => b.uploading)
   const canCreate = filled.length > 0 && !uploading && !fork.isPending
   const create = () => {
     if (!canCreate) return
     fork.mutate(
-      { nodeId: node.id, branches: filled.map((b) => ({ prompt: b.prompt.trim(), attachments: b.attachments })) },
+      {
+        nodeId: node.id,
+        branches: filled.map((b) => ({ prompt: promptOf(b).trim(), title: b.item?.title, attachments: b.attachments })),
+      },
       { onSuccess: () => navigate(`/projects/${node.projectId}`) },
     )
   }
@@ -59,9 +80,10 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, onClose }:
         <DialogHeader>
           <DialogTitle>Fork "{node.title}"</DialogTitle>
           <DialogDescription>
-            Write the first message for each new branch, and attach files a branch should read. Each branch starts
-            with this node's full context (~{inheritedTokens.toLocaleString()} tokens) and begins working as soon as
-            you create it.
+            {items?.length
+              ? `${items.length} selected ${items.length === 1 ? 'item becomes a branch' : 'items become branches'}: each one's first message is your instruction followed by the item.`
+              : "Write the first message for each new branch, and attach files a branch should read."}
+            {` Each branch starts with this node's full context (~${inheritedTokens.toLocaleString()} tokens) and begins working as soon as you create it.`}
             {existingBranches > 0
               ? ` This node already has ${existingBranches} ${existingBranches === 1 ? 'branch; new ones are added next to it.' : 'branches; new ones are added next to them.'}`
               : node.status === 'open' && ' After forking, this node is frozen; you can fork it again later to add more branches.'}
@@ -75,12 +97,34 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, onClose }:
             create()
           }}
         >
+          {items?.length ? (
+            <div className="grid gap-1.5">
+              <Label htmlFor="fork-instruction">What should each branch do with its item?</Label>
+              <Textarea
+                id="fork-instruction"
+                autoFocus
+                rows={2}
+                className="max-h-40 overflow-y-auto"
+                placeholder="e.g. Explain this and check whether it works for our construction. Put {item} in the text to place the item there; leave this empty to send each item as it is."
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault()
+                    create()
+                  }
+                }}
+              />
+            </div>
+          ) : null}
           {branches.map((branch, i) => (
             <BranchField
               key={branch.id}
               index={i}
               projectId={node.projectId}
               branch={branch}
+              prompt={promptOf(branch)}
+              autoFocus={i === 0 && !items?.length}
               onChange={(change) => update(branch.id, change)}
               onRemove={branches.length > 1 ? () => setBranches((list) => list.filter((b) => b.id !== branch.id)) : undefined}
               onSubmit={create}
@@ -111,10 +155,13 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, onClose }:
 }
 
 /** One branch: its first message and its files (uploaded right away, like in the chat). */
-function BranchField({ index, projectId, branch, onChange, onRemove, onSubmit }: {
+function BranchField({ index, projectId, branch, prompt, autoFocus, onChange, onRemove, onSubmit }: {
   index: number
   projectId: string
   branch: Branch
+  /** The message as it will be sent (typed, or composed from the instruction and the item). */
+  prompt: string
+  autoFocus: boolean
   onChange: (change: Partial<Branch>) => void
   onRemove?: () => void
   onSubmit: () => void
@@ -139,6 +186,15 @@ function BranchField({ index, projectId, branch, onChange, onRemove, onSubmit }:
     >
       <div className="flex items-center gap-2">
         <Label htmlFor={id}>Branch {index + 1}</Label>
+        {branch.item && branch.edited !== null && (
+          <button
+            type="button"
+            onClick={() => onChange({ edited: null })}
+            className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          >
+            Reset to the instruction and item
+          </button>
+        )}
         {onRemove && (
           <button
             type="button"
@@ -154,11 +210,12 @@ function BranchField({ index, projectId, branch, onChange, onRemove, onSubmit }:
         <AttachMenu onFiles={files.addFiles} onFolders={files.addFolders} />
         <Textarea
           id={id}
-          autoFocus={index === 0}
+          autoFocus={autoFocus}
           rows={2}
+          className="max-h-48 overflow-y-auto"
           placeholder="What should this branch research? e.g. Compare the storage costs of the three options"
-          value={branch.prompt}
-          onChange={(e) => onChange({ prompt: e.target.value })}
+          value={prompt}
+          onChange={(e) => onChange({ edited: e.target.value })}
           onKeyDown={(e) => {
             // Ctrl+Enter creates the branches from any field.
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -169,8 +226,10 @@ function BranchField({ index, projectId, branch, onChange, onRemove, onSubmit }:
         />
       </div>
       <PendingAttachments files={files.files} onRemove={files.remove} />
-      {branch.prompt.trim() && (
-        <span className="truncate text-xs text-muted-foreground">Title: {titleFromPrompt(branch.prompt)}</span>
+      {prompt.trim() && (
+        <span className="truncate text-xs text-muted-foreground">
+          Title: {branch.item?.title ?? titleFromPrompt(prompt)}
+        </span>
       )}
       {drop.dragging && (
         <span className="pointer-events-none absolute inset-0 grid place-items-center rounded-lg bg-background/85 text-sm font-medium text-primary">

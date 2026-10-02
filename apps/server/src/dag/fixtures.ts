@@ -22,6 +22,7 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       status: spec.status ?? (spec.result ? 'finished' : 'open'),
       result: spec.result ?? null,
       sessionId: spec.sessionId ?? null,
+      readUpto: null,
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     (spec.messages ?? []).forEach((m, i) => {

@@ -55,6 +55,13 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE nodes ADD COLUMN prompt_title TEXT;
   UPDATE nodes SET prompt_title = title;
   `,
+  // 6: the last message the user has read in each node. Nodes that exist now count as fully read
+  // (so nothing is flagged new on upgrade); new nodes start with NULL (never opened).
+  `
+  ALTER TABLE nodes ADD COLUMN read_upto TEXT;
+  UPDATE nodes SET read_upto =
+    (SELECT m.id FROM messages m WHERE m.node_id = nodes.id ORDER BY m.seq DESC LIMIT 1);
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

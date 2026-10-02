@@ -1,6 +1,6 @@
 import { type Attachment, type DagNode, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
 import { PencilIcon } from 'lucide-react'
-import { Fragment, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useEffectEvent, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useGraph, useNodeDetail, useRetry } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
@@ -13,6 +13,7 @@ import { RenameDialog } from '@/features/rename/RenameDialog'
 import { ResultBlock } from '@/features/result/ResultBlock'
 import { ResultDialog } from '@/features/result/ResultDialog'
 import { describeReset, limitName } from '@/lib/limit'
+import { itemTitle, resolveSelection } from '@/lib/listItems'
 import { contextTokens } from '@/lib/tokens'
 import { useDropZone } from '@/lib/useDropZone'
 import { useNow } from '@/lib/useNow'
@@ -20,6 +21,9 @@ import { AttachMenu } from './AttachMenu'
 import { PendingAttachments } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
 import { useAttachments } from './useAttachments'
+import { ListSelectionContext, useListSelection, useListSelectionState } from './listSelection'
+import { SelectionBar } from './SelectionBar'
+import { useChatScroll } from './useChatScroll'
 import { MessageView } from './MessageView'
 import { type StreamError, useChatStream } from './useChatStream'
 
@@ -29,7 +33,8 @@ export function ChatPage() {
   return <ChatView key={nodeId} projectId={projectId!} nodeId={nodeId!} />
 }
 
-type DialogKind = 'fork' | 'result' | 'rename' | null
+/** 'fork-selection' is the fork dialog started from the list items ticked in the replies. */
+type DialogKind = 'fork' | 'fork-selection' | 'result' | 'rename' | null
 
 function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) {
   const detail = useNodeDetail(nodeId)
@@ -37,15 +42,20 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   const navigate = useNavigate()
   const graphUrl = `/projects/${projectId}`
   const [dialog, setDialog] = useState<DialogKind>(null)
+  const selection = useListSelectionState()
+  const hasSelection = selection.items.length > 0
 
-  // Esc returns to the graph (dialogs handle their own Esc first).
+  // Esc clears ticked list items first, then returns to the graph (dialogs handle their own Esc first).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !dialog && !e.defaultPrevented) navigate(graphUrl)
+      if (e.key !== 'Escape' || dialog || e.defaultPrevented) return
+      if (hasSelection) selection.clear()
+      else navigate(graphUrl)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navigate, graphUrl, dialog])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `selection` is rebuilt every render; only its clearing matters
+  }, [navigate, graphUrl, dialog, hasSelection])
 
   if (detail.isError) {
     return (
@@ -57,7 +67,12 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
       </div>
     )
   }
-  if (!detail.data) return <p className="p-6 text-sm text-muted-foreground">Loading…</p>
+  // Wait for the fresh copy that opening the chat fetches: the opening scroll position depends on
+  // what has been read, and a copy cached from an earlier visit may be out of date. Only while that
+  // fetch is actually running, though: if none is (it was skipped or dropped), use what we have
+  // rather than wait forever.
+  const waitingForFresh = !detail.isFetchedAfterMount && detail.isFetching
+  if (!detail.data || waitingForFresh) return <p className="p-6 text-sm text-muted-foreground">Loading…</p>
 
   const { node } = detail.data
   return (
@@ -69,13 +84,23 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
         <Breadcrumb node={node} nodes={graph.data?.nodes ?? []} projectId={projectId} />
       </div>
 
-      <Conversation key={node.id} detail={detail.data} onDialog={setDialog} />
+      <ListSelectionContext value={selection}>
+        <Conversation key={node.id} detail={detail.data} onDialog={setDialog} />
+      </ListSelectionContext>
 
-      {dialog === 'fork' && (
+      {(dialog === 'fork' || dialog === 'fork-selection') && (
         <ForkDialog
           node={node}
           inheritedTokens={contextTokens(detail.data.inherited) + detail.data.messages.reduce((s, m) => s + Math.ceil(m.content.length / 4), 0)}
           existingBranches={detail.data.childIds.length}
+          items={
+            dialog === 'fork-selection'
+              ? resolveSelection(selection.items, detail.data.messages.map((m) => m.id)).map((i) => ({
+                  text: i.text,
+                  title: i.title ?? itemTitle(i.text),
+                }))
+              : undefined
+          }
           onClose={() => setDialog(null)}
         />
       )}
@@ -87,18 +112,26 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
 
 function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: DialogKind) => void }) {
   const { node, messages, inherited, childIds } = detail
+  const selection = useListSelection()
+  const picked = selection ? resolveSelection(selection.items, messages.map((m) => m.id)) : []
   const stream = useChatStream(node.id)
   const files = useAttachments(node.projectId)
   const retry = useRetry()
   const [draft, setDraft] = useState('')
-  const endRef = useRef<HTMLDivElement>(null)
   const canWrite = node.status === 'open'
   // Drop files and folders anywhere on the chat to attach them to the next message.
   const drop = useDropZone(files.addPicked, canWrite)
 
   // The streamed copies are shown until the refetched saved messages replace them, so nothing appears twice.
   const [sentFiles, setSentFiles] = useState<Attachment[]>([])
+  const { scrollRef, endRef, onScroll, followNext } = useChatScroll({
+    nodeId: node.id,
+    messages,
+    readUpto: node.readUpto,
+    contentKey: [messages.length, stream.replyText, stream.userText, stream.toolCalls.length],
+  })
   const send = (text: string, attachments: Attachment[] = []) => {
+    followNext() // your own message always jumps to the bottom
     setSentFiles(attachments)
     void stream.send(text, attachments, messages.length)
   }
@@ -129,11 +162,6 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
     return startWatching()
   }, [detail.running])
 
-  // Keep the newest content in view.
-  useLayoutEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'end' })
-  }, [messages.length, stream.replyText, stream.userText, stream.toolCalls.length])
-
   const submit = () => {
     const text = draft.trim()
     if (!text || stream.active || files.uploading) return
@@ -155,7 +183,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           Drop files or folders to attach them to your next message
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold text-balance">
@@ -192,7 +220,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           )}
 
           {messages.map((m) => (
-            <MessageView key={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
+            <MessageView key={m.id} id={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
           ))}
           {showStreamed && stream.userText && <MessageView role="user" text={stream.userText} attachments={sentFiles} />}
           {showStreamed && (stream.replyText || stream.toolCalls.length > 0) && (
@@ -229,6 +257,13 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
       <div className="border-t">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-4 py-3">
+          <SelectionBar
+            picked={picked}
+            ticked={selection?.items.length ?? 0}
+            disabled={stream.active}
+            onFork={() => onDialog('fork-selection')}
+            onClear={() => selection?.clear()}
+          />
           {canWrite ? (
             <form
               className="flex flex-col gap-2"

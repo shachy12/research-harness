@@ -8,7 +8,7 @@ interface ProjectRow { id: string; name: string; folder: string | null; created_
 interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
-  title_source: TitleSource; prompt_title: string | null;
+  title_source: TitleSource; prompt_title: string | null; read_upto: string | null;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string; created_at: string;
@@ -25,6 +25,7 @@ const toNode = (r: NodeRow): DagNode => ({
   status: r.status,
   result: r.result ? (JSON.parse(r.result) as BranchResult) : null,
   sessionId: r.session_id,
+  readUpto: r.read_upto,
   createdAt: r.created_at,
 });
 const toMessage = (r: MessageRow): Message => ({
@@ -128,6 +129,23 @@ export class Repository {
 
   setSessionId(id: string, sessionId: string): void {
     this.db.prepare('UPDATE nodes SET session_id = ? WHERE id = ?').run(sessionId, id);
+  }
+
+  /**
+   * Record that the user has read up to `messageId`. Only moves forward, and only to a message of
+   * this node. Returns whether it moved.
+   */
+  markRead(nodeId: string, messageId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE nodes SET read_upto = ?
+         WHERE id = ?
+           AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND node_id = ?)
+           AND COALESCE((SELECT seq FROM messages WHERE id = nodes.read_upto), 0)
+               < (SELECT seq FROM messages WHERE id = ?)`,
+      )
+      .run(messageId, nodeId, messageId, nodeId, messageId);
+    return Number(result.changes) > 0;
   }
 
   setResult(id: string, result: BranchResult): void {

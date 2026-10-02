@@ -60,6 +60,11 @@ export interface DagNode {
   result: BranchResult | null;
   /** The Claude Code session holding this node's conversation (claude-code provider only). */
   sessionId: string | null;
+  /**
+   * Id of the last message the user has read; only moves forward. Null: nothing read yet (a node
+   * that was never opened).
+   */
+  readUpto: string | null;
   createdAt: string;
 }
 
@@ -111,6 +116,8 @@ export interface NodeSummary extends DagNode {
   lastMessage: string | null;
   /** Who wrote the last message; 'user' on an idle node means the reply failed or was stopped early. */
   lastRole: Role | null;
+  /** Assistant replies the user has not read yet (shown as "N new"). */
+  unread: number;
   /** The model is writing a reply right now. */
   running: boolean;
   /** When the running reply started and what it is doing; null when not running. */
