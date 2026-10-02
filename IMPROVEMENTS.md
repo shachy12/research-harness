@@ -10,7 +10,7 @@ When closing a branch (Finish branch), the result summary should be written live
 - **Server/UI:** the draft endpoint streams server-sent events (like chat replies); `ResultDialog` shows the text live, with the activity line and timer, then fills the fields.
 - Partial JSON isn't pleasant to read: consider streaming a readable Markdown draft first and extracting the fields at the end, or showing the fields filling in as the JSON arrives.
 
-## 4. Cross-project connections (needs multiple projects first)
+## 4. Cross-project connections (multiple projects now exist, so this can be built)
 The user works on two papers that sometimes connect. A finished node's result in one project should be usable in another, as an extra standalone ("orphan") node there.
 - **Model:** import creates a node in the target project with no parents, already *finished*, holding a copy of the source result, plus a reference to where it came from (source project and node). In the target it behaves like any finished branch: it can be selected and merged with that project's branches.
 - **Copy, not live link:** the result is copied at import time, so later edits in the source don't silently change the target. Offer "update from source" when the source result has changed.
@@ -68,6 +68,7 @@ The code is mostly portable already (Node, `node:sqlite`, paths via `node:path`,
 - **Shell tool (item 11):** Bash on macOS/Linux, PowerShell/Git Bash on Windows; the system prompt should tell the model which OS and shell it has.
 - **Case-sensitive file systems (Linux):** unique upload names and path checks must not assume case-insensitivity (`Paper.pdf` vs `paper.pdf`).
 - **Electron packaging (roadmap step 3):** electron-builder targets `dmg` (+ code signing and notarization for macOS, needs an Apple Developer account), `AppImage`/`deb` for Linux, NSIS for Windows. Check `node:sqlite` in Electron's Node on each.
+- **Folder dialog:** "Browse…" in the new-project dialog uses `osascript` on macOS and zenity/kdialog on Linux (`system/folder-picker.ts`); untested there.
 - **Data folder:** use the OS's app-data location in the packaged app (`app.getPath('userData')`: `~/Library/Application Support/…`, `~/.config/…`, `%APPDATA%\…`) instead of the repo's `data/`; the dev setup keeps `data/`.
 
 ## Done
@@ -75,5 +76,6 @@ Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doi
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
 - **2. Files per branch when forking:** done.
 - **6. Rename and model-written titles:** done (pencil on cards and in the chat header, Suggest button, automatic title after the first reply, `title_source`).
-- **9. Clear "limit reached" message:** done (classified errors, banner with reset time, warning when close, Retry and Retry all). Left: capture a real limit hit to confirm the event shapes (and the monthly `-p` credit wording); retry automatically when the limit resets.
+- **9. Clear "limit reached" message:** done (classified errors, banner with reset time and share used, e.g. "25% of your weekly limit used", Retry and Retry all). Left: capture a real limit hit to confirm the event shapes (and the monthly `-p` credit wording); retry automatically when the limit resets.
 - **10. One attach button:** done (paperclip with a Files/Folder menu).
+- **Multiple projects** (asked for directly, not a backlog item): done (sidebar, new project with an optional working folder picked in the OS folder dialog, rename, reopens the last project). Left: deleting a project (on purpose not built; it should back up first, like "Start over"); try the folder dialog on macOS and Linux (see item 12).
