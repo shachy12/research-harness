@@ -1,3 +1,5 @@
+import { appendFileSync } from 'node:fs';
+import path from 'node:path';
 import type { BranchResult } from '@harness/shared';
 import { ProviderError } from './errors.ts';
 import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './provider.ts';
@@ -9,11 +11,13 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Replies explain how to connect a real model; a message mentioning "search" shows a sample
  * search, so the tool display can be tried out. Results are drafted from the last reply.
  * "[test:limit]" in a message acts as if the usage limit was reached, "[test:warning]" as if it is close.
+ * "[test:edit]" adds a line to `placeholder-notes.md` in the node's editable copy, so the changes view and Apply can be tried out.
  * It offers Claude's model ids so the pickers can be tried out, and says which one it was asked for.
  */
 export class PlaceholderProvider implements LLMProvider {
   readonly label = 'placeholder (no API key)';
   readonly kind = 'placeholder';
+  readonly canEdit = true;
   private readonly wordDelayMs: number;
 
   /** `wordDelayMs` slows the reply down, e.g. to test what the UI shows during a long reply. */
@@ -36,7 +40,7 @@ export class PlaceholderProvider implements LLMProvider {
     };
   }
 
-  async *streamReply({ request, model, effort }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  async *streamReply({ request, model, effort, edit }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     yield { type: 'model', model: model ?? 'claude-opus-5-5' };
     const question = request.turns.at(-1)?.content ?? '';
     if (question.includes('[test:limit]')) {
@@ -48,6 +52,14 @@ export class PlaceholderProvider implements LLMProvider {
     if (question.includes('[test:warning]')) {
       const resetsAt = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
       yield { type: 'limit', limit: { status: 'warning', resetsAt, limitType: 'seven_day', utilization: 0.25 } };
+    }
+    if (question.includes('[test:edit]') && edit) {
+      const file = path.join(edit.dir, 'placeholder-notes.md');
+      const call = { id: `edit-${Date.now()}`, name: 'edit_file', input: file, status: 'running' as const, results: [] };
+      yield { type: 'tool', call };
+      await pause(20 * this.wordDelayMs);
+      appendFileSync(file, `- ${new Date().toISOString()}: ${question.split('\n')[0].slice(0, 80)}\n`);
+      yield { type: 'tool', call: { ...call, status: 'done' } };
     }
     if (/search/i.test(question)) {
       const call = { id: `sample-${Date.now()}`, name: 'web_search', input: question.slice(0, 80), status: 'running' as const, results: [] };

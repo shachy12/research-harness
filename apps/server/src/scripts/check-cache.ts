@@ -35,7 +35,7 @@ const NEW: SessionPlan = { mode: 'new', sessionId: null, preamble: null, transcr
 const forkOf = (sessionId: string, title: string): SessionPlan => ({ mode: 'fork', sessionId, preamble: branchStartNote(title), transcript: [] });
 
 async function reply(nodeId: string, message: string, session: SessionPlan) {
-  const ctx: ReplyContext = { nodeId, workDir, message, session, request: { system: '', turns: [] }, model, effort: null };
+  const ctx: ReplyContext = { nodeId, workDir, message, session, request: { system: '', turns: [] }, model, effort: null, edit: null };
   let usage: TokenUsage | null = null;
   let sessionId = '';
   for await (const e of provider.streamReply(ctx, new AbortController().signal)) {

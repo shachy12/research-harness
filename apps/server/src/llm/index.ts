@@ -10,8 +10,8 @@ export type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './prov
  * What nodes without their own setting use, unless HARNESS_MODEL / HARNESS_EFFORT say otherwise.
  * Both providers always send them, so the model never depends on the account's current default.
  */
-const DEFAULT_MODEL = 'claude-opus-5-5';
-const DEFAULT_EFFORT: Effort = 'high';
+const DEFAULT_MODEL = 'claude-sonnet-5-5';
+const DEFAULT_EFFORT: Effort = 'low';
 
 /** HARNESS_EFFORT, checked; undefined when unset. */
 function effortFromEnv(env: NodeJS.ProcessEnv): Effort | undefined {

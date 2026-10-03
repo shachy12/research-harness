@@ -4,19 +4,20 @@ import type { Attachment, BranchResult, DagNode, Effort, Message, NodeStatus, Pr
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
-interface ProjectRow { id: string; name: string; folder: string | null; created_at: string }
+interface ProjectRow { id: string; name: string; folder: string | null; archived: number; created_at: string }
 interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
   title_source: TitleSource; prompt_title: string | null; read_upto: string | null;
-  model: string | null; effort: Effort | null;
+  model: string | null; effort: Effort | null; git_branch: string | null; files_changed: number | null;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
   model: string | null; created_at: string;
 }
 
-const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, folder: r.folder, createdAt: r.created_at });
+// projects.editing (migration 8) was a per-project switch for file editing, dropped the same day: editing is always on.
+const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, folder: r.folder, archived: r.archived === 1, createdAt: r.created_at });
 const toNode = (r: NodeRow): DagNode => ({
   id: r.id,
   projectId: r.project_id,
@@ -30,6 +31,8 @@ const toNode = (r: NodeRow): DagNode => ({
   readUpto: r.read_upto,
   model: r.model,
   effort: r.effort,
+  gitBranch: r.git_branch,
+  filesChanged: r.files_changed,
   createdAt: r.created_at,
 });
 const toMessage = (r: MessageRow): Message => ({
@@ -92,6 +95,15 @@ export class Repository {
     this.db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id);
   }
 
+  setProjectArchived(id: string, archived: boolean): void {
+    this.db.prepare('UPDATE projects SET archived = ? WHERE id = ?').run(archived ? 1 : 0, id);
+  }
+
+  /** Delete a project with all its nodes and messages (they cascade). Its folder on disk is left alone. */
+  deleteProject(id: string): void {
+    this.db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+  }
+
   /** Delete every node and message in the project and start again from an empty root. */
   resetProject(projectId: string, rootTitle: string): DagNode {
     return this.transaction(() => {
@@ -147,6 +159,11 @@ export class Repository {
 
   setSessionId(id: string, sessionId: string): void {
     this.db.prepare('UPDATE nodes SET session_id = ? WHERE id = ?').run(sessionId, id);
+  }
+
+  /** The node's git branch (set once its worktree exists) and how many files it changes. */
+  setGitInfo(id: string, branch: string, filesChanged: number | null): void {
+    this.db.prepare('UPDATE nodes SET git_branch = ?, files_changed = ? WHERE id = ?').run(branch, filesChanged, id);
   }
 
   /**

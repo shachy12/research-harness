@@ -39,6 +39,10 @@ export interface ClaudeCodeOptions {
 // approve it in -p mode). So the model can read the project's files and uploads, and nothing else.
 const TOOLS = 'WebSearch,WebFetch,Read,Glob,Grep';
 const PRE_APPROVED = 'WebSearch,WebFetch';
+// With an editable copy (always, see worktrees.ts), Edit and Write are added and allowed only inside it
+// (`Edit(<path>/**)`, relative to the working folder; the rule covers Write too, verified with CLI
+// 2.1.287). Edits anywhere else are refused like reads outside the folder.
+const EDIT_TOOLS = 'Edit,Write';
 
 // The CLI's schema validator rejects the `$schema` dialect line zod adds, so leave it out.
 const { $schema: _dialect, ...RESULT_JSON_SCHEMA } = z.toJSONSchema(branchResultSchema);
@@ -57,6 +61,8 @@ const TOOL_NAMES: Record<string, string> = {
   Read: 'read_file',
   Glob: 'find_files',
   Grep: 'search_files',
+  Edit: 'edit_file',
+  Write: 'write_file',
 };
 
 /**
@@ -93,6 +99,7 @@ export class ClaudeCodeProvider implements LLMProvider {
   readonly label: string;
   private readonly options: ClaudeCodeOptions;
   readonly kind = 'claude-code';
+  readonly canEdit = true;
   private readonly live = new Map<string, LiveProcess>();
 
   constructor(options: ClaudeCodeOptions) {
@@ -112,9 +119,9 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 
   async *streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
-    const flags = this.modelArgs(ctx);
+    const flags = [...this.modelArgs(ctx), ...toolArgs(ctx.workDir, ctx.edit)];
     let proc = this.live.get(ctx.nodeId);
-    // The model and effort are fixed when the process starts: after a change, restart it (the
+    // The model, effort and tools are fixed when the process starts: after a change, restart it (the
     // session resumes; the new model re-reads the history without the cache either way).
     if (proc && proc.flags !== flags.join(' ')) {
       this.release(ctx.nodeId);
@@ -213,8 +220,6 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--verbose',
       '--include-partial-messages',
       ...sessionArgs(plan),
-      '--tools', TOOLS,
-      '--allowedTools', PRE_APPROVED,
       ...this.commonArgs(),
       ...flags,
     ];
@@ -224,6 +229,14 @@ export class ClaudeCodeProvider implements LLMProvider {
     this.live.set(nodeId, proc);
     return proc;
   }
+}
+
+/** --tools / --allowedTools: read-only, or with Edit/Write allowed only inside the node's copy. */
+export function toolArgs(workDir: string, edit: ReplyContext['edit']): string[] {
+  if (!edit) return ['--tools', TOOLS, '--allowedTools', PRE_APPROVED];
+  const rel = path.relative(workDir, edit.dir).split(path.sep).join('/');
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`The editable copy must be inside the project folder: ${edit.dir}`);
+  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},Edit(${rel}/**)`];
 }
 
 function sessionArgs(plan: SessionPlan): string[] {

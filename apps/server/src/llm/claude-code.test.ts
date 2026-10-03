@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionPlan } from '../dag/session.ts';
-import { ClaudeCodeProvider, cliEnv, parseSearchLinks } from './claude-code.ts';
+import { ClaudeCodeProvider, cliEnv, parseSearchLinks, toolArgs } from './claude-code.ts';
 import type { ReplyContext, ReplyEvent } from './provider.ts';
 
 const FAKE_CLI = path.join(import.meta.dirname, 'fake-claude.mjs');
@@ -35,6 +35,7 @@ const ctx = (message: string, session: SessionPlan, nodeId = 'n1'): ReplyContext
   request: { system: '', turns: [] },
   model: null,
   effort: null,
+  edit: null,
 });
 
 const NEW: SessionPlan = { mode: 'new', sessionId: null, preamble: null, transcript: [] };
@@ -62,6 +63,18 @@ describe('ClaudeCodeProvider', () => {
     expect(path.resolve(start.cwd!)).toBe(path.resolve(dir));
     expect(start.argv).toEqual(expect.arrayContaining(['--tools', 'WebSearch,WebFetch,Read,Glob,Grep']));
     expect(start.argv).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch']));
+  });
+
+  it("with file editing, adds Edit/Write and allows them only inside the node's copy", async () => {
+    const signal = new AbortController().signal;
+    const edit = { dir: path.join(dir, '.harness', 'work', 'abcd1234') };
+    await collect(provider.streamReply({ ...ctx('first', NEW), edit }, signal));
+    await collect(provider.streamReply({ ...ctx('second', NEW), edit }, signal)); // same process
+    const starts = log().filter((e) => e.argv).map((e) => e.argv!);
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toEqual(expect.arrayContaining(['--tools', 'WebSearch,WebFetch,Read,Glob,Grep,Edit,Write']));
+    expect(starts[0]).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch,Edit(.harness/work/abcd1234/**)']));
+    expect(() => toolArgs(dir, { dir: path.dirname(dir) })).toThrow(/inside the project folder/);
   });
 
   it('reports file reads as tool calls', async () => {

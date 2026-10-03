@@ -44,8 +44,17 @@ export const createProjectSchema = z.object({
   folder: z.string().trim().min(1).optional(),
 });
 
-export const renameProjectSchema = z.object({
-  name: z.string().trim().min(1).max(120),
+/** Rename and/or archive a project (PATCH /projects/:id). */
+export const updateProjectSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    archived: z.boolean().optional(),
+  })
+  .refine((v) => v.name !== undefined || v.archived !== undefined, 'Nothing to change');
+
+/** A folder to check before creating a project on it (see `FolderGit`). */
+export const checkFolderSchema = z.object({
+  folder: z.string().trim().min(1),
 });
 
 export const renameNodeSchema = z.object({
@@ -99,6 +108,10 @@ export const mergeSchema = z.object({
   prompt: z.string().trim().min(1, 'Write the first message'),
   model: modelField.optional(),
   effort: effortField.optional(),
+});
+
+export const mergePreviewSchema = z.object({
+  parentIds: z.array(z.string().min(1)).min(2),
 });
 
 /** A short node title from a prompt: its first line, cut at a word boundary. */

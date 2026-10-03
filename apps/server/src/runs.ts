@@ -8,7 +8,7 @@ import {
   type UsageLimit,
   toolActivity,
 } from '@harness/shared';
-import { buildChatRequest, withAttachments } from './dag/prompt.ts';
+import { buildChatRequest, editNote, withAttachments } from './dag/prompt.ts';
 import { type SessionPlan, planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
 import { type ProviderError, classifyError } from './llm/errors.ts';
@@ -16,6 +16,7 @@ import type { LLMProvider, ReplyContext } from './llm/index.ts';
 import { cleanTitle } from './llm/title.ts';
 import { conflict, notFound } from './routes/errors.ts';
 import type { Workspaces } from './workspace.ts';
+import type { Worktrees } from './worktrees.ts';
 
 type Listener = (event: ChatStreamEvent) => void;
 
@@ -45,15 +46,17 @@ export class RunManager {
   private readonly repo: Repository;
   private readonly llm: LLMProvider;
   private readonly workspaces: Workspaces;
+  private readonly worktrees: Worktrees;
   /** The account's usage limit as last reported (it applies to every node). */
   private limit: UsageLimit | null = null;
   /** Nodes whose model-written title is being generated. */
   private readonly titling = new Set<string>();
 
-  constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces) {
+  constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces, worktrees: Worktrees) {
     this.repo = repo;
     this.llm = llm;
     this.workspaces = workspaces;
+    this.worktrees = worktrees;
   }
 
   isRunning(nodeId: string): boolean {
@@ -155,14 +158,51 @@ export class RunManager {
       abort: new AbortController(),
     };
     this.runs.set(node.id, run);
-    void this.execute(run, { nodeId: node.id, workDir, request, message, session, model: node.model, effort: node.effort });
+    void this.execute(run, { nodeId: node.id, workDir, request, message, session, model: node.model, effort: node.effort, edit: null });
   }
 
-  private async execute(run: Run, ctx: ReplyContext): Promise<void> {
+  /**
+   * Give the run the node's own editable copy of the project (creating it if needed; a provider
+   * that can't edit runs read-only). The first message that runs
+   * with it tells the model where it is.
+   */
+  private async prepareEdit(run: Run, ctx: ReplyContext): Promise<ReplyContext> {
+    const node = this.repo.getNode(ctx.nodeId)!;
+    if (!this.llm.canEdit) return ctx;
+    run.activity = 'Preparing files';
+    const project = this.repo.getProject(node.projectId)!;
+    const copy = await this.worktrees.ensure(project, this.repo.snapshot(node.projectId), node).catch((err: unknown) => {
+      throw new Error(`Could not prepare this node's copy of the project: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    if (!node.gitBranch) this.repo.setGitInfo(node.id, copy.branch, null);
+    const firstReply = !this.repo.listMessages(node.id).some((m) => m.role === 'assistant');
+    const message = copy.created || firstReply
+      ? `${editNote({ dir: copy.editDir, branch: copy.branch, merged: copy.merged, conflicts: copy.conflicts })}\n\n${ctx.message}`
+      : ctx.message;
+    return { ...ctx, message, edit: { dir: copy.editDir } };
+  }
+
+  /** Save what the model changed in the node's copy as a commit, and the count for the graph card. */
+  private async commitEdits(nodeId: string, userMessage: string): Promise<void> {
+    const node = this.repo.getNode(nodeId);
+    if (!node?.gitBranch) return;
+    const project = this.repo.getProject(node.projectId)!;
+    try {
+      const summary = userMessage.split('\n')[0].slice(0, 72);
+      await this.worktrees.commit(project, nodeId, `${node.title}: ${summary}`);
+      this.repo.setGitInfo(nodeId, node.gitBranch, await this.worktrees.countChanges(project, nodeId));
+    } catch (err) {
+      console.error(`[git] node ${nodeId}:`, err);
+    }
+  }
+
+  private async execute(run: Run, baseCtx: ReplyContext): Promise<void> {
     const emit = (event: ChatStreamEvent) => run.listeners.forEach((l) => l(event));
     let failure: ProviderError | null = null;
+    let ctx = baseCtx;
 
     try {
+      ctx = await this.prepareEdit(run, baseCtx);
       for await (const event of this.llm.streamReply(ctx, run.abort.signal)) {
         if (event.type === 'session') {
           run.sessionId = event.sessionId;
@@ -193,6 +233,9 @@ export class RunManager {
         failure = classifyError(err, this.limit?.resetsAt ?? null);
       }
     }
+
+    // Commit file changes before the run counts as finished, so a fork right after starts from them.
+    if (ctx.edit) await this.commitEdits(run.nodeId, baseCtx.message);
 
     // Save the reply, or whatever arrived before a failure or Stop
     // (unless the node itself is gone, e.g. the project was reset mid-reply).

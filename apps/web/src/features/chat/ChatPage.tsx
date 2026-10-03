@@ -8,6 +8,7 @@ import { UsageBanner } from '@/components/UsageBanner'
 import { activityOf } from '@/lib/activity'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { ChangesPanel } from '@/features/editing/ChangesPanel'
 import { ForkDialog } from '@/features/fork/ForkDialog'
 import { NodeModelPicker } from '@/features/model/NodeModelPicker'
 import { RenameDialog } from '@/features/rename/RenameDialog'
@@ -253,6 +254,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             )
           )}
 
+          <ChangesPanel node={node} version={`${node.filesChanged}-${messages.length}`} working={working} />
           {node.result && <ResultBlock result={node.result} onEdit={() => onDialog('result')} />}
           <div ref={endRef} />
         </div>

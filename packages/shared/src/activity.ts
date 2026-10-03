@@ -6,12 +6,17 @@ const TOOL_ACTIVITY: Record<string, string> = {
   read_file: 'Reading',
   find_files: 'Looking through files',
   search_files: 'Searching files',
+  edit_file: 'Editing',
+  write_file: 'Writing',
 };
 
-/** What a running tool call means, for progress indicators: "Searching the web: BIKE parameters", "Reading main.tex". */
+/** Tools that act on one local file, shown by its name. */
+const FILE_TOOLS = new Set(['read_file', 'edit_file', 'write_file']);
+
+/** What a running tool call means, for progress indicators: "Searching the web: BIKE parameters", "Reading main.tex", "Editing main.tex". */
 export function toolActivity(call: ToolCall): string {
   const what = TOOL_ACTIVITY[call.name] ?? 'Using a tool';
-  if (call.name === 'read_file') return `${what} ${call.input.split(/[\\/]/).pop()}`;
+  if (FILE_TOOLS.has(call.name)) return `${what} ${call.input.split(/[\\/]/).pop()}`;
   return call.input ? `${what}: ${call.input}` : what;
 }
 

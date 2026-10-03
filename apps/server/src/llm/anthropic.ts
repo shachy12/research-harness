@@ -93,6 +93,7 @@ function toolUpdate(block: Anthropic.Beta.BetaContentBlock, calls: Map<string, T
 export class AnthropicProvider implements LLMProvider {
   readonly label: string;
   readonly kind = 'anthropic';
+  readonly canEdit = false; // no file tools yet
   private readonly client: Anthropic;
   private readonly options: AnthropicOptions;
   private modelList: { models: ModelOption[]; fetchedAt: number } | null = null;

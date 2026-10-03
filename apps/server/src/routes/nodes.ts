@@ -2,7 +2,9 @@ import { zValidator } from '@hono/zod-validator';
 import {
   type Attachment,
   type ChatStreamEvent,
+  type DagNode,
   type Effort,
+  type NodeChanges,
   type NodeDetail,
   branchResultSchema,
   forkSchema,
@@ -69,11 +71,19 @@ function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStre
   });
 }
 
-export function nodeRoutes({ repo, llm, runs, workspaces, checkModel }: RouteDeps) {
+export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
     return node;
+  };
+
+  /** A forked or finished node won't edit again: commit its copy and remove it (its branch stays). */
+  const retireCopy = (node: DagNode) => {
+    if (!node.gitBranch) return;
+    worktrees
+      .retire(repo.getProject(node.projectId)!, node.id, `${node.title}: final state`)
+      .catch((err: unknown) => console.error(`[git] retire ${node.id}:`, err));
   };
 
   return new Hono()
@@ -191,6 +201,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, checkModel }: RouteDep
         );
       });
       llm.release?.(parent.id); // the parent receives no more messages
+      retireCopy(parent); // queued before the children's copies are made from its branch
       children.forEach((child, i) => runs.start(child.id, branches[i].prompt, branches[i].attachments));
       return c.json(children, 201);
     })
@@ -214,6 +225,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, checkModel }: RouteDep
         session: planSession(graph, node.id),
         model: node.model,
         effort: node.effort,
+        edit: null, // drafting runs without tools
       };
       try {
         return c.json(await llm.draftResult(ctx, c.req.raw.signal));
@@ -235,6 +247,32 @@ export function nodeRoutes({ repo, llm, runs, workspaces, checkModel }: RouteDep
 
       repo.setResult(node.id, c.req.valid('json'));
       llm.release?.(node.id); // a finished branch receives no more messages
+      retireCopy(node);
       return c.json(repo.getNode(node.id)!);
+    })
+
+    // What applying the node's file changes would bring into the project (null: it has none).
+    .get('/:nodeId/changes', async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      if (!node.gitBranch) return c.json<NodeChanges | null>(null);
+      try {
+        return c.json<NodeChanges | null>(await worktrees.changes(repo.getProject(node.projectId)!, node.id));
+      } catch (err) {
+        console.error(`[git] changes ${node.id}:`, err);
+        throw new HttpError(500, err instanceof Error ? err.message : 'Could not read the changes');
+      }
+    })
+
+    // Merge the node's branch into the project's current branch. Conflicts leave the project as it was.
+    .post('/:nodeId/apply', async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      if (!node.gitBranch) throw new HttpError(400, 'This node has no file changes.');
+      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
+      const project = repo.getProject(node.projectId)!;
+      await worktrees.commit(project, node.id, `${node.title}: state when applied`);
+      const result = await worktrees.apply(project, node.id, node.title);
+      if (!result.ok) throw new HttpError(409, result.error);
+      repo.setGitInfo(node.id, node.gitBranch, await worktrees.countChanges(project, node.id));
+      return c.json({ ok: true });
     });
 }

@@ -8,7 +8,8 @@ import { MANAGED_DIR, type Attachment, type Project } from '@harness/shared';
  *
  *   <folder>/.harness/uploads/   files the user attached to messages
  *
- * Until the user can choose a folder, it defaults to `<data>/projects/<project id>/`.
+ * Without a chosen folder, a new project gets `<data>/projects/<its name>/` (`newFolder`). Projects
+ * from before that have no folder stored and use `<data>/projects/<project id>/`.
  */
 export class Workspaces {
   private readonly dataDir: string;
@@ -19,6 +20,22 @@ export class Workspaces {
 
   folderOf(project: Project): string {
     return project.folder ?? path.join(this.dataDir, 'projects', project.id);
+  }
+
+  /**
+   * A new folder for a project the user gave no folder: `<data>/projects/<name>`, with the name made
+   * safe for file systems (`Second paper`, or `Second paper-2` if taken). Created right away, so
+   * the name stays reserved. Renaming the project later keeps the folder (sessions belong to it).
+   */
+  newFolder(projectName: string): string {
+    const parent = path.join(this.dataDir, 'projects');
+    mkdirSync(parent, { recursive: true });
+    let name = safeFileName(projectName);
+    // Windows reserves these device names, with or without an extension.
+    if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name)) name = `${name}-project`;
+    const folder = path.join(parent, uniqueName(parent, name));
+    mkdirSync(folder);
+    return folder;
   }
 
   uploadsOf(project: Project): string {

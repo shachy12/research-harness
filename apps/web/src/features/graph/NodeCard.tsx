@@ -1,6 +1,6 @@
 import type { NodeSummary } from '@harness/shared'
 import { Handle, type Node, type NodeProps, Position } from '@xyflow/react'
-import { PencilIcon } from 'lucide-react'
+import { FilePenIcon, PencilIcon } from 'lucide-react'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
 import { formatElapsed } from '@harness/shared'
 import { activityOf } from '@/lib/activity'
@@ -47,7 +47,15 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
             {n.unread} new
           </span>
         )}
-        <span className="ml-auto font-mono text-[11px] text-muted-foreground">{n.messageCount} msg</span>
+        {n.filesChanged ? (
+          <span
+            className="ml-auto flex items-center gap-0.5 font-mono text-[11px] text-open"
+            title={`Its branch changes ${n.filesChanged} ${n.filesChanged === 1 ? 'file' : 'files'} compared with the project`}
+          >
+            <FilePenIcon className="size-3" /> {n.filesChanged}
+          </span>
+        ) : null}
+        <span className={cn('font-mono text-[11px] text-muted-foreground', !n.filesChanged && 'ml-auto')}>{n.messageCount} msg</span>
       </div>
       <div className="flex min-w-0 items-center gap-1">
         <div className="line-clamp-1 min-w-0 text-sm font-semibold" title={n.title}>{n.title}</div>

@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
+  type FolderGit,
   type GraphResponse,
+  type MergePreview,
   type ProjectSummary,
   createProjectSchema,
-  renameProjectSchema,
+  checkFolderSchema,
+  mergePreviewSchema,
+  updateProjectSchema,
   MAX_FOLDER_BYTES,
   MAX_FOLDER_FILES,
   MAX_UPLOAD_BYTES,
@@ -18,7 +22,7 @@ import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
-export function projectRoutes({ repo, llm, runs, workspaces, backup, loadModels, checkModel }: RouteDeps) {
+export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, loadModels, checkModel }: RouteDeps) {
   return new Hono()
     .get('/', (c) =>
       c.json<ProjectSummary[]>(
@@ -30,24 +34,61 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup, loadModels,
     )
 
     // A new project starts with an empty root node. Its folder is fixed from now on.
-    .post('/', zValidator('json', createProjectSchema), (c) => {
+    .post('/', zValidator('json', createProjectSchema), async (c) => {
       const { name, folder } = c.req.valid('json');
-      let chosen: string | null = null;
+      let chosen: string;
       if (folder) {
         const checked = workspaces.checkFolder(folder);
         if (typeof checked !== 'string') throw new HttpError(400, checked.error);
         chosen = checked;
+      } else {
+        chosen = workspaces.newFolder(name); // named after the project
       }
       const project = repo.createProject(randomUUID(), name, 'Main thread', chosen);
       workspaces.prepare(project);
+      // Nodes edit their own git copies of the folder, so it must be a repository (the dialog said so).
+      try {
+        await worktrees.setUp(project);
+      } catch (err) {
+        console.error(`[git] set up ${project.id}:`, err); // retried at the first run
+      }
       return c.json(project, 201);
     })
 
-    .patch('/:projectId', zValidator('json', renameProjectSchema), (c) => {
+    // What creating a project on this folder does in git (the new-project dialog shows it first).
+    .post('/check-folder', zValidator('json', checkFolderSchema), async (c) => {
+      const checked = workspaces.checkFolder(c.req.valid('json').folder);
+      if (typeof checked !== 'string') throw new HttpError(400, checked.error);
+      return c.json<FolderGit>(await worktrees.inspect(checked));
+    })
+
+    .patch('/:projectId', zValidator('json', updateProjectSchema), (c) => {
       const project = repo.getProject(c.req.param('projectId'));
       if (!project) throw notFound('Project');
-      repo.setProjectName(project.id, c.req.valid('json').name);
+      const { name, archived } = c.req.valid('json');
+      if (name !== undefined) repo.setProjectName(project.id, name);
+      if (archived !== undefined) repo.setProjectArchived(project.id, archived);
       return c.json(repo.getProject(project.id)!);
+    })
+
+    // Delete a project: its nodes, messages and results. A backup of the database is made first (if
+    // that fails, nothing is deleted). The project's folder, uploads and git branches stay on disk.
+    .delete('/:projectId', (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      try {
+        const saved = backup?.('before-delete-project');
+        if (saved) console.log(`database backed up before deleting project "${project.name}": ${saved}`);
+      } catch (err) {
+        console.error('[delete project] backup failed:', err);
+        throw new HttpError(500, 'Could not back up the database, so nothing was deleted.');
+      }
+      for (const node of repo.listNodes(project.id)) {
+        runs.stop(node.id);
+        llm.release?.(node.id);
+      }
+      repo.deleteProject(project.id);
+      return c.json({ ok: true });
     })
 
     // Upload a file (multipart field "file"). It is copied into the project's .harness/uploads/ and
@@ -113,6 +154,17 @@ export function projectRoutes({ repo, llm, runs, workspaces, backup, loadModels,
         };
       });
       return c.json<GraphResponse>({ project, nodes, usage: runs.usage() });
+    })
+
+    // What merging these branches does to their files: changed files and conflicts (nothing is changed).
+    .post('/:projectId/merge/preview', zValidator('json', mergePreviewSchema), async (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      const graph = repo.snapshot(project.id);
+      const parentIds = [...new Set(c.req.valid('json').parentIds)];
+      for (const id of parentIds) if (repo.getNode(id)?.projectId !== project.id) throw notFound(`Node ${id}`);
+      if (!parentIds.some((id) => repo.getNode(id)?.gitBranch)) return c.json<MergePreview>({ branches: [], conflicts: [] });
+      return c.json<MergePreview>(await worktrees.previewMerge(project, graph, parentIds));
     })
 
     // Create a merge node from finished branches and start it working on its first message.

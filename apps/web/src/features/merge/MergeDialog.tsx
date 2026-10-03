@@ -3,7 +3,7 @@ import { useQueries } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { api } from '@/api/client'
-import { keys, useMerge, useModels } from '@/api/queries'
+import { keys, useMerge, useMergePreview, useModels } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
@@ -55,6 +55,10 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
   const transcriptTokens = details
     .slice(baseId ? 1 : 0)
     .reduce((s, d) => s + (d.data?.messages.reduce((t, m) => t + estimateTokens(m.content), 0) ?? 0), 0)
+
+  // Branches that edited files: their files are merged too; show what each changed and any conflicts.
+  const preview = useMergePreview(projectId, parentIds, parents.some((p) => p.gitBranch))
+  const editedBranches = preview.data?.branches.filter((b) => b.files.length > 0) ?? []
 
   const create = () =>
     merge.mutate(
@@ -109,6 +113,26 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
           Results add ~{formatTokens(resultTokens)} tokens. The full branch transcripts would have added ~
           {formatTokens(transcriptTokens)}.
         </p>
+
+        {editedBranches.length > 0 && (
+          <div className="flex flex-col gap-1.5 rounded-lg border px-3 py-2 text-sm">
+            <span className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Files</span>
+            {editedBranches.map((b) => (
+              <p key={b.nodeId} className="text-xs">
+                <b>{b.title}</b> changed <span className="font-mono">{b.files.join(', ')}</span>
+              </p>
+            ))}
+            {preview.data!.conflicts.length > 0 ? (
+              <p role="status" className="rounded-md border border-merge/40 bg-merge-soft px-2 py-1.5 text-xs text-merge">
+                Overlapping changes in <span className="font-mono">{preview.data!.conflicts.join(', ')}</span>. They are merged
+                with conflict markers, and the merged node is asked to resolve them first.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">The files merge without conflicts.</p>
+            )}
+          </div>
+        )}
+        {preview.isError && <p className="text-xs text-destructive">Could not preview the file merge: {preview.error.message}</p>}
 
         {catalog && rule && settings && (
           <div className="grid gap-1.5">

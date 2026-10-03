@@ -39,6 +39,11 @@ export interface ReplyContext {
   /** The node's model and effort; null means the provider's default. */
   model: string | null;
   effort: Effort | null;
+  /**
+   * The node's editable copy of the project (null if the provider can't edit): the model may create
+   * and change files inside `dir` and nowhere else. Null: read-only, as before.
+   */
+  edit: { dir: string } | null;
 }
 
 /** The models a provider offers and what a node without its own setting uses. */
@@ -59,6 +64,8 @@ export interface LLMProvider {
   readonly label: string;
   /** e.g. 'claude-code', 'anthropic', 'placeholder'. */
   readonly kind: string;
+  /** The provider can let the model edit files (see `ReplyContext.edit`). */
+  readonly canEdit: boolean;
   /** The models the pickers offer (may ask the provider's API). */
   models(): Promise<ModelCatalog>;
   /** Stream the assistant's reply to the new message. */

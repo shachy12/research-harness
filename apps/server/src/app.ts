@@ -10,6 +10,7 @@ import { RunManager } from './runs.ts';
 import { systemRoutes } from './routes/system.ts';
 import { pickFolder } from './system/folder-picker.ts';
 import type { Workspaces } from './workspace.ts';
+import { Worktrees } from './worktrees.ts';
 
 export interface AppDeps {
   repo: Repository;
@@ -23,6 +24,7 @@ export interface AppDeps {
 
 export interface RouteDeps extends AppDeps {
   runs: RunManager;
+  worktrees: Worktrees;
   pickFolder: typeof pickFolder;
   /** Throws a 400 unless the provider offers this model and the model takes this effort (null: default). */
   checkModel: (model: string | null, effort: Effort | null) => Promise<void>;
@@ -55,9 +57,11 @@ function modelChecker(llm: LLMProvider): RouteDeps['checkModel'] {
 
 // Dependencies are passed in, so tests can use an in-memory database and a fake model.
 export function createApp(deps: AppDeps) {
+  const worktrees = new Worktrees(deps.workspaces);
   const routeDeps: RouteDeps = {
     ...deps,
-    runs: new RunManager(deps.repo, deps.llm, deps.workspaces),
+    worktrees,
+    runs: new RunManager(deps.repo, deps.llm, deps.workspaces, worktrees),
     pickFolder: deps.pickFolder ?? pickFolder,
     checkModel: modelChecker(deps.llm),
     loadModels: () => loadModels(deps.llm),
@@ -70,7 +74,7 @@ export function createApp(deps: AppDeps) {
       return c.json({ error: 'Something went wrong on the server' }, 500);
     })
     .get('/health', (c) => c.json({ ok: true, model: deps.llm.label }))
-    .get('/models', async (c) => c.json<ModelsResponse>({ provider: deps.llm.kind, ...(await loadModels(deps.llm)) }))
+    .get('/models', async (c) => c.json<ModelsResponse>({ provider: deps.llm.kind, canEdit: deps.llm.canEdit, ...(await loadModels(deps.llm)) }))
     .route('/projects', projectRoutes(routeDeps))
     .route('/nodes', nodeRoutes(routeDeps))
     .route('/system', systemRoutes(routeDeps));

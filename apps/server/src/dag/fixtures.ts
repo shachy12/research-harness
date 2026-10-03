@@ -25,6 +25,8 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       readUpto: null,
       model: null,
       effort: null,
+      gitBranch: null,
+      filesChanged: null,
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     (spec.messages ?? []).forEach((m, i) => {

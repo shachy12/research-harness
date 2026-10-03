@@ -1,5 +1,5 @@
 import type { ToolCall } from '@harness/shared'
-import { CircleAlertIcon, FileSearchIcon, FileTextIcon, FolderSearchIcon, GlobeIcon, LoaderIcon, SearchIcon } from 'lucide-react'
+import { CircleAlertIcon, FilePenIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, FolderSearchIcon, GlobeIcon, LoaderIcon, SearchIcon } from 'lucide-react'
 
 const LABEL: Record<string, { icon: typeof SearchIcon; running: string; done: string }> = {
   web_search: { icon: SearchIcon, running: 'Searching', done: 'Searched' },
@@ -7,11 +7,16 @@ const LABEL: Record<string, { icon: typeof SearchIcon; running: string; done: st
   read_file: { icon: FileTextIcon, running: 'Reading', done: 'Read' },
   find_files: { icon: FolderSearchIcon, running: 'Finding files', done: 'Found files' },
   search_files: { icon: FileSearchIcon, running: 'Searching files', done: 'Searched files' },
+  edit_file: { icon: FilePenIcon, running: 'Editing', done: 'Edited' },
+  write_file: { icon: FilePlusIcon, running: 'Writing', done: 'Wrote' },
 }
+
+/** Tools that act on one local file. */
+const FILE_TOOLS = new Set(['read_file', 'edit_file', 'write_file'])
 
 /** Show local files by name, not by full path. */
 const displayInput = (call: ToolCall) =>
-  call.name === 'read_file' ? (call.input.split(/[\\/]/).pop() ?? call.input) : call.input
+  FILE_TOOLS.has(call.name) ? (call.input.split(/[\\/]/).pop() ?? call.input) : call.input
 
 /** The searches and page fetches behind a reply, one collapsible row each. */
 export function ToolCalls({ calls }: { calls: ToolCall[] }) {

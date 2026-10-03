@@ -67,6 +67,34 @@ export function withAttachments(content: string, attachments: Attachment[]): str
   return `${content}\n\n[The user attached ${what}. ${how} before answering:\n${list}]`;
 }
 
+/**
+ * Sent in front of the first message a node runs with an editable copy (projects with file editing
+ * on). The project folder stays the working folder (sessions belong to it), so the model has to be
+ * told where it may write. A merge node also hears what the merged branches changed, and which
+ * files were left with conflict markers.
+ */
+export function editNote(edit: {
+  dir: string;
+  branch: string;
+  merged: { title: string; files: string[] }[];
+  conflicts: string[];
+}): string {
+  const lines = [
+    `[You can edit files in this conversation. Your own copy of the project is at ${edit.dir} (git branch ${edit.branch}); ` +
+      'it holds the project files as the conversation above left them. Make every change there, with Edit or Write and absolute paths. ' +
+      'The project folder itself and other copies are read-only for you; copies mentioned earlier in the conversation belong to other branches. ' +
+      'Your changes are saved after each reply; the user reviews them and applies them to the project.',
+  ];
+  const changed = edit.merged.filter((m) => m.files.length > 0);
+  if (changed.length > 0) {
+    lines.push(`The merged branches' file changes are combined in your copy: ${changed.map((m) => `"${m.title}" changed ${m.files.join(', ')}`).join('; ')}.`);
+  }
+  if (edit.conflicts.length > 0) {
+    lines.push(`Some changes overlap: ${edit.conflicts.join(', ')} ${edit.conflicts.length === 1 ? 'has' : 'have'} git conflict markers (<<<<<<<, =======, >>>>>>>). Resolve them in your copy first, keeping what each branch meant.`);
+  }
+  return `${lines.join('\n')}]`;
+}
+
 export function segmentTurns(seg: Segment): ChatTurn[] {
   switch (seg.kind) {
     case 'messages':

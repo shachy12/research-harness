@@ -8,6 +8,8 @@ export interface Project {
    * Null means the default location under the app's data folder. Managed data lives in `.harness/`.
    */
   folder: string | null;
+  /** Listed in the sidebar's "Archives" group (collapsed by default) instead of with the others. */
+  archived: boolean;
   createdAt: string;
 }
 
@@ -71,6 +73,13 @@ export interface DagNode {
    */
   model: string | null;
   effort: Effort | null;
+  /**
+   * The node's git branch once it has its own editable copy of the project (a git worktree in
+   * `.harness/work/`); the user applies its changes to the project after seeing the diff.
+   */
+  gitBranch: string | null;
+  /** How many files its branch changes compared with the project, as of its last reply (null: no branch). */
+  filesChanged: number | null;
   createdAt: string;
 }
 
@@ -97,6 +106,8 @@ export interface ModelsResponse {
    * are turned off, see `cliEnv`; measured 2026-10-02).
    */
   forkKeepsCache: boolean;
+  /** The provider can edit files (Claude Code): every node then edits its own copy of the project. */
+  canEdit: boolean;
 }
 
 export type Role = 'user' | 'assistant';
@@ -218,6 +229,55 @@ export type ChatStreamEvent =
   | { type: 'tool'; call: ToolCall }
   | { type: 'done'; message: Message }
   | { type: 'error'; error: string; kind?: ErrorKind; resetsAt?: string | null };
+
+/** One file a node's branch changes. Line counts are null for binary files. */
+export interface FileChange {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  additions: number | null;
+  deletions: number | null;
+}
+
+/**
+ * GET /api/nodes/:id/changes: what applying the node's branch would bring into the project's
+ * current branch (`target`), compared from where they split.
+ */
+export interface NodeChanges {
+  branch: string;
+  /** The project's checked-out branch; null on a detached HEAD. */
+  target: string | null;
+  files: FileChange[];
+  /** Unified diff (cut at a size limit, see `truncated`). */
+  diff: string;
+  truncated: boolean;
+  /** Files that would conflict with the project's branch if applied now. */
+  conflicts: string[];
+  /** Changed files that still contain merge conflict markers (from merging branches; not resolved yet). */
+  unresolved: string[];
+  /** Everything on the branch is already in the project's branch. */
+  applied: boolean;
+}
+
+/** POST /api/projects/:id/merge/preview: what merging the selected branches does to their files. */
+export interface MergePreview {
+  /** Branches with an editable copy and the files each changed (from where they split). */
+  branches: { nodeId: string; title: string; files: string[] }[];
+  /** Files that will get conflict markers; the merged node's first reply is asked to resolve them. */
+  conflicts: string[];
+}
+
+/**
+ * POST /api/projects/check-folder: what creating a project on this folder does in git, for the
+ * new-project dialog's notice.
+ */
+export interface FolderGit {
+  /** Already a git repository. If not, creating the project runs `git init` and commits its files. */
+  repository: boolean;
+  /** Its checked-out branch (null: detached HEAD), or the branch `git init` will create. */
+  branch: string | null;
+  /** Uncommitted changes: nodes start from the last commit, so they won't see them. */
+  uncommitted: boolean;
+}
 
 export interface ApiError {
   error: string;

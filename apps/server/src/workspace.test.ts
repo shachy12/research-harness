@@ -7,7 +7,7 @@ import { Workspaces, safeFileName } from './workspace.ts';
 
 let dataDir: string;
 let workspaces: Workspaces;
-const project: Project = { id: 'p1', name: 'Test', folder: null, createdAt: '' };
+const project: Project = { id: 'p1', name: 'Test', folder: null, archived: false, createdAt: '' };
 const bytes = (text: string) => new TextEncoder().encode(text);
 
 beforeEach(() => {
@@ -30,6 +30,14 @@ describe('Workspaces', () => {
   it('defaults to a folder per project under the data folder, or uses the chosen one', () => {
     expect(workspaces.folderOf(project)).toBe(path.join(dataDir, 'projects', 'p1'));
     expect(workspaces.folderOf({ ...project, folder: 'D:\\Research' })).toBe('D:\\Research');
+  });
+
+  it('makes a new project folder named after the project, safe and unused', () => {
+    expect(workspaces.newFolder('Second paper')).toBe(path.join(dataDir, 'projects', 'Second paper'));
+    expect(workspaces.newFolder('Second paper')).toBe(path.join(dataDir, 'projects', 'Second paper-2'));
+    expect(path.basename(workspaces.newFolder('a/b: c?'))).toBe('b_ c_');
+    expect(path.basename(workspaces.newFolder('CON'))).toBe('CON-project');
+    expect(existsSync(path.join(dataDir, 'projects', 'Second paper-2'))).toBe(true);
   });
 
   it('creates the managed uploads folder and a .gitignore that keeps it out of git', () => {

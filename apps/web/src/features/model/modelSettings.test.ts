@@ -12,6 +12,7 @@ const api: ModelsResponse = {
   defaultModel: 'claude-opus-5-5',
   defaultEffort: 'high',
   forkKeepsCache: true,
+  canEdit: false,
 }
 const cc: ModelsResponse = { ...api, provider: 'claude-code' }
 const none = { model: null, effort: null }

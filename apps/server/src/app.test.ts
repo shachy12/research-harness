@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
-  Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, ModelsResponse, NodeDetail, Project, ProjectSummary,
+  Attachment, BranchResult, ChatStreamEvent, DagNode, FolderGit, GraphResponse, MergePreview, ModelsResponse, NodeChanges,
+  NodeDetail, Project, ProjectSummary,
 } from '@harness/shared';
 import { MANAGED_DIR } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -20,6 +21,8 @@ import { Workspaces } from './workspace.ts';
 class FakeProvider implements LLMProvider {
   readonly label = 'fake';
   readonly kind = 'fake';
+  /** Most tests run read-only (no git); the file editing tests turn this on. */
+  canEdit = false;
 
   async models(): Promise<ModelCatalog> {
     return {
@@ -58,6 +61,10 @@ class FakeProvider implements LLMProvider {
       yield { type: 'tool', call };
       yield { type: 'tool', call: { ...call, status: 'done', results: [{ title: 'A paper', url: 'https://example.org/paper' }] } };
     }
+    // "[write name]" writes a file named after the node's message count into its editable copy.
+    const write = /\[write (\S+)\]/.exec(message);
+    if (write && ctx.edit) writeFileSync(path.join(ctx.edit.dir, write[1]), `${write[1]} from ${ctx.nodeId}
+`);
     yield { type: 'text', text: 'Hello ' };
     if (message.includes('slow')) {
       await new Promise<void>((resolve) => {
@@ -404,6 +411,33 @@ describe('API', () => {
     expect((await detail(rootId)).messages.map((m) => m.content)).toContain('Precious research');
   });
 
+  it('archives and unarchives a project', async () => {
+    expect((await call<Project>('PATCH', '/projects/default', { archived: true })).data).toMatchObject({ archived: true, name: 'Test' });
+    expect((await call<ProjectSummary[]>('GET', '/projects')).data[0].archived).toBe(true);
+    expect((await call<Project>('PATCH', '/projects/default', { archived: false })).data.archived).toBe(false);
+    expect((await call('PATCH', '/projects/default', {})).status).toBe(400);
+  });
+
+  it('deletes a project after a backup, leaving the others and its folder', async () => {
+    const other = (await call<Project>('POST', '/projects', { name: 'Other' })).data;
+    await chat(rootId, 'Some research');
+    const folder = workspaces.prepare(repo.getProject('default')!);
+    const labels: string[] = [];
+    const withBackup = createApp({ repo, llm, workspaces, backup: (label) => (labels.push(label), 'backup.db') });
+    expect((await withBackup.request('/api/projects/default', { method: 'DELETE' })).status).toBe(200);
+    expect(labels).toEqual(['before-delete-project']);
+    expect(repo.getProject('default')).toBeNull();
+    expect(repo.getNode(rootId)).toBeNull();
+    expect(repo.getProject(other.id)).not.toBeNull();
+    expect(existsSync(folder)).toBe(true);
+  });
+
+  it('deletes nothing if the backup before deleting a project fails', async () => {
+    const failing = createApp({ repo, llm, workspaces, backup: () => { throw new Error('disk full'); } });
+    expect((await failing.request('/api/projects/default', { method: 'DELETE' })).status).toBe(500);
+    expect(repo.getProject('default')).not.toBeNull();
+  });
+
   it('renames a node; prompts keep the title it was created with', async () => {
     await chat(rootId, 'Scope it');
     const [a] = await fork(rootId, ['Survey retrieval methods']);
@@ -488,7 +522,9 @@ describe('API', () => {
   it('creates projects, each with its own root, and lists the most recently used first', async () => {
     const { status, data: test } = await call<Project>('POST', '/projects', { name: 'Testing' });
     expect(status).toBe(201);
-    expect(test).toMatchObject({ name: 'Testing', folder: null });
+    expect(test.name).toBe('Testing');
+    // Its folder is named after it, in the data folder's projects/.
+    expect([path.basename(path.dirname(test.folder!)), path.basename(test.folder!)]).toEqual(['projects', 'Testing']);
 
     const graph = (await call<GraphResponse>('GET', `/projects/${test.id}/graph`)).data;
     expect(graph.nodes.map((n) => [n.title, n.parentIds])).toEqual([['Main thread', []]]);
@@ -656,5 +692,79 @@ describe('API', () => {
     expect(data.map((n) => n.title)).toEqual(['Use a hybrid argument', 'Plain prompt becomes the title']);
     expect(data.map((n) => n.promptTitle)).toEqual(['Use a hybrid argument', 'Plain prompt becomes the title']);
     for (const child of data) await settle(child.id);
+  });
+
+  describe('file editing', () => {
+    /** Wait for a reply, including the git work around it (slower than the fake model). */
+    async function idle(nodeId: string) {
+      for (let i = 0; i < 400 && (await detail(nodeId)).running; i++) await new Promise((r) => setTimeout(r, 25));
+    }
+    const projectFolder = () => workspaces.folderOf(repo.getProject('default')!);
+
+    it('gives each node its own copy, and applies its changes', async () => {
+      llm.canEdit = true;
+      expect((await call<ModelsResponse>('GET', '/models')).data.canEdit).toBe(true);
+
+      await chat(rootId, 'Start [write notes.md]');
+      await idle(rootId);
+      const root = (await detail(rootId)).node;
+      expect(root).toMatchObject({ gitBranch: expect.stringMatching(/^harness\//), filesChanged: 1 });
+      expect(llm.contexts.at(-1)!.message).toContain('Your own copy of the project is at');
+      expect(llm.contexts.at(-1)!.edit!.dir).toContain(path.join(MANAGED_DIR, 'work'));
+      expect(existsSync(path.join(projectFolder(), 'notes.md'))).toBe(false);
+
+      await chat(rootId, 'More');
+      await idle(rootId);
+      expect(llm.contexts.at(-1)!.message).toBe('More'); // told once
+
+      const changes = (await call<NodeChanges>('GET', `/nodes/${rootId}/changes`)).data;
+      expect(changes.files.map((f) => f.path)).toEqual(['notes.md']);
+      expect((await call('POST', `/nodes/${rootId}/apply`)).status).toBe(200);
+      expect(readFileSync(path.join(projectFolder(), 'notes.md'), 'utf8')).toContain('notes.md from');
+      expect((await detail(rootId)).node.filesChanged).toBe(0);
+    });
+
+    it('starts branches from the parent’s files and previews merges', async () => {
+      llm.canEdit = true;
+      await chat(rootId, 'Start [write shared.md]');
+      await idle(rootId);
+      const { data: kids } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
+        branches: [{ prompt: 'A [write shared.md]', title: 'A' }, { prompt: 'B [write shared.md]', title: 'B' }],
+      });
+      for (const k of kids) await idle(k.id);
+      const dirs = llm.contexts.slice(-2).map((c) => c.edit!.dir);
+      expect(new Set(dirs).size).toBe(2);
+      for (const k of kids) expect((await detail(k.id)).node.filesChanged).toBe(1);
+
+      for (const k of kids) await call('PUT', `/nodes/${k.id}/result`, RESULT);
+      const preview = (await call<MergePreview>('POST', '/projects/default/merge/preview', { parentIds: kids.map((k) => k.id) })).data;
+      expect(preview.conflicts).toEqual(['shared.md']);
+
+      const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: kids.map((k) => k.id), prompt: 'Combine' })).data;
+      await idle(merged.id);
+      const first = llm.contexts.at(-1)!;
+      expect(first.message).toContain('conflict markers');
+      expect(readFileSync(path.join(first.edit!.dir, 'shared.md'), 'utf8')).toContain('<<<<<<<');
+    });
+
+    it('checks a chosen folder, then makes it a repository when the project is created', async () => {
+      const folder = realpathSync(mkdtempSync(path.join(tmpdir(), 'harness-chosen-')));
+      writeFileSync(path.join(folder, 'paper.tex'), 'hello');
+      const check = await call<FolderGit>('POST', '/projects/check-folder', { folder });
+      expect(check.data).toMatchObject({ repository: false, uncommitted: false });
+      expect(check.data.branch).toBeTruthy(); // the branch git init will create
+      expect((await call('POST', '/projects/check-folder', { folder: 'relative/path' })).status).toBe(400);
+
+      expect((await call('POST', '/projects', { name: 'Paper', folder })).status).toBe(201);
+      expect((await call<FolderGit>('POST', '/projects/check-folder', { folder })).data)
+        .toEqual({ repository: true, branch: check.data.branch, uncommitted: false });
+    });
+
+    it('runs read-only with a provider that can’t edit', async () => {
+      await chat(rootId, 'Hi [write x.md]');
+      expect(llm.contexts.at(-1)!.edit).toBeNull();
+      expect((await detail(rootId)).node.gitBranch).toBeNull();
+      expect((await call('GET', `/nodes/${rootId}/changes`)).data).toBeNull();
+    });
   });
 });

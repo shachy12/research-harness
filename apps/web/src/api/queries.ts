@@ -2,11 +2,14 @@ import type {
   BranchResult,
   CreateProjectBody,
   DagNode,
+  FolderGit,
   ForkBody,
   GraphResponse,
   MergeBody,
+  MergePreview,
   ModelSettingsBody,
   ModelsResponse,
+  NodeChanges,
   NodeDetail,
   Project,
   ProjectSummary,
@@ -20,6 +23,7 @@ export const keys = {
   graph: (projectId: string) => ['graph', projectId] as const,
   node: (nodeId: string) => ['node', nodeId] as const,
   models: ['models'] as const,
+  changes: (nodeId: string) => ['changes', nodeId] as const,
 }
 
 /**
@@ -57,6 +61,25 @@ export function useCreateProject() {
   const refresh = useRefreshAll()
   return useMutation({
     mutationFn: (body: CreateProjectBody) => api.post<Project>('/projects', body),
+    onSuccess: refresh,
+  })
+}
+
+/** Move a project to the sidebar's Archives group, or back. */
+export function useArchiveProject() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: ({ projectId, archived }: { projectId: string; archived: boolean }) =>
+      api.patch<Project>(`/projects/${projectId}`, { archived }),
+    onSuccess: refresh,
+  })
+}
+
+/** Delete a project (the server backs up the database first). */
+export function useDeleteProject() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: (projectId: string) => api.del<{ ok: true }>(`/projects/${projectId}`),
     onSuccess: refresh,
   })
 }
@@ -108,7 +131,50 @@ export function useRefreshAll() {
     queryClient.invalidateQueries({ queryKey: keys.projects }),
     queryClient.invalidateQueries({ queryKey: ['graph'] }),
     queryClient.invalidateQueries({ queryKey: ['node'] }),
+    queryClient.invalidateQueries({ queryKey: ['changes'] }),
   ])
+}
+
+/** What creating a project on this folder does in git (empty: nothing to check). */
+export function useCheckFolder(folder: string) {
+  return useQuery({
+    queryKey: ['check-folder', folder],
+    queryFn: ({ signal }) => api.post<FolderGit>('/projects/check-folder', { folder }, signal),
+    enabled: folder !== '',
+    retry: false,
+    staleTime: 0,
+  })
+}
+
+/**
+ * What applying a node's file changes would bring into the project. `version` (its file count and
+ * message count) changes after each reply, which loads it again.
+ */
+export function useNodeChanges(nodeId: string, enabled: boolean, version: string) {
+  return useQuery({
+    queryKey: [...keys.changes(nodeId), version],
+    queryFn: ({ signal }) => api.get<NodeChanges | null>(`/nodes/${nodeId}/changes`, signal),
+    enabled,
+    staleTime: 0,
+  })
+}
+
+/** Merge a node's file changes into the project's current branch. */
+export function useApplyChanges() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: (nodeId: string) => api.post<{ ok: true }>(`/nodes/${nodeId}/apply`),
+    onSettled: refresh,
+  })
+}
+
+/** What merging these branches does to their files (only asked when some of them edited files). */
+export function useMergePreview(projectId: string, parentIds: string[], enabled: boolean) {
+  return useQuery({
+    queryKey: ['merge-preview', projectId, ...parentIds],
+    queryFn: ({ signal }) => api.post<MergePreview>(`/projects/${projectId}/merge/preview`, { parentIds }, signal),
+    enabled,
+  })
 }
 
 export function useFork() {

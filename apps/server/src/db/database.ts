@@ -72,6 +72,15 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN effort TEXT;
   ALTER TABLE messages ADD COLUMN model TEXT;
   `,
+  // 8: file editing. A project can let its nodes edit files, each in its own git worktree on its
+  // own branch; a node records its branch and how many files it changes (for the graph cards).
+  `
+  ALTER TABLE projects ADD COLUMN editing INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE nodes ADD COLUMN git_branch TEXT;
+  ALTER TABLE nodes ADD COLUMN files_changed INTEGER;
+  `,
+  // 9: archived projects (listed in the sidebar's collapsed "Archives" group).
+  `ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */
