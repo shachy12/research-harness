@@ -83,6 +83,12 @@ The Claude Code provider depends on details a CLI update can change without noti
 - **Raising `testedUpTo`:** an opt-in live check (`npm run check:claude`) that runs the real CLI once per feature (stream a short reply, fork a session, a result draft with `--json-schema`, a web search) for a few cents of credit, then compares the events with what `fake-claude.mjs` sends. Save the real output as fixtures per version, so the fake CLI stays faithful.
 - **API provider too, briefly:** the SDK is pinned by `package-lock.json`, but model ids and beta headers (`server-side-fallback-2026-07-01`, the web tool versions) get retired. Classify "unknown beta"/"model not found" errors with a message that names what to update.
 
+## 17. Record which provider a node's session id belongs to
+- **Problem:** `nodes.session_id` is a bare string. `planSession` (`dag/session.ts`) resumes or forks whatever id is there, whichever provider is running. Today only Claude Code uses session ids, so it's harmless. But with a second session-based provider (e.g. OpenAI's Responses API with `previous_response_id`, or another CLI), switching `HARNESS_PROVIDER` would hand a Claude Code session id to that provider, and resuming would fail or do something unexpected.
+- **Fix:** store the provider with the id (a `session_provider` column, or keep it next to the id), and later the folder too, since Claude Code sessions only resume from the folder that created them. `planSession` takes the current provider's `kind` and treats a session from another provider (or folder) as missing. It then falls back to the transcript replay that already exists for nodes with no session. Existing ids get `claude-code` in the migration (append-only: the ids are kept, just labelled).
+- **Tests:** in `session.test.ts`, a node with a session from another provider gets `new` plus a transcript, not `resume`; a parent with a session from another provider isn't forked.
+- Prepares the ground for mixing providers in one graph (one provider per node, not per app), which merges already allow because only results flow back.
+
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
