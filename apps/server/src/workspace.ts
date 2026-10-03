@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { MANAGED_DIR, type Attachment, type Project } from '@harness/shared';
 
@@ -11,6 +12,9 @@ import { MANAGED_DIR, type Attachment, type Project } from '@harness/shared';
  * Without a chosen folder, a new project gets `<data>/projects/<its name>/` (`newFolder`). Projects
  * from before that have no folder stored and use `<data>/projects/<project id>/`.
  */
+const EXAMPLE_FOLDER =
+  process.platform === 'win32' ? 'C:\\Users\\me\\thesis' : process.platform === 'darwin' ? '/Users/me/thesis' : '/home/me/thesis';
+
 export class Workspaces {
   private readonly dataDir: string;
 
@@ -58,7 +62,9 @@ export class Workspaces {
    * Returns its full real path.
    */
   checkFolder(folder: string): string | { error: string } {
-    if (!path.isAbsolute(folder)) return { error: 'Give the full path of the folder, e.g. C:\\Users\\me\\thesis' };
+    // macOS and Linux users often type ~/thesis.
+    if (process.platform !== 'win32' && /^~(\/|$)/.test(folder)) folder = path.join(os.homedir(), folder.slice(1));
+    if (!path.isAbsolute(folder)) return { error: `Give the full path of the folder, e.g. ${EXAMPLE_FOLDER}` };
     if (!existsSync(folder) || !statSync(folder).isDirectory()) return { error: `"${folder}" is not an existing folder` };
     const real = realpathSync(folder);
     if (path.parse(real).root === real) return { error: 'Choose a folder, not a whole drive' };

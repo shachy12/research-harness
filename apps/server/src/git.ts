@@ -43,6 +43,9 @@ export function runGit(cwd: string, args: string[], input?: string): Promise<Git
         resolve({ code: err ? Number(err.code) : 0, stdout, stderr });
       },
     );
+    // git may exit without reading its input; on Linux and macOS writing then fails with EPIPE,
+    // which would crash the server unhandled. The exit code above reports what went wrong.
+    child.stdin?.on('error', () => {});
     child.stdin?.end(input ?? '');
   });
 }

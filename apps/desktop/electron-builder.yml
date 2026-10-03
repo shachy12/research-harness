@@ -16,5 +16,16 @@ mac:
   target: dmg
   category: public.app-category.productivity
 linux:
-  target: AppImage
+  # AppImage runs on any distribution; deb installs on Debian/Ubuntu (and WSL with WSLg).
+  target: [AppImage, deb]
   category: Office
+  executableName: harness
+  # Same name as package.json's desktopName, so the desktop links the window to its launcher.
+  syncDesktopName: true
+  synopsis: DAG-based LLM research chat
+  maintainer: Shahar Shechter
+deb:
+  packageName: harness
+  artifactName: harness_${version}_${arch}.${ext}
+  # Electron's runtime libraries, so `apt install ./Harness_*.deb` pulls them in; git is needed for file editing.
+  depends: [libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0, libasound2 | libasound2t64, libgbm1, git]
