@@ -38,6 +38,10 @@ describe('Workspaces', () => {
     expect(path.basename(workspaces.newFolder('a/b: c?'))).toBe('b_ c_');
     expect(path.basename(workspaces.newFolder('CON'))).toBe('CON-project');
     expect(existsSync(path.join(dataDir, 'projects', 'Second paper-2'))).toBe(true);
+    // The preview names the folder newFolder would make next, without making it.
+    const next = workspaces.newFolderPath('Second paper');
+    expect(next).toBe(path.join(dataDir, 'projects', 'Second paper-3'));
+    expect(existsSync(next)).toBe(false);
   });
 
   it('creates the managed uploads folder and a .gitignore that keeps it out of git', () => {

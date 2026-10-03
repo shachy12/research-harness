@@ -126,16 +126,18 @@ export interface Message {
   createdAt: string;
 }
 
-/** A web search or page fetch run by the model (server-side tools). */
+/** A tool the model ran: web search/fetch, a file read or edit, a shell command. */
 export interface ToolCall {
   id: string;
-  /** 'web_search' or 'web_fetch'. */
+  /** 'web_search', 'web_fetch', 'read_file', 'find_files', 'search_files', 'edit_file', 'write_file' or 'shell'. */
   name: string;
-  /** The search query or the fetched URL. */
+  /** The search query, URL, file path, search pattern or shell command. */
   input: string;
   status: 'running' | 'done' | 'error';
   results: { title: string; url: string }[];
   error?: string;
+  /** What a shell command printed (its end, if long). */
+  output?: string;
 }
 
 /** One entry of what a node inherits: an ancestor's message, or a merged branch's result. */

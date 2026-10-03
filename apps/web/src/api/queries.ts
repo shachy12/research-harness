@@ -136,6 +136,17 @@ export function useRefreshAll() {
 }
 
 /** What creating a project on this folder does in git (empty: nothing to check). */
+/** The folder Harness would make for a new project with this name (when no folder is chosen). */
+export function useNewFolderPath(name: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['new-folder', name],
+    queryFn: ({ signal }) => api.get<{ path: string }>(`/projects/new-folder?name=${encodeURIComponent(name)}`, signal),
+    enabled,
+    staleTime: 0,
+    placeholderData: (previous) => previous, // keep the last path while the next one loads
+  })
+}
+
 export function useCheckFolder(folder: string) {
   return useQuery({
     queryKey: ['check-folder', folder],

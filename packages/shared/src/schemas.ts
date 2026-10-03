@@ -35,6 +35,13 @@ export function isSkippedUploadName(name: string): boolean {
   return name.startsWith('.') || name === 'node_modules' || name === '__MACOSX' || name === 'Thumbs.db';
 }
 
+/** Effort levels, lowest to highest. */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly Effort[];
+
+/** A model id (null: the provider's default). The server checks it against the provider's list. */
+const modelField = z.string().trim().min(1).max(100).nullable();
+const effortField = z.enum(EFFORTS).nullable();
+
 /**
  * A new project. `folder` is an existing folder the model works in (e.g. a LaTeX repository); it
  * can't be changed later, because Claude Code sessions belong to the folder they were made in.
@@ -42,6 +49,9 @@ export function isSkippedUploadName(name: string): boolean {
 export const createProjectSchema = z.object({
   name: z.string().trim().min(1, 'Name the project').max(120),
   folder: z.string().trim().min(1).optional(),
+  /** The root node's model and effort (left out or null: the default). Branches copy them. */
+  model: modelField.optional(),
+  effort: effortField.optional(),
 });
 
 /** Rename and/or archive a project (PATCH /projects/:id). */
@@ -65,13 +75,6 @@ export const renameNodeSchema = z.object({
 export const markReadSchema = z.object({
   messageId: z.string().min(1),
 });
-
-/** Effort levels, lowest to highest. */
-export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly Effort[];
-
-/** A model id (null: the provider's default). The server checks it against the provider's list. */
-const modelField = z.string().trim().min(1).max(100).nullable();
-const effortField = z.enum(EFFORTS).nullable();
 
 /** Change the model and effort a node's next replies use. */
 export const modelSettingsSchema = z.object({

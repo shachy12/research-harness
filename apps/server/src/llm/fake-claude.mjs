@@ -44,6 +44,10 @@ if (flag('--input-format') === 'stream-json') {
         },
       });
     }
+    if (text.includes('compile')) {
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't3', name: 'Bash', input: { command: 'latexmk -pdf main.tex', description: 'Compile' } }] } });
+      out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't3', content: 'x'.repeat(5000) + 'Output written on main.pdf' }] } });
+    }
     if (text.includes('attached')) {
       out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Read', input: { file_path: 'C:\\p\\.harness\\uploads\\paper.pdf' } }] } });
       out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: [{ type: 'text', text: 'PDF content' }] }] } });

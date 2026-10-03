@@ -12,6 +12,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * search, so the tool display can be tried out. Results are drafted from the last reply.
  * "[test:limit]" in a message acts as if the usage limit was reached, "[test:warning]" as if it is close.
  * "[test:edit]" adds a line to `placeholder-notes.md` in the node's editable copy, so the changes view and Apply can be tried out.
+ * "[test:shell]" shows a sample shell command with its output (nothing is run).
  * It offers Claude's model ids so the pickers can be tried out, and says which one it was asked for.
  */
 export class PlaceholderProvider implements LLMProvider {
@@ -60,6 +61,13 @@ export class PlaceholderProvider implements LLMProvider {
       await pause(20 * this.wordDelayMs);
       appendFileSync(file, `- ${new Date().toISOString()}: ${question.split('\n')[0].slice(0, 80)}\n`);
       yield { type: 'tool', call: { ...call, status: 'done' } };
+    }
+    if (question.includes('[test:shell]')) {
+      // Shows a shell command row with output; nothing is run.
+      const call = { id: `shell-${Date.now()}`, name: 'shell', input: 'latexmk -pdf main.tex', status: 'running' as const, results: [] };
+      yield { type: 'tool', call };
+      await pause(20 * this.wordDelayMs);
+      yield { type: 'tool', call: { ...call, status: 'done', output: 'Latexmk: All targets (main.pdf) are up-to-date\n(placeholder, nothing was run)' } };
     }
     if (/search/i.test(question)) {
       const call = { id: `sample-${Date.now()}`, name: 'web_search', input: question.slice(0, 80), status: 'running' as const, results: [] };

@@ -36,9 +36,8 @@ Per-node model and effort is done (see "Done" below and "Model and effort per no
 
 ## 11. Shell tool (file editing is done)
 File editing with a git worktree per node is built (2026-10-03, see "File editing" in CLAUDE.md). Left:
-- **Shell tool** (Bash on macOS/Linux, PowerShell or Git Bash on Windows), e.g. to compile LaTeX and run scripts. Claude Code has it; enabling it is a flag change (`--tools`). Run it with the node's copy as its working folder. Permission rules can't stop a shell command from writing outside the copy: options are Claude Code's sandbox (`--settings` with `sandbox` config: writes limited to given folders, network off or allow-listed; macOS Seatbelt / Linux bubblewrap; check native Windows support), an allow-list of commands (`latexmk`, `python`, …), or asking the user per command.
+- **Shell tool: done (2026-10-03), every command allowed** (the user's call). Not enforced: staying inside the copy (only asked in `editNote`). Safer options for later: Claude Code's sandbox (`--settings` with `sandbox` config; macOS/Linux/WSL only), an allow-list, or per-command approval (below). Nodes started before keep their old edit note, so they have the tool but weren't told to run commands in their copy.
 - **Approval in the GUI:** `-p` mode refuses anything not pre-approved. `--permission-prompt-tool mcp__harness__approve` (our MCP server, see item 5) lets the harness show "Branch X wants to run `latexmk main.tex` — Allow once / Always for this project / Deny" instead of failing.
-- **Open questions:** which shell commands need no approval; network access from the shell.
 - **Apply automatically** unless there's a conflict (the user's idea for later); now Apply is always a separate step.
 - **Apply conflicts:** Apply aborts on a conflict with the user's branch. Possible: a "resolve" child node whose copy merges the user's branch in (markers for the model to resolve), then Apply that.
 - **Clean-up:** "Start over" leaves the old nodes' branches and worktrees (open nodes' copies under `.harness/work/`). A command to remove branches that are applied or belong to deleted nodes, with a confirm (never delete unapplied work silently).

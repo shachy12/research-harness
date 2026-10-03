@@ -2,16 +2,20 @@ import { MANAGED_DIR } from '@harness/shared'
 import { FolderOpenIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { useCheckFolder, useCreateProject, usePickFolder } from '@/api/queries'
+import { useCheckFolder, useCreateProject, useModels, useNewFolderPath, usePickFolder } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { ModelFields } from '@/features/model/ModelFields'
+import type { ModelSettings } from '@/features/model/modelSettings'
 
 /** Start a new project (its own graph, starting from an empty root), then open it. */
 export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
   const [folder, setFolder] = useState('')
+  const [settings, setSettings] = useState<ModelSettings>({ model: null, effort: null })
+  const models = useModels()
   const create = useCreateProject()
   const pick = usePickFolder()
   const navigate = useNavigate()
@@ -21,11 +25,18 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
     const timer = setTimeout(() => setCheckedFolder(folder.trim()), 400)
     return () => clearTimeout(timer)
   }, [folder])
+  // Likewise the name, for the path of the folder Harness would make.
+  const [typedName, setTypedName] = useState('')
+  useEffect(() => {
+    const timer = setTimeout(() => setTypedName(name.trim()), 300)
+    return () => clearTimeout(timer)
+  }, [name])
+  const newFolder = useNewFolderPath(typedName, typedName !== '' && !folder.trim())
 
   const submit = () => {
     if (!name.trim()) return
     create.mutate(
-      { name: name.trim(), folder: folder.trim() || undefined },
+      { name: name.trim(), folder: folder.trim() || undefined, ...settings },
       {
         onSuccess: (project) => {
           onClose()
@@ -67,7 +78,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
             <div className="flex gap-2">
               <Input
                 id="project-folder"
-                placeholder="A new folder named after the project"
+                placeholder="Empty: Harness creates a new folder"
                 value={folder}
                 onChange={(e) => setFolder(e.target.value)}
                 className="font-mono text-xs"
@@ -94,14 +105,27 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
               <p className="text-xs text-merge">Choose the folder in the dialog. If you don't see it, it may be behind this window.</p>
             )}
             {pick.isError && <p className="text-xs text-destructive">{pick.error.message}</p>}
+            {typedName && !folder.trim() && newFolder.data && (
+              <p className="text-xs text-muted-foreground">
+                Will create: <code className="break-all text-foreground">{newFolder.data.path}</code>
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">
-              Leave empty and Harness makes a new folder named after the project. Or choose an existing folder, such as your LaTeX
+              Or choose an existing folder, such as your LaTeX
               repository: the model can then read the files in it (and only those). Each node edits its own copy of the
               folder (in <code>{MANAGED_DIR}</code>), and your files change only when you apply a node's changes. You
               can't change the folder later.
             </p>
             <FolderNotice folder={checkedFolder} />
           </div>
+          {models.data && (
+            <div className="grid gap-1.5">
+              <ModelFields value={settings} catalog={models.data} onChange={setSettings} idPrefix="new-project" />
+              <p className="text-xs text-muted-foreground">
+                For the main thread. Branches start with their parent's setting, and you can change it on any node later.
+              </p>
+            </div>
+          )}
           {create.isError && <p className="text-sm text-destructive">{create.error.message}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>

@@ -28,14 +28,19 @@ export class Workspaces {
    * the name stays reserved. Renaming the project later keeps the folder (sessions belong to it).
    */
   newFolder(projectName: string): string {
+    const folder = this.newFolderPath(projectName);
+    mkdirSync(folder);
+    return folder;
+  }
+
+  /** The folder `newFolder` would make for this name right now, without making it (the new-project dialog shows it). */
+  newFolderPath(projectName: string): string {
     const parent = path.join(this.dataDir, 'projects');
     mkdirSync(parent, { recursive: true });
     let name = safeFileName(projectName);
     // Windows reserves these device names, with or without an extension.
     if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name)) name = `${name}-project`;
-    const folder = path.join(parent, uniqueName(parent, name));
-    mkdirSync(folder);
-    return folder;
+    return path.join(parent, uniqueName(parent, name));
   }
 
   uploadsOf(project: Project): string {

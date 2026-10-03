@@ -83,6 +83,8 @@ export function editNote(edit: {
     `[You can edit files in this conversation. Your own copy of the project is at ${edit.dir} (git branch ${edit.branch}); ` +
       'it holds the project files as the conversation above left them. Make every change there, with Edit or Write and absolute paths. ' +
       'The project folder itself and other copies are read-only for you; copies mentioned earlier in the conversation belong to other branches. ' +
+      `You can also run shell commands with the Bash tool (e.g. to compile or run scripts): run them inside your copy (cd ${shellPath(edit.dir)} first) and never change files outside it. ` +
+      'Files that commands create there (build outputs too) count as your changes, so delete the ones the user should not get. ' +
       'Your changes are saved after each reply; the user reviews them and applies them to the project.',
   ];
   const changed = edit.merged.filter((m) => m.files.length > 0);
@@ -93,6 +95,11 @@ export function editNote(edit: {
     lines.push(`Some changes overlap: ${edit.conflicts.join(', ')} ${edit.conflicts.length === 1 ? 'has' : 'have'} git conflict markers (<<<<<<<, =======, >>>>>>>). Resolve them in your copy first, keeping what each branch meant.`);
   }
   return `${lines.join('\n')}]`;
+}
+
+/** A path as the shell needs it, quoted; forward slashes work in Git Bash on Windows too. */
+function shellPath(p: string): string {
+  return `"${p.replaceAll('\\', '/')}"`;
 }
 
 export function segmentTurns(seg: Segment): ChatTurn[] {

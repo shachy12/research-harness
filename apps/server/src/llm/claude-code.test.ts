@@ -65,16 +65,24 @@ describe('ClaudeCodeProvider', () => {
     expect(start.argv).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch']));
   });
 
-  it("with file editing, adds Edit/Write and allows them only inside the node's copy", async () => {
+  it("with file editing, adds Edit/Write (only inside the node's copy) and Bash", async () => {
     const signal = new AbortController().signal;
     const edit = { dir: path.join(dir, '.harness', 'work', 'abcd1234') };
     await collect(provider.streamReply({ ...ctx('first', NEW), edit }, signal));
     await collect(provider.streamReply({ ...ctx('second', NEW), edit }, signal)); // same process
     const starts = log().filter((e) => e.argv).map((e) => e.argv!);
     expect(starts).toHaveLength(1);
-    expect(starts[0]).toEqual(expect.arrayContaining(['--tools', 'WebSearch,WebFetch,Read,Glob,Grep,Edit,Write']));
-    expect(starts[0]).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch,Edit(.harness/work/abcd1234/**)']));
+    expect(starts[0]).toEqual(expect.arrayContaining(['--tools', 'WebSearch,WebFetch,Read,Glob,Grep,Edit,Write,Bash']));
+    expect(starts[0]).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch,Edit(.harness/work/abcd1234/**),Bash']));
     expect(() => toolArgs(dir, { dir: path.dirname(dir) })).toThrow(/inside the project folder/);
+  });
+
+  it('reports shell commands with the end of their output', async () => {
+    const events = await collect(provider.streamReply(ctx('compile the thesis', NEW), new AbortController().signal));
+    const call = events.flatMap((e) => (e.type === 'tool' ? [e.call] : [])).at(-1)!;
+    expect(call).toMatchObject({ name: 'shell', input: 'latexmk -pdf main.tex', status: 'done' });
+    expect(call.output).toMatch(/^….*Output written on main\.pdf$/s);
+    expect(call.output!.length).toBe(4001);
   });
 
   it('reports file reads as tool calls', async () => {

@@ -540,6 +540,17 @@ describe('API', () => {
     expect((await call('POST', '/projects', { name: '  ' })).status).toBe(400);
   });
 
+  it("shows the folder a new project would get, and sets the root's model and effort", async () => {
+    const preview = (await call<{ path: string }>('GET', `/projects/new-folder?name=${encodeURIComponent('Second paper')}`)).data;
+    const { data } = await call<Project>('POST', '/projects', { name: 'Second paper', model: 'big', effort: 'low' });
+    expect(data.folder).toBe(preview.path);
+    const [root] = (await call<GraphResponse>('GET', `/projects/${data.id}/graph`)).data.nodes;
+    expect([root.model, root.effort]).toEqual(['big', 'low']);
+    // Checked against the provider's list, before anything is created.
+    expect((await call('POST', '/projects', { name: 'Bad', model: 'big', effort: 'max' })).status).toBe(400);
+    expect((await call<ProjectSummary[]>('GET', '/projects')).data.some((p) => p.name === 'Bad')).toBe(false);
+  });
+
   it('creates a project in a folder the user chose, and refuses unsuitable folders', async () => {
     const folder = mkdtempSync(path.join(tmpdir(), 'harness-thesis-'));
     const { status, data } = await call<Project>('POST', '/projects', { name: 'Thesis', folder });

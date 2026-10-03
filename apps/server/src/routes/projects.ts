@@ -35,7 +35,8 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
 
     // A new project starts with an empty root node. Its folder is fixed from now on.
     .post('/', zValidator('json', createProjectSchema), async (c) => {
-      const { name, folder } = c.req.valid('json');
+      const { name, folder, model = null, effort = null } = c.req.valid('json');
+      await checkModel(model, effort);
       let chosen: string;
       if (folder) {
         const checked = workspaces.checkFolder(folder);
@@ -45,6 +46,8 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
         chosen = workspaces.newFolder(name); // named after the project
       }
       const project = repo.createProject(randomUUID(), name, 'Main thread', chosen);
+      // The root's setting plays the project default's role: branches copy it.
+      if (model !== null || effort !== null) repo.setModelSettings(repo.listNodes(project.id)[0].id, model, effort);
       workspaces.prepare(project);
       // Nodes edit their own git copies of the folder, so it must be a repository (the dialog said so).
       try {
@@ -54,6 +57,9 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       }
       return c.json(project, 201);
     })
+
+    // The folder a project with this name would get if no folder is chosen (the new-project dialog shows it).
+    .get('/new-folder', (c) => c.json({ path: workspaces.newFolderPath(c.req.query('name')?.trim() || 'New project') }))
 
     // What creating a project on this folder does in git (the new-project dialog shows it first).
     .post('/check-folder', zValidator('json', checkFolderSchema), async (c) => {

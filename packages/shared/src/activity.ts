@@ -8,6 +8,7 @@ const TOOL_ACTIVITY: Record<string, string> = {
   search_files: 'Searching files',
   edit_file: 'Editing',
   write_file: 'Writing',
+  shell: 'Running',
 };
 
 /** Tools that act on one local file, shown by its name. */

@@ -42,7 +42,12 @@ const PRE_APPROVED = 'WebSearch,WebFetch';
 // With an editable copy (always, see worktrees.ts), Edit and Write are added and allowed only inside it
 // (`Edit(<path>/**)`, relative to the working folder; the rule covers Write too, verified with CLI
 // 2.1.287). Edits anywhere else are refused like reads outside the folder.
-const EDIT_TOOLS = 'Edit,Write';
+// Bash comes with them and is allowed for every command (the user's call, 2026-10-03): unlike Edit,
+// a shell command can't be limited to the copy, so editNote asks the model to run commands there.
+// On Windows the CLI runs it in Git Bash.
+const EDIT_TOOLS = 'Edit,Write,Bash';
+/** How much of a shell command's output a tool call keeps (the end, where errors usually are). */
+const SHELL_OUTPUT_CHARS = 4000;
 
 // The CLI's schema validator rejects the `$schema` dialect line zod adds, so leave it out.
 const { $schema: _dialect, ...RESULT_JSON_SCHEMA } = z.toJSONSchema(branchResultSchema);
@@ -63,6 +68,7 @@ const TOOL_NAMES: Record<string, string> = {
   Grep: 'search_files',
   Edit: 'edit_file',
   Write: 'write_file',
+  Bash: 'shell',
 };
 
 /**
@@ -236,7 +242,7 @@ export function toolArgs(workDir: string, edit: ReplyContext['edit']): string[] 
   if (!edit) return ['--tools', TOOLS, '--allowedTools', PRE_APPROVED];
   const rel = path.relative(workDir, edit.dir).split(path.sep).join('/');
   if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`The editable copy must be inside the project folder: ${edit.dir}`);
-  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},Edit(${rel}/**)`];
+  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},Edit(${rel}/**),Bash`];
 }
 
 function sessionArgs(plan: SessionPlan): string[] {
@@ -348,7 +354,7 @@ class LiveProcess {
 
 type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: { query?: string; url?: string; file_path?: string; pattern?: string } }
+  | { type: 'tool_use'; id: string; name: string; input: { query?: string; url?: string; file_path?: string; pattern?: string; command?: string } }
   | { type: 'tool_result'; tool_use_id: string; is_error?: boolean; content: string | { type: string; text?: string }[] }
   | { type: string };
 
@@ -443,7 +449,7 @@ export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
         const call: ToolCall = {
           id: block.id,
           name: TOOL_NAMES[block.name],
-          input: block.input.query ?? block.input.url ?? block.input.file_path ?? block.input.pattern ?? '',
+          input: block.input.query ?? block.input.url ?? block.input.file_path ?? block.input.pattern ?? block.input.command ?? '',
           status: 'running',
           results: [],
         };
@@ -453,6 +459,7 @@ export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
         const call = state.calls.get(block.tool_use_id);
         if (!call) continue;
         const text = typeof block.content === 'string' ? block.content : block.content.map((c) => c.text ?? '').join('\n');
+        if (call.name === 'shell') call.output = text.length > SHELL_OUTPUT_CHARS ? `…${text.slice(-SHELL_OUTPUT_CHARS)}` : text;
         if (block.is_error) {
           call.status = 'error';
           call.error = text.slice(0, 200);

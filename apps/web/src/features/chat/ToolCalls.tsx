@@ -1,5 +1,5 @@
 import type { ToolCall } from '@harness/shared'
-import { CircleAlertIcon, FilePenIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, FolderSearchIcon, GlobeIcon, LoaderIcon, SearchIcon } from 'lucide-react'
+import { CircleAlertIcon, FilePenIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, FolderSearchIcon, GlobeIcon, LoaderIcon, SearchIcon, TerminalIcon } from 'lucide-react'
 
 const LABEL: Record<string, { icon: typeof SearchIcon; running: string; done: string }> = {
   web_search: { icon: SearchIcon, running: 'Searching', done: 'Searched' },
@@ -9,6 +9,7 @@ const LABEL: Record<string, { icon: typeof SearchIcon; running: string; done: st
   search_files: { icon: FileSearchIcon, running: 'Searching files', done: 'Searched files' },
   edit_file: { icon: FilePenIcon, running: 'Editing', done: 'Edited' },
   write_file: { icon: FilePlusIcon, running: 'Writing', done: 'Wrote' },
+  shell: { icon: TerminalIcon, running: 'Running', done: 'Ran' },
 }
 
 /** Tools that act on one local file. */
@@ -50,8 +51,13 @@ function ToolCallRow({ call }: { call: ToolCall }) {
       <div className="flex flex-col gap-1 border-t px-2.5 py-2">
         {call.error && <p className="text-destructive">Error: {call.error.replaceAll('_', ' ')}</p>}
         {call.status === 'running' && <p className="text-muted-foreground">Waiting for results…</p>}
-        {call.status === 'done' && call.results.length === 0 && (
-          <p className="font-mono break-all text-muted-foreground">{call.input}</p>
+        {(call.status === 'done' || call.output) && call.results.length === 0 && (
+          <p className="font-mono break-all text-muted-foreground">{call.name === 'shell' ? `$ ${call.input}` : call.input}</p>
+        )}
+        {call.output && (
+          <pre className="max-h-64 overflow-auto rounded bg-background/60 p-2 font-mono whitespace-pre-wrap break-all text-foreground/80">
+            {call.output}
+          </pre>
         )}
         {call.results.map((r) => (
           <a
