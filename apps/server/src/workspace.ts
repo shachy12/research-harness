@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { Attachment, Project } from '@harness/shared';
+import { MANAGED_DIR, type Attachment, type Project } from '@harness/shared';
 
 /**
  * Each project has a working folder. The model (Claude Code) runs there and can read files inside
- * it, and nowhere else. Our managed data lives in `.harness/` inside that folder:
+ * it, and nowhere else. Our managed data lives in `MANAGED_DIR` (`.harness/`) inside that folder:
  *
  *   <folder>/.harness/uploads/   files the user attached to messages
  *
@@ -22,7 +22,12 @@ export class Workspaces {
   }
 
   uploadsOf(project: Project): string {
-    return path.join(this.folderOf(project), '.harness', 'uploads');
+    return path.join(this.managedOf(project), 'uploads');
+  }
+
+  /** The project's managed-data folder (`<folder>/.harness`). */
+  managedOf(project: Project): string {
+    return path.join(this.folderOf(project), MANAGED_DIR);
   }
 
   /**
@@ -45,7 +50,7 @@ export class Workspaces {
 
   /** Create the folder structure if needed; returns the working folder. */
   prepare(project: Project): string {
-    const harness = path.join(this.folderOf(project), '.harness');
+    const harness = this.managedOf(project);
     mkdirSync(path.join(harness, 'uploads'), { recursive: true });
     // If the folder is a git repository, keep our managed data out of it.
     const gitignore = path.join(harness, '.gitignore');

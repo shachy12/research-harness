@@ -1,3 +1,4 @@
+import { MANAGED_DIR } from '@harness/shared'
 import { FolderOpenIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
@@ -84,7 +85,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
             <p className="text-xs text-muted-foreground">
               Leave empty and Harness makes a new folder for it. Or choose an existing folder, such as your LaTeX
               repository: the model can then read the files in it (and only those). Uploads go to a{' '}
-              <code>.harness</code> folder inside it. You can't change the folder later.
+              <code>{MANAGED_DIR}</code> folder inside it. You can't change the folder later.
             </p>
           </div>
           {create.isError && <p className="text-sm text-destructive">{create.error.message}</p>}

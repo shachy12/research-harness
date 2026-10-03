@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { Project } from '@harness/shared';
+import { MANAGED_DIR, type Project } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Workspaces, safeFileName } from './workspace.ts';
 
@@ -32,10 +32,10 @@ describe('Workspaces', () => {
     expect(workspaces.folderOf({ ...project, folder: 'D:\\Research' })).toBe('D:\\Research');
   });
 
-  it('creates .harness/uploads and a .gitignore that keeps it out of git', () => {
+  it('creates the managed uploads folder and a .gitignore that keeps it out of git', () => {
     const folder = workspaces.prepare(project);
-    expect(existsSync(path.join(folder, '.harness', 'uploads'))).toBe(true);
-    expect(readFileSync(path.join(folder, '.harness', '.gitignore'), 'utf8')).toContain('*');
+    expect(existsSync(path.join(folder, MANAGED_DIR, 'uploads'))).toBe(true);
+    expect(readFileSync(path.join(folder, MANAGED_DIR, '.gitignore'), 'utf8')).toContain('*');
   });
 
   it('saves uploads under safe, unique names', () => {

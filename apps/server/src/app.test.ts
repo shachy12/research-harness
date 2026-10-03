@@ -4,6 +4,7 @@ import path from 'node:path';
 import type {
   Attachment, BranchResult, ChatStreamEvent, DagNode, GraphResponse, ModelsResponse, NodeDetail, Project, ProjectSummary,
 } from '@harness/shared';
+import { MANAGED_DIR } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.ts';
 import type { ChatRequest } from './dag/prompt.ts';
@@ -314,7 +315,7 @@ describe('API', () => {
     expect((await call('GET', `/nodes/${rootId}`)).status).toBe(404);
   });
 
-  it("uploads files into the project's .harness/uploads and attaches them to a message", async () => {
+  it("uploads files into the project's managed uploads folder and attaches them to a message", async () => {
     const { status, data: paper } = await upload('paper.tex', '\\section{Intro}');
     expect(status).toBe(201);
     expect(paper.name).toBe('paper.tex');
@@ -336,7 +337,7 @@ describe('API', () => {
     expect(ctx.message).toContain('Review my draft');
     expect(ctx.message).toContain(paper.path);
     expect(path.resolve(paper.path).startsWith(path.resolve(ctx.workDir))).toBe(true);
-    expect(existsSync(path.join(ctx.workDir, '.harness', '.gitignore'))).toBe(true);
+    expect(existsSync(path.join(ctx.workDir, MANAGED_DIR, '.gitignore'))).toBe(true);
     // Later prompts keep the note, so a replay (or another provider) still knows about the file.
     expect(llm.requests.at(-1)!.turns[0].content).toContain(paper.path);
   });
@@ -508,7 +509,7 @@ describe('API', () => {
     const { status, data } = await call<Project>('POST', '/projects', { name: 'Thesis', folder });
     expect(status).toBe(201);
     expect(path.resolve(data.folder!)).toBe(path.resolve(realpathSync(folder)));
-    expect(existsSync(path.join(folder, '.harness', '.gitignore'))).toBe(true);
+    expect(existsSync(path.join(folder, MANAGED_DIR, '.gitignore'))).toBe(true);
 
     for (const bad of ['relative/path', path.join(folder, 'missing'), path.parse(folder).root]) {
       expect((await call('POST', '/projects', { name: 'Bad', folder: bad })).status).toBe(400);

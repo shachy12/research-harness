@@ -35,7 +35,17 @@ Per-node model and effort is done (see "Done" below and "Model and effort per no
 - **Side note:** each model's hidden reasoning is tied to that model; after a switch the earlier turns' reasoning isn't reused (the visible conversation is). Nothing to show, but the first reply after a switch rethinks from the transcript.
 
 ## 11. Shell and file-editing tools (discuss before implementing)
-Add a shell tool (Bash on macOS/Linux, PowerShell or Git Bash on Windows) and Write/Edit, e.g. to compile LaTeX, run scripts and edit the paper. Branches run in parallel in the same project folder, so writes can collide. **Design to be agreed with the user first.**
+Add a shell tool (Bash on macOS/Linux, PowerShell or Git Bash on Windows) and Write/Edit, e.g. to compile LaTeX, run scripts and edit the paper. Branches run in parallel in the same project folder, so writes can collide.
+
+**Decided (2026-10-03), first step = git worktree per branch, edits only (no shell yet, so no MCP needed):**
+- Each node that writes gets a `git worktree` at `<folder>/.harness/work/<nodeId>/` on its own branch, forked from the parent's commit (the parent is frozen). Claude Code's cwd **stays the project folder**, so session fork/resume and the prompt cache keep working; Write/Edit are pre-approved only inside the node's worktree (`Edit(<path>/**)`), and the system prompt / branch note tells the model "your editable copy is at …". Risk to check early with a real LaTeX repo: the model mixing up main-folder paths (from inherited context) and worktree paths.
+- Project folder not a git repo → run `git init` (plus an initial commit of the current files) when editing is first used.
+- Finishing a branch commits its worktree; the result lists the changed files. Merging nodes = `git merge` of their branches, conflicts shown in the merge dialog.
+- "Apply to project" is always a separate user step after seeing the diff (later maybe automatic unless there's a conflict).
+- The git branches are normal branches in the user's repo: `harness/<nodeId>` (derived from `MANAGED_DIR`; git branch names can't have a part starting with `.`, so `.harness/<nodeId>` is invalid). Considered and dropped: detached worktrees (`--detach`) with hidden refs `refs/harness/<nodeId>`. They only hide the branches from `git branch`, at the cost of moving the refs by hand after every commit (commits the model makes itself could be lost) and losing git's "one branch per worktree" check.
+- Considered and dropped: acquire/release file locks in one shared folder. Sibling branches would edit on top of each other, so they stop being separate alternatives and can't be discarded or merged selectively. Also locks held while waiting for the user (starvation), deadlocks, Claude Code's Edit tool not knowing about the locks, and shell commands (build outputs) getting around them.
+- The managed folder's name is one constant, `MANAGED_DIR` in `packages/shared/src/workspace.ts` (done), because it will change later.
+- Later: shell tool + approvals via the harness MCP server (below, and item 5).
 - **Claude Code already has the tools** (`Bash`/`PowerShell`, `Write`, `Edit`); enabling them is a flag change (`--tools`). The real work is permissions and collisions. API provider: we would implement them as custom tools ourselves.
 - **Collisions, options:**
   - **(a) Per-branch work folder (recommended starting point):** each node that writes gets `.harness/work/<nodeId>/`; Write/Edit are allowed only there via permission rules (`Edit(<path>/**)`), Read stays allowed in the whole project. The cwd stays the project folder, so Claude Code sessions still resume/fork (sessions are per folder). Outputs are listed in the result and passed along on merge; "Apply to project" copies chosen files into the real folder (user action, with a diff).
@@ -45,7 +55,7 @@ Add a shell tool (Bash on macOS/Linux, PowerShell or Git Bash on Windows) and Wr
 - **Shell is the hard part:** permission rules can't stop a shell command from writing outside the work folder. Options: Claude Code's sandbox (`--settings` with `sandbox` config: filesystem writes limited to given folders, network off or allow-listed; macOS Seatbelt / Linux bubblewrap; check native Windows support), an allow-list of commands (`latexmk`, `python`, …), or asking the user per command.
 - **Approval in the GUI:** `-p` mode refuses anything not pre-approved. `--permission-prompt-tool mcp__harness__approve` (our MCP server, see item 5) lets the harness show "Branch X wants to run `latexmk main.tex` — Allow once / Always for this project / Deny" in the app instead of failing.
 - **Safety for real data:** never let tools write to `data/` or outside the project; prefer that the project folder be a git repo when writing is on, so everything is undoable.
-- **Open questions:** which option for collisions; should writes reach the real folder automatically or always via "Apply"; which shell commands need no approval; network access from the shell.
+- **Open questions:** which shell commands need no approval; network access from the shell.
 
 ## 12. macOS and Linux support
 The code is mostly portable already (Node, `node:sqlite`, paths via `node:path`, uploads split on both `\` and `/`). What's left:
