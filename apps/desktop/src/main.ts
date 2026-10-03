@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron';
 import { startServer, type RunningServer } from '../../server/src/server.ts';
+import { useLoginShellPath } from './shell-path.ts';
 
 /**
  * The desktop app: Electron's main process runs the Harness server in-process (the same code as
@@ -50,6 +51,8 @@ if (!app.requestSingleInstanceLock()) {
 
 async function main() {
   try {
+    // Started from the Dock or a launcher, a packaged app lacks your shell's PATH (claude, git, latexmk…).
+    if (app.isPackaged) useLoginShellPath();
     loadEnvFiles();
     server = await listen();
     openWindow(devUrl ?? server.url);

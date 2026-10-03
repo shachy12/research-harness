@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionPlan } from '../dag/session.ts';
-import { ClaudeCodeProvider, cliEnv, mapEvent, newTurnState, parseSearchLinks, toolArgs } from './claude-code.ts';
+import { ClaudeCodeProvider, cliEnv, findClaudeExecutable, mapEvent, newTurnState, parseSearchLinks, toolArgs } from './claude-code.ts';
 import type { ReplyContext, ReplyEvent } from './provider.ts';
 
 const FAKE_CLI = path.join(import.meta.dirname, 'fake-claude.mjs');
@@ -321,5 +321,32 @@ describe('parseSearchLinks', () => {
 
   it('returns nothing when there is no list', () => {
     expect(parseSearchLinks('no links here')).toEqual([]);
+  });
+});
+
+describe('a missing CLI', () => {
+  it('says how to fix it', async () => {
+    const missing = new ClaudeCodeProvider({ command: '/nonexistent/claude', model: 'claude-opus-5-5', effort: 'high' });
+    await expect(missing.suggestTitle({ prompt: 'hi', reply: 'hello', workDir: tmpdir() }, new AbortController().signal)).rejects.toThrow(/HARNESS_CLAUDE_PATH/);
+  });
+});
+
+describe('findClaudeExecutable', () => {
+  it('prefers HARNESS_CLAUDE_PATH', () => {
+    expect(findClaudeExecutable({ HARNESS_CLAUDE_PATH: '/x/claude', HOME: '/nowhere' }, 'linux')).toBe('/x/claude');
+  });
+
+  it('finds the native install in ~/.local/bin on macOS and Linux (not on PATH when started from a launcher)', () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'harness-home-'));
+    mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+    writeFileSync(path.join(home, '.local', 'bin', 'claude'), '');
+    for (const platform of ['linux', 'darwin'] as const) {
+      expect(findClaudeExecutable({ HOME: home }, platform)).toBe(path.join(home, '.local', 'bin', 'claude'));
+    }
+  });
+
+  it('falls back to `claude` on PATH', () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'harness-home-'));
+    expect(findClaudeExecutable({ HOME: home }, 'win32')).toBe('claude');
   });
 });

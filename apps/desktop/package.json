@@ -4,6 +4,8 @@
   "private": true,
   "description": "Harness: DAG-based LLM research chat",
   "author": "Shahar Shechter",
+  "homepage": "https://github.com/shachy12/harness",
+  "desktopName": "harness.desktop",
   "type": "module",
   "main": "dist/main.mjs",
   "scripts": {

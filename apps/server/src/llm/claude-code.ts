@@ -104,14 +104,40 @@ export function cliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv 
   return { ...Object.fromEntries(kept), CLAUDE_CODE_TETHER_LIVE: 'false' };
 }
 
-/** Locate the Claude Code CLI: HARNESS_CLAUDE_PATH, the npm global install on Windows, or `claude` on PATH. */
-export function findClaudeExecutable(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * Locate the Claude Code CLI: HARNESS_CLAUDE_PATH, the npm global install on Windows, the usual
+ * install places on macOS and Linux, else `claude` on PATH.
+ *
+ * The macOS/Linux places matter for the desktop app: started from the Dock, Finder or a desktop
+ * launcher, it doesn't get the PATH your shell sets up (e.g. ~/.local/bin, Homebrew), so a bare
+ * `claude` would not be found.
+ */
+export function findClaudeExecutable(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
   if (env.HARNESS_CLAUDE_PATH) return env.HARNESS_CLAUDE_PATH;
-  if (process.platform === 'win32' && env.APPDATA) {
-    const exe = path.join(env.APPDATA, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
-    if (existsSync(exe)) return exe;
+  if (platform === 'win32') {
+    if (env.APPDATA) {
+      const exe = path.join(env.APPDATA, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+      if (existsSync(exe)) return exe;
+    }
+    return 'claude';
   }
-  return 'claude';
+  const home = env.HOME;
+  const candidates = [
+    home && path.join(home, '.local', 'bin', 'claude'), // the native installer (claude.ai/install.sh)
+    home && path.join(home, '.claude', 'local', 'claude'), // older local installs (`claude migrate-installer`)
+    env.NPM_CONFIG_PREFIX && path.join(env.NPM_CONFIG_PREFIX, 'bin', 'claude'),
+    home && path.join(home, '.npm-global', 'bin', 'claude'),
+    '/opt/homebrew/bin/claude', // Homebrew on Apple silicon
+    '/usr/local/bin/claude', // Homebrew on Intel Macs, npm's default prefix
+    '/usr/bin/claude',
+  ];
+  return candidates.find((file): file is string => !!file && existsSync(file)) ?? 'claude';
+}
+
+/** A failure to start the CLI, with a message the user can act on when it isn't installed. */
+export function spawnError(err: Error, command: string): Error {
+  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return err;
+  return new Error(`Claude Code was not found (tried "${command}"). Install it (https://claude.com/claude-code), or set HARNESS_CLAUDE_PATH in .env to the full path of the claude executable.`);
 }
 
 export class ClaudeCodeProvider implements LLMProvider {
@@ -334,7 +360,10 @@ class LiveProcess {
       this.stderr = (this.stderr + d.toString()).slice(-2000);
     });
     createInterface({ input: this.child.stdout }).on('line', (line) => this.handleLine(line));
-    this.child.on('error', (err) => this.finishTurn(err));
+    this.child.on('error', (err) => this.finishTurn(spawnError(err, options.command)));
+    // Writing to a CLI that already exited fails with EPIPE (on Linux and macOS); unhandled, that
+    // would crash the server. The 'close' handler reports the failure instead.
+    this.child.stdin.on('error', () => {});
     this.child.on('close', (code) => {
       this.exited = true;
       this.clearIdle();
@@ -592,7 +621,8 @@ function runOnce(options: ClaudeCodeOptions, cwd: string, args: string[], prompt
     child.stderr.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-2000)));
     const onAbort = () => child.kill();
     signal.addEventListener('abort', onAbort, { once: true });
-    child.on('error', reject);
+    child.on('error', (err) => reject(spawnError(err, options.command)));
+    child.stdin.on('error', () => {}); // EPIPE if the CLI exits early; 'close' reports it
     child.on('close', (code) => {
       signal.removeEventListener('abort', onAbort);
       // A failed run may still print its JSON answer (is_error: true) on stdout; the caller reads it.
