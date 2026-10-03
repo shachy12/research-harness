@@ -11,7 +11,10 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present",
+    "desktop": "npm run build -w @harness/web && npm start -w @harness/desktop",
+    "desktop:dev": "concurrently -k -n web,app -c green,magenta \"npm run dev -w @harness/web\" \"npm run dev -w @harness/desktop\"",
+    "desktop:dist": "npm run dist -w @harness/desktop"
   },
   "devDependencies": {
     "concurrently": "^10.0.5",

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 /**
  * Open the operating system's own "choose a folder" dialog and return the chosen path (null if
  * cancelled). A web page can't learn real folder paths, but this server runs on the user's machine,
- * so it can show the native dialog for the page. (In Electron, `dialog.showOpenDialog` replaces this.)
+ * so it can show the native dialog for the page. (The desktop app passes Electron's `dialog.showOpenDialog` instead; see `startServer`.)
  *
  *   Windows: the standard Explorer folder dialog (IFileOpenDialog with FOS_PICKFOLDERS), via PowerShell
  *   macOS:   `choose folder` (AppleScript)

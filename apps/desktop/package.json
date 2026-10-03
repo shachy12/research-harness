@@ -1,0 +1,28 @@
+{
+  "name": "@harness/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Harness: DAG-based LLM research chat",
+  "author": "Shahar Shechter",
+  "type": "module",
+  "main": "dist/main.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node build.mjs && electron .",
+    "dev": "node build.mjs && node dev.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "pack": "node build.mjs --web && electron-builder --dir",
+    "dist": "node build.mjs --web && electron-builder"
+  },
+  "devDependencies": {
+    "@harness/server": "^0.0.0",
+    "@harness/shared": "^0.0.0",
+    "@types/node": "^24.19.0",
+    "electron": "44.5.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "vitest": "^5.0.3"
+  },
+  "productName": "Harness"
+}

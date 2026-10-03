@@ -185,6 +185,7 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 
 ## Commands (run from the repo root)
 - `npm run dev`: starts the server (http://localhost:8787) and the web UI (http://localhost:5173, which proxies `/api` to the server)
+- `npm run desktop`: builds the web UI and opens the Electron app (the server runs inside it). `npm run desktop:dev`: Vite + Electron with hot reload. `npm run desktop:dist`: installer in `apps/desktop/release/` (NSIS / dmg / AppImage for the OS it runs on).
 - `npm run typecheck`, `npm test` (server and web Vitest), `npm run lint`
 - On Windows, Vite's file watcher sometimes misses an edit (the preview keeps serving the old module): `touch` the file.
 - Add a dependency to one app: `npm install <pkg> -w @harness/web` (or `@harness/server`)
@@ -195,15 +196,24 @@ Clickable mockup: `mockups/gui-mockup.html` (published at https://claude.ai/arti
 npm workspaces monorepo, started from Vite's `react-ts` template + shadcn/ui. Requires Node 24 LTS.
 - `apps/web`: React UI. `src/app` (router, AppShell with the projects sidebar), `src/features/*` (projects, graph, chat, fork, result, merge, rename; later settings), `src/components/ui` (shadcn), `src/api` (typed server client).
 - `apps/server`: Hono backend. `routes/` (projects: graph, merge; nodes: detail, rename, chat stream, fork, draft/approve result), `dag/` (core context-assembly logic: pure functions, heavily tested with Vitest), `llm/` (provider interface, Anthropic adapter, placeholder), `tools/` (MCP, later), `db/` (`node:sqlite`, migrations via `PRAGMA user_version`, `Repository`). `createApp({ repo, llm })` takes its dependencies so tests use `:memory:` and a fake provider.
-- `apps/desktop`: Electron (later).
+- `apps/desktop`: the Electron app (see "Desktop app").
 - `packages/shared`: types/schemas shared by web and server.
 - `data/`: local SQLite file (gitignored).
 - Routes: `/` (opens the last project), `/projects/:id` (graph), `/projects/:id/nodes/:nodeId` (full-window chat), `/settings` (later).
 
+## Desktop app (`apps/desktop`, built 2026-10-03)
+- Electron's main process (`src/main.ts`, bundled by `build.mjs` with esbuild into `dist/main.mjs`, server included, so a packaged app has no `node_modules`) runs the server in-process through `startServer` (`apps/server/src/server.ts`; `index.ts` is now a thin wrapper) and opens a window. No preload and no IPC: the web UI is unchanged and talks to `/api` as before; `contextIsolation` and `sandbox` are on. Links to other sites open in the OS browser; navigation inside the window is limited to the app's origin.
+- **Folder dialogs are Electron's** (`dialog.showOpenDialog`, passed as `startServer`'s `pickFolder` and used by `POST /system/pick-folder`), so choosing a folder is native on every OS; the per-OS helper in `system/folder-picker.ts` is only used by the standalone server.
+- The server listens on `127.0.0.1` only, on a fixed port (47831, `HARNESS_SERVER_PORT` overrides; a free port if taken). The port is fixed because the page's origin owns its localStorage (last project, sidebar state). `startServer` takes port 0 and reads the real port back, because the model CLI's harness MCP URL needs it (`serverUrl` is a getter in `createApp`'s deps).
+- Production serves the built web UI from the same server (`static.ts`: files from `apps/web/dist`, `index.html` for unknown paths so the UI's routes work; packaged: `resources/web`). Dev mode (`HARNESS_DEV_URL`, set by `dev.mjs`) loads the Vite page instead, with the server on 8787 for Vite's `/api` proxy (the proxy targets `127.0.0.1`, not `localhost`, which can resolve to IPv6).
+- Settings: `.env` files are read with `process.loadEnvFile`, never overriding variables already set: `HARNESS_ENV_FILE`, the repository's `.env` (from source only), `<userData>/.env`. Data folder: `HARNESS_DATA_DIR`, else from source the repository's `data/` (same as `npm run dev`; **don't run both at once**, they would run models and write the database separately), packaged `<userData>/data`. A packaged app starts with an empty database; point `HARNESS_DATA_DIR` at the old `data/` folder (in `<userData>/.env`) to use existing projects.
+- One instance only (`requestSingleInstanceLock`; a second launch focuses the first). Quitting stops the server and model processes first (5 s cap).
+- Verified (Windows): `node:sqlite` works in Electron 44's Node; the packaged `release/win-unpacked/Harness.exe` serves the UI and API; closing the window frees the port. Electron's binary download is skipped by npm 12's blocked install scripts: run `node node_modules/electron/install.js` once after `npm install`. electron-builder needs an exact Electron version (pinned in `apps/desktop/package.json`; keep it equal to the installed one). Not done: app icon (default Electron one), code signing, auto-update, macOS/Linux packaging, Claude Code lookup outside Windows (IMPROVEMENTS.md item on `findClaudeExecutable`), a native menu.
+
 ## Roadmap
 1. MVP (done 2026-10-01): one project, graph view, full-window chat with real streaming (Claude through the provider interface), fork / finish / merge, SQLite persistence. API key from `.env`.
 2. MCP tools in all branches (explicitly deferred out of the MVP), more providers.
-3. Wrap in Electron.
+3. Wrap in Electron (first version done 2026-10-03: runs, packages for Windows; macOS/Linux builds and icons not tried yet).
 4. Later ideas: autonomous (subagent) branches the user can step into, merge templates (synthesize / compare / pick best), a per-node context-budget display.
 
 ## Protecting the user's research (since 2026-10-02 the user does real research in this app)

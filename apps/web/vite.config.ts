@@ -14,6 +14,6 @@ export default defineConfig({
     port: Number(process.env.HARNESS_WEB_PORT ?? 5173),
     strictPort: true,
     // In dev, the UI calls /api/... and Vite forwards it to the Node server.
-    proxy: { '/api': `http://localhost:${process.env.HARNESS_SERVER_PORT ?? 8787}` },
+    proxy: { '/api': `http://127.0.0.1:${process.env.HARNESS_SERVER_PORT ?? 8787}` },
   },
 })
