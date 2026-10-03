@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inheritedItems } from './context.ts';
+import { inheritedItems, skippedByMerge } from './context.ts';
 import { buildGraph, result } from './fixtures.ts';
 import { lowestCommonAncestor } from './graph.ts';
 import { SYSTEM_PROMPT, branchStartNote, buildChatRequest } from './prompt.ts';
@@ -106,5 +106,38 @@ describe('buildChatRequest', () => {
   it('appends extra turns at the end', () => {
     const req = buildChatRequest(graph, 'C', [{ role: 'user', content: 'extra' }]);
     expect(req.turns.at(-1)).toEqual({ role: 'user', content: 'extra' });
+  });
+});
+
+describe('merge notes', () => {
+  //        root
+  //       /    \
+  //      A      B        (B finished)
+  //     / \
+  //   A1   A2            (both finished)
+  // X = A1 + B (cross-level, base root), Y = A1 + A2 (base A)
+  const nested = buildGraph({
+    root: [[], { status: 'frozen', messages: ['u: scope', 'a: two areas'] }],
+    A: [['root'], { status: 'frozen', messages: ['u: area a', 'a: a details'] }],
+    A1: [['A'], { result: result('A1 found'), messages: ['u: a1', 'a: a1 answer'] }],
+    A2: [['A'], { result: result('A2 found'), messages: ['u: a2', 'a: a2 answer'] }],
+    B: [['root'], { result: result('B found'), messages: ['u: b', 'a: b answer'] }],
+    X: [['A1', 'B'], { messages: ['u: combine'] }],
+    Y: [['A1', 'A2'], { messages: ['u: combine'] }],
+  });
+
+  it('lists the conversations a merge leaves out: the branches and what lies between them and the base', () => {
+    expect(skippedByMerge(nested, ['A1', 'B'], 'root').map((n) => n.id)).toEqual(['A', 'B', 'A1']);
+    expect(skippedByMerge(nested, ['A1', 'A2'], 'A').map((n) => n.id)).toEqual(['A1', 'A2']);
+    expect(skippedByMerge(graph, ['A', 'B'], 'root').map((n) => n.id)).toEqual(['A', 'B']);
+  });
+
+  it('names them with their node ids in the merge turn, for ask_node', () => {
+    const merge = buildChatRequest(nested, 'X').turns.find((t) => t.content.startsWith('[Merge node'))!.content;
+    expect(merge).toContain('- "Title A" (node A)');
+    expect(merge).toContain('- "Title A1" (node A1)');
+    expect(merge).toContain('ask_node');
+    // A's conversation itself is not in X's context (only A1's result, written with it in view).
+    expect(buildChatRequest(nested, 'X').turns.map((t) => t.content).join('\n')).not.toContain('a details');
   });
 });

@@ -198,6 +198,13 @@ export function useFork() {
 }
 
 /** Answer a node's last message again (its reply failed or was stopped before writing anything). */
+/** Allow or deny the ask_node questions a reply waits on (the reply's stream shows the outcome). */
+export function useDecideAsks() {
+  return useMutation({
+    mutationFn: ({ nodeId, allow }: { nodeId: string; allow: boolean }) => api.post(`/nodes/${nodeId}/asks`, { allow }),
+  })
+}
+
 export function useRetry() {
   const refresh = useRefreshAll()
   return useMutation({

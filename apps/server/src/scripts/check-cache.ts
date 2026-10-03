@@ -11,20 +11,35 @@
  * these fail again, check whether that variable still exists in the CLI.
  *
  * It goes through ClaudeCodeProvider itself, with CLAUDE* variables set as if started from inside
- * Claude Code (they broke caching before; the provider must remove them).
+ * Claude Code (they broke caching before; the provider must remove them). Each node runs as in the
+ * app: with its own editable copy (so siblings differ in --allowedTools) and the harness MCP tools,
+ * served here by stand-ins.
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import { branchStartNote } from '../dag/prompt.ts';
 import type { SessionPlan } from '../dag/session.ts';
 import { ClaudeCodeProvider, findClaudeExecutable } from '../llm/claude-code.ts';
 import type { ReplyContext, TokenUsage } from '../llm/provider.ts';
+import { harnessMcpRoutes } from '../tools/harness.ts';
 
 const model = process.argv[2] ?? 'claude-haiku-4-5';
 const workDir = mkdtempSync(path.join(tmpdir(), 'harness-cache-check-'));
 Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'check-cache', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' });
 const provider = new ClaudeCodeProvider({ command: findClaudeExecutable(), model, effort: 'high' });
+
+// The harness MCP server with stand-in tools: only its tool definitions matter here.
+const mcpApp = new Hono().basePath('/api').route('/mcp', harnessMcpRoutes({
+  proposeBranches: () => 'Proposed.',
+  ask: async () => 'No answer (cache check).',
+}, () => true));
+const mcpServer = serve({ fetch: mcpApp.fetch, port: 0, hostname: '127.0.0.1' });
+await new Promise((resolve) => mcpServer.once('listening', resolve));
+const mcpBase = `http://127.0.0.1:${(mcpServer.address() as AddressInfo).port}/api/mcp`;
 
 // A conversation long enough to be cached (Haiku caches from 4,096 tokens). Fresh each run, so
 // nothing is left over from an earlier run.
@@ -34,8 +49,15 @@ const filler = Array.from({ length: 600 }, (_, i) => `Note ${i} (${stamp}): the 
 const NEW: SessionPlan = { mode: 'new', sessionId: null, preamble: null, transcript: [] };
 const forkOf = (sessionId: string, title: string): SessionPlan => ({ mode: 'fork', sessionId, preamble: branchStartNote(title), transcript: [] });
 
+/** A node's context as the app builds it: its own copy to edit, and its MCP endpoint. */
+function contextOf(nodeId: string, message: string, session: SessionPlan): ReplyContext {
+  const dir = path.join(workDir, '.harness', 'work', nodeId);
+  mkdirSync(dir, { recursive: true });
+  return { nodeId, workDir, message, session, request: { system: '', turns: [] }, model, effort: null, edit: { dir }, mcpUrl: `${mcpBase}/${nodeId}` };
+}
+
 async function reply(nodeId: string, message: string, session: SessionPlan) {
-  const ctx: ReplyContext = { nodeId, workDir, message, session, request: { system: '', turns: [] }, model, effort: null, edit: null };
+  const ctx = contextOf(nodeId, message, session);
   let usage: TokenUsage | null = null;
   let sessionId = '';
   for await (const e of provider.streamReply(ctx, new AbortController().signal)) {
@@ -59,6 +81,7 @@ console.log(`Claude Code prompt-cache check on ${model}\n`);
 process.on('uncaughtException', (err) => {
   console.error(`\nStopped: ${err instanceof Error ? err.message : String(err)}`);
   provider.dispose();
+  mcpServer.close();
   process.exit(2);
 });
 
@@ -89,6 +112,16 @@ check(true, 'sibling branches started together (second)', d.usage.cacheRead >= 0
 const resumed = await reply('parent', 'Say OK again.', { mode: 'resume', sessionId: first.sessionId, preamble: null, transcript: [] });
 check(true, 'parent resumed in a new process', resumed.usage.cacheRead >= 0.8 * parentSize, resumed.usage);
 
+// 5. ask_node: another node's question is answered by a throwaway fork of the parent's session,
+//    which reads the parent's cache (same tools, though the edit tools aren't allowed there).
+const asked = await provider.askNode(
+  { ...contextOf('parent', 'Which shelf holds item 350? Answer in one line.', { mode: 'resume', sessionId: first.sessionId, preamble: null, transcript: [] }), edit: null },
+  new AbortController().signal,
+);
+if (!asked.usage) throw new Error('no usage reported for ask_node');
+check(true, 'ask_node answered from the parent', asked.usage.cacheRead >= 0.8 * parentSize, asked.usage);
+
 provider.dispose();
+mcpServer.close();
 console.log(failed ? '\nA required check failed: branches no longer share the prompt cache.' : '\nRequired checks passed.');
 process.exit(failed ? 1 : 0);

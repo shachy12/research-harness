@@ -7,7 +7,7 @@ import { z } from 'zod/v4';
 import { SYSTEM_PROMPT } from '../dag/prompt.ts';
 import { type SessionPlan, firstMessage } from '../dag/session.ts';
 import { classifyError, toIsoTime } from './errors.ts';
-import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './provider.ts';
+import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent, TokenUsage } from './provider.ts';
 import { TITLE_SYSTEM_PROMPT, titleRequest } from './title.ts';
 
 /**
@@ -48,6 +48,17 @@ const PRE_APPROVED = 'WebSearch,WebFetch';
 const EDIT_TOOLS = 'Edit,Write,Bash';
 /** How much of a shell command's output a tool call keeps (the end, where errors usually are). */
 const SHELL_OUTPUT_CHARS = 4000;
+/** How much of a node's answer an ask_node call keeps for the chat. */
+const ANSWER_CHARS = 20_000;
+
+// The harness's own MCP server (tools/harness.ts): fork_branches and ask_node, both pre-approved.
+// Tool definitions are part of the cached prompt prefix, so every node gets the same ones; the node
+// id is only in the server's URL, which the model never sees. `alwaysLoad` keeps the tools in the
+// prompt instead of behind the CLI's tool search.
+const HARNESS_MCP = 'harness';
+const HARNESS_ALLOWED = `mcp__${HARNESS_MCP}`;
+/** ask_node waits for another node's answer, which can take several minutes on a large model. */
+const HARNESS_TOOL_TIMEOUT_MS = 30 * 60_000;
 
 // The CLI's schema validator rejects the `$schema` dialect line zod adds, so leave it out.
 const { $schema: _dialect, ...RESULT_JSON_SCHEMA } = z.toJSONSchema(branchResultSchema);
@@ -69,6 +80,8 @@ const TOOL_NAMES: Record<string, string> = {
   Edit: 'edit_file',
   Write: 'write_file',
   Bash: 'shell',
+  [`mcp__${HARNESS_MCP}__fork_branches`]: 'fork_branches',
+  [`mcp__${HARNESS_MCP}__ask_node`]: 'ask_node',
 };
 
 /**
@@ -125,7 +138,7 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 
   async *streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
-    const flags = [...this.modelArgs(ctx), ...toolArgs(ctx.workDir, ctx.edit)];
+    const flags = [...this.modelArgs(ctx), ...toolArgs(ctx.workDir, ctx.edit, ctx.mcpUrl)];
     let proc = this.live.get(ctx.nodeId);
     // The model, effort and tools are fixed when the process starts: after a change, restart it (the
     // session resumes; the new model re-reads the history without the cache either way).
@@ -174,6 +187,26 @@ export class ClaudeCodeProvider implements LLMProvider {
     const result = branchResultSchema.safeParse(value);
     if (!result.success) throw new Error('The model could not draft a result for this branch. Write it by hand instead.');
     return result.data;
+  }
+
+  async askNode(ctx: ReplyContext, signal: AbortSignal): Promise<{ answer: string; usage: TokenUsage | null }> {
+    // Like a result draft: a throwaway fork of the node's session, so its conversation stays as it
+    // was. The same flags and tool list as the node's own replies (the edit tools listed but not
+    // allowed), so the fork reads the node's cached prompt.
+    const plan = ctx.session;
+    const args = [
+      '-p',
+      ...(plan.mode === 'resume' ? ['--resume', plan.sessionId!, '--fork-session'] : sessionArgs(plan)),
+      '--no-session-persistence',
+      '--output-format', 'json',
+      ...this.commonArgs(),
+      ...this.modelArgs(ctx),
+      ...answerToolArgs(ctx.mcpUrl),
+    ];
+    const prompt = plan.mode === 'resume' ? ctx.message : firstMessage(plan, ctx.message);
+    const parsed = await runJson(this.options, ctx.workDir, args, prompt, signal);
+    if (parsed.is_error) throw classifyError(new Error(parsed.result || 'Claude Code could not answer the question.'));
+    return { answer: parsed.result ?? '', usage: parsed.usage ? toUsage(parsed.usage) : null };
   }
 
   async suggestTitle({ prompt, reply, workDir }: { prompt: string; reply: string; workDir: string }, signal: AbortSignal): Promise<string> {
@@ -237,12 +270,30 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 }
 
-/** --tools / --allowedTools: read-only, or with Edit/Write allowed only inside the node's copy. */
-export function toolArgs(workDir: string, edit: ReplyContext['edit']): string[] {
-  if (!edit) return ['--tools', TOOLS, '--allowedTools', PRE_APPROVED];
+/**
+ * --tools / --allowedTools: read-only, or with Edit/Write allowed only inside the node's copy; plus
+ * the harness MCP server when there is one.
+ */
+export function toolArgs(workDir: string, edit: ReplyContext['edit'], mcpUrl: string | null = null): string[] {
+  const harness = mcpUrl ? `,${HARNESS_ALLOWED}` : '';
+  if (!edit) return ['--tools', TOOLS, '--allowedTools', PRE_APPROVED + harness, ...mcpArgs(mcpUrl)];
   const rel = path.relative(workDir, edit.dir).split(path.sep).join('/');
   if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`The editable copy must be inside the project folder: ${edit.dir}`);
-  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},Edit(${rel}/**),Bash`];
+  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},Edit(${rel}/**),Bash${harness}`, ...mcpArgs(mcpUrl)];
+}
+
+/**
+ * Tools for answering a question from a finished or forked node (ask_node): the same list as an
+ * editing node's (so the cached prompt matches), with nothing beyond reading and the web allowed.
+ */
+export function answerToolArgs(mcpUrl: string | null): string[] {
+  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', PRE_APPROVED + (mcpUrl ? `,${HARNESS_ALLOWED}` : ''), ...mcpArgs(mcpUrl)];
+}
+
+function mcpArgs(url: string | null): string[] {
+  if (!url) return [];
+  const config = { mcpServers: { [HARNESS_MCP]: { type: 'http', url, timeout: HARNESS_TOOL_TIMEOUT_MS, alwaysLoad: true } } };
+  return ['--mcp-config', JSON.stringify(config)];
 }
 
 function sessionArgs(plan: SessionPlan): string[] {
@@ -327,10 +378,7 @@ class LiveProcess {
       // A usage limit, a missing login etc. arrive as a failed result (and as an `error` on the
       // assistant message); classifyError turns them into a message the user can act on.
       const text = result.result || this.turnState.apiError || `Claude Code error: ${result.subtype}`;
-      if (result.usage) {
-        const u = result.usage;
-        turn.push({ type: 'usage', usage: { input: u.input_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 } });
-      }
+      if (result.usage) turn.push({ type: 'usage', usage: toUsage(result.usage) });
       this.finishTurn(failed ? classifyError(new Error(text), this.turnState.resetsAt) : undefined);
       return;
     }
@@ -354,9 +402,32 @@ class LiveProcess {
 
 type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: { query?: string; url?: string; file_path?: string; pattern?: string; command?: string } }
+  | { type: 'tool_use'; id: string; name: string; input: ToolInput }
   | { type: 'tool_result'; tool_use_id: string; is_error?: boolean; content: string | { type: string; text?: string }[] }
   | { type: string };
+
+/** The tool inputs we show (built-in tools, and the harness MCP tools). */
+type ToolInput = {
+  query?: string; url?: string; file_path?: string; pattern?: string; command?: string;
+  nodeId?: string; question?: string; branches?: { title?: string; prompt?: string }[];
+};
+
+/** What a tool call shows as its input. */
+function shownInput(name: string, input: ToolInput): string {
+  if (name === 'ask_node') return input.question ?? '';
+  if (name === 'fork_branches') {
+    return (input.branches ?? []).map((b) => b.title || b.prompt?.split('\n')[0] || '').join(' · ');
+  }
+  return input.query ?? input.url ?? input.file_path ?? input.pattern ?? input.command ?? '';
+}
+
+type CliUsage = { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+
+const toUsage = (u: CliUsage): TokenUsage => ({
+  input: u.input_tokens ?? 0,
+  cacheRead: u.cache_read_input_tokens ?? 0,
+  cacheWrite: u.cache_creation_input_tokens ?? 0,
+});
 
 type ResultEvent = {
   type: 'result';
@@ -364,7 +435,7 @@ type ResultEvent = {
   is_error?: boolean;
   result?: string;
   session_id?: string;
-  usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+  usage?: CliUsage;
 };
 
 /** Sent when the account's usage limit changes: fine, close to it, or reached. */
@@ -446,13 +517,10 @@ export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
     const out: ReplyEvent[] = [];
     for (const block of event.message.content) {
       if (block.type === 'tool_use' && 'name' in block && TOOL_NAMES[block.name]) {
-        const call: ToolCall = {
-          id: block.id,
-          name: TOOL_NAMES[block.name],
-          input: block.input.query ?? block.input.url ?? block.input.file_path ?? block.input.pattern ?? block.input.command ?? '',
-          status: 'running',
-          results: [],
-        };
+        const name = TOOL_NAMES[block.name];
+        const call: ToolCall = { id: block.id, name, input: shownInput(name, block.input), status: 'running', results: [] };
+        // The title is filled in by the run manager, which knows the graph.
+        if (name === 'ask_node' && block.input.nodeId) call.node = { id: block.input.nodeId, title: '' };
         state.calls.set(call.id, call);
         out.push({ type: 'tool', call: { ...call } });
       } else if (block.type === 'tool_result' && 'tool_use_id' in block) {
@@ -460,6 +528,7 @@ export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
         if (!call) continue;
         const text = typeof block.content === 'string' ? block.content : block.content.map((c) => c.text ?? '').join('\n');
         if (call.name === 'shell') call.output = text.length > SHELL_OUTPUT_CHARS ? `…${text.slice(-SHELL_OUTPUT_CHARS)}` : text;
+        if (call.name === 'ask_node') call.output = text.length > ANSWER_CHARS ? `${text.slice(0, ANSWER_CHARS)}…` : text;
         if (block.is_error) {
           call.status = 'error';
           call.error = text.slice(0, 200);
@@ -497,7 +566,7 @@ export function parseSearchLinks(text: string): { title: string; url: string }[]
   return [];
 }
 
-type OneShotResult = { is_error?: boolean; result?: string; structured_output?: unknown };
+type OneShotResult = { is_error?: boolean; result?: string; structured_output?: unknown; usage?: CliUsage };
 
 /** Run the CLI once in `--output-format json` mode and parse its answer. */
 async function runJson(options: ClaudeCodeOptions, cwd: string, args: string[], prompt: string, signal: AbortSignal): Promise<OneShotResult> {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Attachment, BranchResult, DagNode, Effort, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
+import type { Attachment, BranchResult, DagNode, Effort, ForkProposal, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
@@ -13,7 +13,7 @@ interface NodeRow {
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
-  model: string | null; created_at: string;
+  model: string | null; fork_proposal: string | null; created_at: string;
 }
 
 // projects.editing (migration 8) was a per-project switch for file editing, dropped the same day: editing is always on.
@@ -43,6 +43,7 @@ const toMessage = (r: MessageRow): Message => ({
   toolCalls: JSON.parse(r.tool_calls) as ToolCall[],
   attachments: JSON.parse(r.attachments) as Attachment[],
   model: r.model,
+  forkProposal: r.fork_proposal ? (JSON.parse(r.fork_proposal) as ForkProposal) : null,
   createdAt: r.created_at,
 });
 
@@ -199,12 +200,15 @@ export class Repository {
       toolCalls = [],
       attachments = [],
       model = null,
-    }: { toolCalls?: ToolCall[]; attachments?: Attachment[]; model?: string | null } = {},
+      forkProposal = null,
+    }: { toolCalls?: ToolCall[]; attachments?: Attachment[]; model?: string | null; forkProposal?: ForkProposal | null } = {},
   ): Message {
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, nodeId, role, content, JSON.stringify(toolCalls), JSON.stringify(attachments), model, now());
+      .prepare(`INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, model, fork_proposal, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, nodeId, role, content, JSON.stringify(toolCalls), JSON.stringify(attachments), model,
+        forkProposal ? JSON.stringify(forkProposal) : null, now());
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as unknown as MessageRow;
     return toMessage(row);
   }

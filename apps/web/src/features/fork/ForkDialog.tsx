@@ -1,4 +1,4 @@
-import { type Attachment, type DagNode, type ModelsResponse, titleFromPrompt } from '@harness/shared'
+import { type Attachment, type DagNode, type ForkProposal, type ModelsResponse, titleFromPrompt } from '@harness/shared'
 import { XIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
@@ -30,6 +30,8 @@ interface Branch {
   item: ForkItem | null
   /** What the user typed over the message; null: it still follows the shared instruction. */
   edited: string | null
+  /** The title the model proposed for it (fork_branches); null: from the item or the message. */
+  title: string | null
   /** Finished uploads, reported by the branch's field. */
   attachments: Attachment[]
   uploading: boolean
@@ -39,7 +41,16 @@ interface Branch {
 
 let nextId = 0
 const newBranch = (settings: ModelSettings, item: ForkItem | null = null): Branch =>
-  ({ id: nextId++, item, edited: null, attachments: [], uploading: false, settings })
+  ({ id: nextId++, item, edited: null, title: null, attachments: [], uploading: false, settings })
+
+/** The branches to start with: one per picked item, one per proposed branch, or one empty one. */
+function initialBranches(settings: ModelSettings, items?: ForkItem[], proposal?: ForkProposal): Branch[] {
+  if (items?.length) return items.map((item) => newBranch(settings, item))
+  if (proposal?.branches.length) {
+    return proposal.branches.map((b) => ({ ...newBranch(settings), edited: b.prompt, title: b.title }))
+  }
+  return [newBranch(settings)]
+}
 
 /**
  * Write each branch's first message, optionally with files. Creating the branches sends those
@@ -49,20 +60,22 @@ const newBranch = (settings: ModelSettings, item: ForkItem | null = null): Branc
  * what every branch does with its item; each branch's message is that instruction plus its item
  * (the item goes where `{item}` is, if the instruction has it), and can be edited per branch. The
  * branch is named after its item, not after the shared instruction.
+ *
+ * With `proposal` (branches the model proposed with its fork_branches tool) the fields start with
+ * the proposed messages and titles, for the user to edit before starting them.
  */
-export function ForkDialog({ node, inheritedTokens, existingBranches, items, onClose }: {
+export function ForkDialog({ node, inheritedTokens, existingBranches, items, proposal, onClose }: {
   node: DagNode
   inheritedTokens: number
   /** Branches the node already has; forking again adds to them. */
   existingBranches: number
   items?: ForkItem[]
+  proposal?: ForkProposal
   onClose: () => void
 }) {
   const [instruction, setInstruction] = useState('')
   const parentSettings: ModelSettings = { model: node.model, effort: node.effort }
-  const [branches, setBranches] = useState<Branch[]>(() =>
-    items?.length ? items.map((item) => newBranch(parentSettings, item)) : [newBranch(parentSettings)],
-  )
+  const [branches, setBranches] = useState<Branch[]>(() => initialBranches(parentSettings, items, proposal))
   const fork = useFork()
   const catalog = useModels().data
   const navigate = useNavigate()
@@ -80,7 +93,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
         nodeId: node.id,
         branches: filled.map((b) => ({
           prompt: promptOf(b).trim(),
-          title: b.item?.title,
+          title: b.item?.title ?? b.title ?? undefined,
           attachments: b.attachments,
           // Left out, the server gives the branch its parent's setting.
           ...(b.settings.model !== node.model || b.settings.effort !== node.effort ? b.settings : {}),
@@ -98,7 +111,9 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, onC
           <DialogDescription>
             {items?.length
               ? `${items.length} selected ${items.length === 1 ? 'item becomes a branch' : 'items become branches'}: each one's first message is your instruction followed by the item.`
-              : "Write the first message for each new branch, and attach files a branch should read."}
+              : proposal?.branches.length
+                ? 'The branches the model proposed. Edit their first messages, add or remove branches, and attach files a branch should read.'
+                : "Write the first message for each new branch, and attach files a branch should read."}
             {` Each branch starts with this node's full context (~${inheritedTokens.toLocaleString()} tokens) and begins working as soon as you create it.`}
             {existingBranches > 0
               ? ` This node already has ${existingBranches} ${existingBranches === 1 ? 'branch; new ones are added next to it.' : 'branches; new ones are added next to them.'}`
@@ -252,7 +267,7 @@ function BranchField({ index, projectId, branch, prompt, catalog, parentSettings
       <PendingAttachments files={files.files} onRemove={files.remove} />
       {prompt.trim() && (
         <span className="truncate text-xs text-muted-foreground">
-          Title: {branch.item?.title ?? titleFromPrompt(prompt)}
+          Title: {branch.item?.title ?? branch.title ?? titleFromPrompt(prompt)}
         </span>
       )}
       {catalog && (

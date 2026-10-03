@@ -35,7 +35,14 @@ export function resultsTurn(seg: Extract<Segment, { kind: 'results' }>): string 
   return [
     `[Merge node "${seg.mergeNode.promptTitle}". The following branches were explored separately and are merged here. Only their final results are included, not their transcripts.]`,
     ...blocks,
+    ...(seg.skipped.length ? [skippedNote(seg.skipped)] : []),
   ].join('\n\n');
+}
+
+/** Which conversations the merge left out, by node id, so the model can ask them (ask_node tool). */
+function skippedNote(nodes: { id: string; promptTitle: string }[]): string {
+  const list = nodes.map((n) => `- "${n.promptTitle}" (node ${n.id})`).join('\n');
+  return `[These conversations led to the results above but are not in your context:\n${list}\nIf you need details a result leaves out (evidence, reasoning, exact numbers, sources), ask the node with the ask_node tool.]`;
 }
 
 /**

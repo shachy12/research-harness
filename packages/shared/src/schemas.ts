@@ -113,6 +113,11 @@ export const mergeSchema = z.object({
   effort: effortField.optional(),
 });
 
+/** Allow or deny the ask_node questions a reply is waiting on. */
+export const askDecisionSchema = z.object({
+  allow: z.boolean(),
+});
+
 export const mergePreviewSchema = z.object({
   parentIds: z.array(z.string().min(1)).min(2),
 });

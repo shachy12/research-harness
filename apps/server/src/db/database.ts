@@ -81,6 +81,8 @@ export const MIGRATIONS: string[] = [
   `,
   // 9: archived projects (listed in the sidebar's collapsed "Archives" group).
   `ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`,
+  // 10: branches the model proposed with its fork_branches tool in a reply (JSON ForkProposal).
+  `ALTER TABLE messages ADD COLUMN fork_proposal TEXT;`,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

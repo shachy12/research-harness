@@ -123,21 +123,36 @@ export interface Message {
   attachments: Attachment[];
   /** The model that wrote this reply, as the provider reported it (assistant messages; null on older ones). */
   model: string | null;
+  /** Branches the model proposed with its fork_branches tool while writing this reply (null: none). */
+  forkProposal: ForkProposal | null;
   createdAt: string;
+}
+
+/**
+ * Branches the model proposed (fork_branches tool on the harness MCP server). Nothing is created
+ * until the user reviews them in the fork dialog and starts them.
+ */
+export interface ForkProposal {
+  branches: { prompt: string; title: string | null }[];
 }
 
 /** A tool the model ran: web search/fetch, a file read or edit, a shell command. */
 export interface ToolCall {
   id: string;
-  /** 'web_search', 'web_fetch', 'read_file', 'find_files', 'search_files', 'edit_file', 'write_file' or 'shell'. */
+  /**
+   * 'web_search', 'web_fetch', 'read_file', 'find_files', 'search_files', 'edit_file', 'write_file',
+   * 'shell', or the harness tools 'fork_branches' and 'ask_node'.
+   */
   name: string;
-  /** The search query, URL, file path, search pattern or shell command. */
+  /** The search query, URL, file path, search pattern, shell command, or the question asked of a node. */
   input: string;
   status: 'running' | 'done' | 'error';
   results: { title: string; url: string }[];
   error?: string;
-  /** What a shell command printed (its end, if long). */
+  /** What a shell command printed (its end, if long), or a node's answer (ask_node). */
   output?: string;
+  /** The node an ask_node call asked (its title as of the call). */
+  node?: { id: string; title: string };
 }
 
 /** One entry of what a node inherits: an ancestor's message, or a merged branch's result. */
@@ -170,12 +185,29 @@ export interface NodeSummary extends DagNode {
   run: RunStatus | null;
   /** A model-written title is on its way (refresh to show it). */
   titlePending: boolean;
+  /** Branches the model proposed in its last reply, waiting for the user (0: none). */
+  proposedBranches: number;
 }
 
 export interface RunStatus {
   startedAt: string;
   /** e.g. "Thinking", "Searching the web: …", "Reading main.tex", "Writing". */
   activity: string;
+  /** The reply is paused until the user allows more ask_node questions (null: not waiting). */
+  approval: AskApproval | null;
+}
+
+/**
+ * ask_node questions waiting for the user's approval: the reply already used its free questions
+ * (HARNESS_ASK_LIMIT per user message). Questions asked at the same moment wait together.
+ */
+export interface AskApproval {
+  /** `from`: the node asking, when it isn't the reply's own node (a node it asked asks further). */
+  asks: { nodeTitle: string; from: string | null; question: string }[];
+  /** How many questions one message allows without approval (also what approving grants again). */
+  limit: number;
+  /** When the questions count as unanswered (the user is probably away). */
+  expiresAt: string;
 }
 
 export interface GraphResponse {
@@ -223,7 +255,9 @@ export interface NodeDetail {
  */
 export type ChatStreamEvent =
   | { type: 'user'; message: Message }
-  | { type: 'snapshot'; text: string; toolCalls: ToolCall[]; thinking: boolean; startedAt: string }
+  | { type: 'snapshot'; text: string; toolCalls: ToolCall[]; thinking: boolean; startedAt: string; approval: AskApproval | null }
+  /** ask_node questions now wait for the user's approval, or no longer do (null). */
+  | { type: 'approval'; approval: AskApproval | null }
   | { type: 'idle' }
   | { type: 'thinking' }
   | { type: 'delta'; text: string }

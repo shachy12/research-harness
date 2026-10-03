@@ -47,6 +47,14 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
             {n.unread} new
           </span>
         )}
+        {n.proposedBranches > 0 && (
+          <span
+            className="rounded-full bg-open-soft px-1.5 py-0.5 text-[10px] leading-none font-semibold text-open"
+            title="The model proposed branches; open the chat to review and start them"
+          >
+            ⑂ {n.proposedBranches} proposed
+          </span>
+        )}
         {n.filesChanged ? (
           <span
             className="ml-auto flex items-center gap-0.5 font-mono text-[11px] text-open"
@@ -75,6 +83,10 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
       {mergeSelected ? (
         <div className="self-start rounded-full bg-merge-soft px-2 py-0.5 text-[11px] font-semibold text-merge">
           ⑃ Selected for merge
+        </div>
+      ) : n.run?.approval ? (
+        <div className="self-start rounded-full bg-merge-soft px-2 py-0.5 text-[11px] font-semibold text-merge">
+          ! Needs your approval to ask other nodes
         </div>
       ) : n.run ? (
         <div className="line-clamp-2 text-xs text-open italic">{n.run.activity}…</div>

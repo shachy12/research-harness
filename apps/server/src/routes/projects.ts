@@ -157,6 +157,8 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
           running: runs.isRunning(node.id),
           run: runs.status(node.id),
           titlePending: runs.isTitling(node.id),
+          // Branches the model proposed in its last reply, while the user can still start them.
+          proposedBranches: node.status === 'open' ? (messages.findLast((m) => m.role === 'assistant')?.forkProposal?.branches.length ?? 0) : 0,
         };
       });
       return c.json<GraphResponse>({ project, nodes, usage: runs.usage() });

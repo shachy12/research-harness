@@ -76,6 +76,14 @@ if (flag('--input-format') === 'stream-json') {
       out({ type: 'result', subtype: 'success', is_error: false, result: '"Fake Title."' });
       return;
     }
+    if (!argv.includes('--json-schema')) {
+      // A plain answer (ask_node).
+      out({
+        type: 'result', subtype: 'success', is_error: false, result: `answer: ${prompt.slice(-20)}`, session_id: sessionId,
+        usage: { input_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 10 },
+      });
+      return;
+    }
     out({
       type: 'result',
       subtype: 'success',

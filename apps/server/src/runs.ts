@@ -2,6 +2,7 @@ import {
   type Attachment,
   type ChatStreamEvent,
   type DagNode,
+  type ForkProposal,
   type Message,
   type RunStatus,
   type ToolCall,
@@ -32,9 +33,40 @@ interface Run {
   sessionId: string | null;
   /** The model that answered, as the provider reported it. */
   model: string | null;
+  /** Branches the model proposed (fork_branches); saved with the reply. */
+  proposal: ForkProposal | null;
+  /** ask_node questions this reply may still ask without the user's approval. */
+  asksLeft: number;
+  /** Questions waiting for the user's approval (see allowAsk). */
+  waiting: WaitingAsks | null;
   listeners: Set<Listener>;
   abort: AbortController;
 }
+
+/** What happened to a question that needed the user's approval ('away': no answer in time). */
+type AskDecision = 'allowed' | 'denied' | 'away';
+
+interface WaitingAsks {
+  asks: { nodeTitle: string; from: string | null; question: string; decide: (d: AskDecision) => void }[];
+  expiresAt: string;
+  timer: NodeJS.Timeout;
+}
+
+/** Whether an ask_node question may run, and if so how many free ones are left in the reply. */
+export type AskOutcome = { decision: 'allowed'; freeLeft: number } | { decision: 'denied' | 'away' | 'no-reply' };
+
+export interface RunOptions {
+  /** A node's endpoint on the harness MCP server; `chargeTo` is the reply its questions count against. */
+  mcpUrl?: (nodeId: string, chargeTo?: string) => string | null;
+  /** ask_node questions one user message allows without approval (HARNESS_ASK_LIMIT). */
+  askLimit?: number;
+  /** How long a question waits for the user's approval before it counts as unanswered. */
+  approvalTimeoutMs?: number;
+}
+
+export const DEFAULT_ASK_LIMIT = 3;
+// The CLI gives up on an MCP tool call after 30 minutes (the timeout in its --mcp-config).
+const APPROVAL_TIMEOUT_MS = 25 * 60_000;
 
 /**
  * Runs model replies on the server, one per node at a time, independent of any open page.
@@ -51,12 +83,19 @@ export class RunManager {
   private limit: UsageLimit | null = null;
   /** Nodes whose model-written title is being generated. */
   private readonly titling = new Set<string>();
+  /** A node's endpoint on the harness MCP server (null: no MCP tools). */
+  private readonly mcpUrl: (nodeId: string) => string | null;
+  readonly askLimit: number;
+  private readonly approvalTimeoutMs: number;
 
-  constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces, worktrees: Worktrees) {
+  constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces, worktrees: Worktrees, options: RunOptions = {}) {
     this.repo = repo;
     this.llm = llm;
     this.workspaces = workspaces;
     this.worktrees = worktrees;
+    this.mcpUrl = options.mcpUrl ?? (() => null);
+    this.askLimit = options.askLimit ?? DEFAULT_ASK_LIMIT;
+    this.approvalTimeoutMs = options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS;
   }
 
   isRunning(nodeId: string): boolean {
@@ -66,7 +105,76 @@ export class RunManager {
   /** When the node's reply started and what it is doing, or null if nothing is running. */
   status(nodeId: string): RunStatus | null {
     const run = this.runs.get(nodeId);
-    return run ? { startedAt: run.startedAt, activity: run.activity } : null;
+    return run ? { startedAt: run.startedAt, activity: run.activity, approval: this.approvalOf(run) } : null;
+  }
+
+  /**
+   * May the reply running on `nodeId` ask another node now? Each user message allows `askLimit`
+   * questions; after that a question waits until the user allows it (which grants `askLimit` again)
+   * or denies it, or counts as unanswered after a while (the user is probably away). Questions
+   * asked while others wait join them, so one decision covers all of them.
+   * `from`: the asking node's title, when a node asked by this reply asks further (it counts here).
+   */
+  allowAsk(nodeId: string, ask: { nodeTitle: string; from: string | null; question: string }, signal: AbortSignal): Promise<AskOutcome> {
+    const run = this.runs.get(nodeId);
+    if (!run) return Promise.resolve({ decision: 'no-reply' });
+    if (run.asksLeft > 0) {
+      run.asksLeft--;
+      return Promise.resolve({ decision: 'allowed', freeLeft: run.asksLeft });
+    }
+    return new Promise((resolve) => {
+      if (!run.waiting) {
+        run.waiting = {
+          asks: [],
+          expiresAt: new Date(Date.now() + this.approvalTimeoutMs).toISOString(),
+          timer: setTimeout(() => this.settleAsks(run, 'away'), this.approvalTimeoutMs),
+        };
+      }
+      const entry = {
+        ...ask,
+        decide: (d: AskDecision) => resolve(d === 'allowed' ? { decision: 'allowed', freeLeft: run.asksLeft } : { decision: d }),
+      };
+      run.waiting.asks.push(entry);
+      // The question was given up (the CLI stopped): it no longer waits.
+      signal.addEventListener('abort', () => {
+        if (!run.waiting?.asks.includes(entry)) return;
+        run.waiting.asks = run.waiting.asks.filter((a) => a !== entry);
+        if (run.waiting.asks.length === 0) this.settleAsks(run, 'denied');
+        else this.emit(run, { type: 'approval', approval: this.approvalOf(run) });
+        resolve({ decision: 'denied' });
+      }, { once: true });
+      run.activity = 'Waiting for your approval';
+      this.emit(run, { type: 'approval', approval: this.approvalOf(run) });
+    });
+  }
+
+  /** The user allowed or denied the questions the node's reply waits on. False if none wait. */
+  decideAsks(nodeId: string, allow: boolean): boolean {
+    const run = this.runs.get(nodeId);
+    return run ? this.settleAsks(run, allow ? 'allowed' : 'denied') : false;
+  }
+
+  private settleAsks(run: Run, decision: AskDecision): boolean {
+    const waiting = run.waiting;
+    if (!waiting) return false;
+    clearTimeout(waiting.timer);
+    run.waiting = null;
+    // Allowing resets the count: the waiting questions use the first of the newly free ones.
+    if (decision === 'allowed') run.asksLeft = Math.max(0, this.askLimit - waiting.asks.length);
+    run.activity = 'Thinking';
+    this.emit(run, { type: 'approval', approval: null });
+    for (const a of waiting.asks) a.decide(decision);
+    return true;
+  }
+
+  private approvalOf(run: Run) {
+    const w = run.waiting;
+    if (!w) return null;
+    return { asks: w.asks.map(({ nodeTitle, from, question }) => ({ nodeTitle, from, question })), limit: this.askLimit, expiresAt: w.expiresAt };
+  }
+
+  private emit(run: Run, event: ChatStreamEvent): void {
+    run.listeners.forEach((l) => l(event));
   }
 
   isTitling(nodeId: string): boolean {
@@ -121,10 +229,22 @@ export class RunManager {
         toolCalls: [...run.toolCalls.values()],
         thinking: run.thinking,
         startedAt: run.startedAt,
+        approval: this.approvalOf(run),
       });
     }
     run.listeners.add(listener);
     return () => run.listeners.delete(listener);
+  }
+
+  /**
+   * Attach branches the model proposed (fork_branches) to the node's running reply, replacing an
+   * earlier proposal. False if no reply is running there.
+   */
+  propose(nodeId: string, proposal: ForkProposal): boolean {
+    const run = this.runs.get(nodeId);
+    if (!run) return false;
+    run.proposal = proposal;
+    return true;
   }
 
   /** Stop a running reply; what arrived so far is kept. */
@@ -154,11 +274,14 @@ export class RunManager {
       thinking: false,
       sessionId: null,
       model: null,
+      proposal: null,
+      asksLeft: this.askLimit,
+      waiting: null,
       listeners: new Set(),
       abort: new AbortController(),
     };
     this.runs.set(node.id, run);
-    void this.execute(run, { nodeId: node.id, workDir, request, message, session, model: node.model, effort: node.effort, edit: null });
+    void this.execute(run, { nodeId: node.id, workDir, request, message, session, model: node.model, effort: node.effort, edit: null, mcpUrl: this.mcpUrl(node.id) });
   }
 
   /**
@@ -197,7 +320,7 @@ export class RunManager {
   }
 
   private async execute(run: Run, baseCtx: ReplyContext): Promise<void> {
-    const emit = (event: ChatStreamEvent) => run.listeners.forEach((l) => l(event));
+    const emit = (event: ChatStreamEvent) => this.emit(run, event);
     let failure: ProviderError | null = null;
     let ctx = baseCtx;
 
@@ -217,9 +340,10 @@ export class RunManager {
           run.activity = 'Thinking';
           emit({ type: 'thinking' });
         } else if (event.type === 'tool') {
-          run.toolCalls.set(event.call.id, event.call);
-          run.activity = event.call.status === 'running' ? toolActivity(event.call) : 'Thinking';
-          emit({ type: 'tool', call: event.call });
+          const call = this.withNodeTitle(event.call, run.nodeId);
+          run.toolCalls.set(call.id, call);
+          run.activity = call.status === 'running' ? toolActivity(call) : 'Thinking';
+          emit({ type: 'tool', call });
         } else {
           run.thinking = false;
           run.activity = 'Writing';
@@ -234,6 +358,9 @@ export class RunManager {
       }
     }
 
+    // Questions still waiting for approval can't be answered any more (the reply ended or was stopped).
+    this.settleAsks(run, 'denied');
+
     // Commit file changes before the run counts as finished, so a fork right after starts from them.
     if (ctx.edit) await this.commitEdits(run.nodeId, baseCtx.message);
 
@@ -246,7 +373,7 @@ export class RunManager {
     // anything leaves no session behind, so a retry starts that conversation over cleanly.
     if (node && run.sessionId && (hasContent || !failure)) this.repo.setSessionId(run.nodeId, run.sessionId);
     const saved = hasContent && node
-      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()], model: run.model })
+      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()], model: run.model, forkProposal: run.proposal })
       : null;
 
     if (failure) {
@@ -259,6 +386,15 @@ export class RunManager {
     } else {
       emit({ type: 'error', error: 'Stopped before any reply arrived.' });
     }
+  }
+
+  /** An ask_node call names the node by id; show its title (also for an id the model shortened). */
+  private withNodeTitle(call: ToolCall, nodeId: string): ToolCall {
+    if (!call.node || call.node.title) return call;
+    const projectId = this.repo.getNode(nodeId)?.projectId;
+    const ref = call.node.id;
+    const target = this.repo.getNode(ref) ?? (projectId && ref.length >= 6 ? this.repo.listNodes(projectId).find((n) => n.id.startsWith(ref)) : null);
+    return target ? { ...call, node: { id: target.id, title: target.title } } : call;
   }
 
   private limitReached(resetsAt: string | null): void {

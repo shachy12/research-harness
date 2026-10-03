@@ -6,6 +6,7 @@ import {
   type Effort,
   type NodeChanges,
   type NodeDetail,
+  askDecisionSchema,
   branchResultSchema,
   forkSchema,
   markReadSchema,
@@ -171,6 +172,13 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       return c.json({ ok: true });
     })
 
+    // Allow or deny the ask_node questions the reply waits on. Allowing frees the usual number again.
+    .post('/:nodeId/asks', zValidator('json', askDecisionSchema), (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      if (!runs.decideAsks(node.id, c.req.valid('json').allow)) throw conflict('No questions are waiting for approval.');
+      return c.json({ ok: true });
+    })
+
     // Stop the running reply; what arrived so far is kept.
     .post('/:nodeId/stop', (c) => {
       runs.stop(requireNode(c.req.param('nodeId')).id);
@@ -226,6 +234,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
         model: node.model,
         effort: node.effort,
         edit: null, // drafting runs without tools
+        mcpUrl: null,
       };
       try {
         return c.json(await llm.draftResult(ctx, c.req.raw.signal));

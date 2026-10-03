@@ -5,6 +5,7 @@ import { backupDatabase, dailyBackup } from './db/backup.ts';
 import { backupDirOf, openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
 import { providerFromEnv } from './llm/index.ts';
+import { DEFAULT_ASK_LIMIT } from './runs.ts';
 import { Workspaces } from './workspace.ts';
 
 // Own variable name: a generic PORT is often set by tools for the web dev server.
@@ -25,7 +26,11 @@ if (repo.listProjects().length === 0) repo.createProject('default', 'My research
 
 const llm = providerFromEnv();
 const workspaces = new Workspaces(dataDir);
-const app = createApp({ repo, llm, workspaces, backup });
+// ask_node questions one user message allows before the user must approve more (until a settings page exists).
+const askLimit = Number(process.env.HARNESS_ASK_LIMIT ?? DEFAULT_ASK_LIMIT);
+if (!Number.isInteger(askLimit) || askLimit < 0) throw new Error('HARNESS_ASK_LIMIT must be a whole number, 0 or more');
+// The model's CLI reaches the harness MCP server here (same machine).
+const app = createApp({ repo, llm, workspaces, backup, serverUrl: `http://127.0.0.1:${port}`, askLimit });
 
 // Stop background model processes (Claude Code) together with the server.
 process.on('exit', () => llm.dispose?.());

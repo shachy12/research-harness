@@ -12,6 +12,7 @@ import type { ChatRequest } from './dag/prompt.ts';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
 import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './llm/index.ts';
+import { callHarnessTool } from './tools/harness.ts';
 import { Workspaces } from './workspace.ts';
 
 /**
@@ -65,6 +66,9 @@ class FakeProvider implements LLMProvider {
     const write = /\[write (\S+)\]/.exec(message);
     if (write && ctx.edit) writeFileSync(path.join(ctx.edit.dir, write[1]), `${write[1]} from ${ctx.nodeId}
 `);
+    // "[ask <id>]" shows an ask_node call, as the Claude Code provider reports it (title not known yet).
+    const ask = /\[ask (\S+)\]/.exec(message);
+    if (ask) yield { type: 'tool', call: { id: 'ask-1', name: 'ask_node', input: 'Q?', status: 'done', results: [], node: { id: ask[1], title: '' } } };
     yield { type: 'text', text: 'Hello ' };
     if (message.includes('slow')) {
       await new Promise<void>((resolve) => {
@@ -79,6 +83,13 @@ class FakeProvider implements LLMProvider {
   async draftResult({ request }: ReplyContext): Promise<BranchResult> {
     this.requests.push(request);
     return { findings: 'drafted', evidence: '', openQuestions: '', confidence: 'medium' };
+  }
+
+  asked: ReplyContext[] = [];
+
+  async askNode(ctx: ReplyContext) {
+    this.asked.push(ctx);
+    return { answer: `answer from ${ctx.nodeId}`, usage: null };
   }
 
   suggestTitle = async (): Promise<string> => {
@@ -307,6 +318,177 @@ describe('API', () => {
     const prompt = llm.requests.at(-1)!.turns.map((t) => t.content).join('\n');
     expect(prompt).toContain('A result');
     expect(prompt).not.toContain('Hello there\nsecret transcript of A'); // the branch transcript is not included
+  });
+
+  describe('harness MCP tools', () => {
+    /** Call a tool the way the CLI does, through the app's MCP endpoint. */
+    const tool = (nodeId: string, name: 'fork_branches' | 'ask_node', args: Record<string, unknown>) =>
+      callHarnessTool(`http://localhost/api/mcp/${nodeId}`, name, args, (req) => app.request(req));
+
+    it('offers fork_branches and ask_node to the CLI, never to web pages', async () => {
+      const list = await app.request(`/api/mcp/${rootId}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      });
+      const tools = ((await list.json()) as { result: { tools: { name: string }[] } }).result.tools;
+      expect(tools.map((t) => t.name)).toEqual(['fork_branches', 'ask_node']);
+
+      const fromPage = await app.request(`/api/mcp/${rootId}`, { method: 'POST', headers: { origin: 'https://example.org' }, body: '{}' });
+      expect(fromPage.status).toBe(403);
+      expect((await app.request('/api/mcp/nope', { method: 'POST', body: '{}' })).status).toBe(404);
+    });
+
+    it('gives each node its own endpoint when the server knows its address', async () => {
+      await chat(rootId, 'Hi');
+      expect(llm.contexts.at(-1)!.mcpUrl).toBeNull();
+
+      app = createApp({ repo, llm, workspaces, serverUrl: 'http://127.0.0.1:8787' });
+      await chat(rootId, 'Hi again');
+      expect(llm.contexts.at(-1)!.mcpUrl).toBe(`http://127.0.0.1:8787/api/mcp/${rootId}`);
+    });
+
+    it('saves proposed branches with the reply; the graph counts them until the node is forked', async () => {
+      const branches = [{ prompt: 'Look into X', title: 'X' }, { prompt: 'Look into Y' }];
+      expect(await tool(rootId, 'fork_branches', { branches })).toMatchObject({ isError: true }); // nothing running
+
+      const sending = chat(rootId, 'slow: fork for each option');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(await tool(rootId, 'fork_branches', { branches: [branches[0]] })).toMatchObject({ isError: false });
+      const answer = await tool(rootId, 'fork_branches', { branches }); // replaces the first proposal
+      expect(answer.text).toContain('Proposed 2 branches');
+      llm.release();
+      await sending;
+
+      const reply = (await detail(rootId)).messages.at(-1)!;
+      expect(reply.forkProposal).toEqual({ branches: [{ prompt: 'Look into X', title: 'X' }, { prompt: 'Look into Y', title: null }] });
+      const card = () => call<GraphResponse>('GET', '/projects/default/graph').then((r) => r.data.nodes.find((n) => n.id === rootId)!);
+      expect((await card()).proposedBranches).toBe(2);
+
+      await fork(rootId, ['Look into X']);
+      expect((await card()).proposedBranches).toBe(0);
+    });
+
+    it('asks a node this one descends from, and only those', async () => {
+      await chat(rootId, 'Scope it');
+      const [a, b] = await fork(rootId, ['A question', 'B question']);
+      await call('PUT', `/nodes/${a.id}/result`, { ...RESULT, findings: 'A result' });
+      await call('PUT', `/nodes/${b.id}/result`, { ...RESULT, findings: 'B result' });
+      const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Synthesize slowly' })).data;
+      await new Promise((r) => setTimeout(r, 10)); // its reply is running (until released)
+
+      // The merge note names the merged branches by id.
+      const prompt = llm.requests.at(-1)!.turns.map((t) => t.content).join('\n');
+      expect(prompt).toContain(`- "A question" (node ${a.id})`);
+
+      const answer = await tool(merged.id, 'ask_node', { nodeId: a.id.slice(0, 8), question: 'What exactly?' });
+      expect(answer).toEqual({ text: `answer from ${a.id}\n\n(2 of 3 free questions left in this reply; after that, questions need the user's approval.)`, isError: false });
+      const asked = llm.asked[0];
+      expect(asked.message).toContain('"Synthesis: A question + B question", asks this conversation a question');
+      expect(asked.message.endsWith('What exactly?')).toBe(true);
+      expect(asked.session).toMatchObject({ mode: 'resume', sessionId: 'session-1' }); // a's own session
+      expect(asked.request.turns.map((t) => t.content)).toContain('A question'); // a's whole conversation
+
+      // A sibling isn't an ancestor, and neither is the node itself.
+      expect(await tool(a.id, 'ask_node', { nodeId: b.id, question: 'Q?' })).toMatchObject({ isError: true });
+      expect(await tool(merged.id, 'ask_node', { nodeId: merged.id, question: 'Q?' })).toMatchObject({ isError: true });
+      expect(llm.asked).toHaveLength(1);
+      llm.release();
+      await settle(merged.id);
+    });
+
+    describe('question limit', () => {
+      /** A merged node whose first reply keeps running (until released), with A and B to ask. */
+      async function mergedAndRunning() {
+        await chat(rootId, 'Scope it');
+        const [a, b] = await fork(rootId, ['A question', 'B question']);
+        await call('PUT', `/nodes/${a.id}/result`, { ...RESULT, findings: 'A result' });
+        await call('PUT', `/nodes/${b.id}/result`, { ...RESULT, findings: 'B result' });
+        const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Synthesize slowly' })).data;
+        await new Promise((r) => setTimeout(r, 10));
+        return { a, b, merged };
+      }
+      const waiting = async (nodeId: string) => (await detail(nodeId)).run?.approval ?? null;
+      const until = async (check: () => Promise<boolean>) => {
+        for (let i = 0; i < 100 && !(await check()); i++) await new Promise((r) => setTimeout(r, 5));
+      };
+
+      it('allows a few questions per message, then waits for the user; allowing frees them again', async () => {
+        app = createApp({ repo, llm, workspaces, askLimit: 1 });
+        const { a, b, merged } = await mergedAndRunning();
+
+        const first = await tool(merged.id, 'ask_node', { nodeId: a.id, question: 'Q1' });
+        expect(first.text).toContain('(0 of 1 free questions left in this reply');
+
+        // Over the limit: both questions wait together for one decision.
+        const second = tool(merged.id, 'ask_node', { nodeId: a.id, question: 'Q2' });
+        const third = tool(merged.id, 'ask_node', { nodeId: b.id, question: 'Q3' });
+        await until(async () => (await waiting(merged.id))?.asks.length === 2);
+        expect(await waiting(merged.id)).toMatchObject({
+          asks: [{ nodeTitle: 'A question', from: null, question: 'Q2' }, { nodeTitle: 'B question', from: null, question: 'Q3' }],
+          limit: 1,
+        });
+        const card = (await call<GraphResponse>('GET', '/projects/default/graph')).data.nodes.find((n) => n.id === merged.id)!;
+        expect(card.run).toMatchObject({ activity: 'Waiting for your approval' });
+        expect(llm.asked).toHaveLength(1);
+
+        expect((await call('POST', `/nodes/${merged.id}/asks`, { allow: true })).status).toBe(200);
+        expect((await second).text).toContain(`answer from ${a.id}`);
+        expect((await third).text).toContain(`answer from ${b.id}`);
+        expect(await waiting(merged.id)).toBeNull();
+
+        // Denied: the model hears it and carries on; the next question asks the user again.
+        const fourth = tool(merged.id, 'ask_node', { nodeId: a.id, question: 'Q4' });
+        await until(async () => (await waiting(merged.id)) !== null);
+        await call('POST', `/nodes/${merged.id}/asks`, { allow: false });
+        expect(await fourth).toMatchObject({ isError: true, text: expect.stringContaining('declined') });
+        const fifth = tool(merged.id, 'ask_node', { nodeId: a.id, question: 'Q5' });
+        await until(async () => (await waiting(merged.id)) !== null);
+        expect((await waiting(merged.id))?.asks).toHaveLength(1);
+
+        // The reply ends: whatever still waits is refused.
+        llm.release();
+        expect(await fifth).toMatchObject({ isError: true });
+        await settle(merged.id);
+        expect((await call('POST', `/nodes/${merged.id}/asks`, { allow: true })).status).toBe(409);
+        expect(llm.asked).toHaveLength(3);
+      });
+
+      it('tells the model the user is probably away when nobody answers', async () => {
+        app = createApp({ repo, llm, workspaces, askLimit: 0, askApprovalTimeoutMs: 30 });
+        const { a, merged } = await mergedAndRunning();
+        const answer = await tool(merged.id, 'ask_node', { nodeId: a.id, question: 'Q' });
+        expect(answer).toMatchObject({ isError: true, text: expect.stringContaining('probably away') });
+        expect(await waiting(merged.id)).toBeNull();
+        llm.release();
+        await settle(merged.id);
+      });
+
+      it("counts a question a node asks while answering against the reply that asked it", async () => {
+        app = createApp({ repo, llm, workspaces, askLimit: 1 });
+        const { a, merged } = await mergedAndRunning();
+        // a, answering the merged node, asks the root: the merged node's free question is used up.
+        const nested = await tool(`${a.id}?for=${merged.id}`, 'ask_node', { nodeId: rootId, question: 'Q' });
+        expect(nested.text).toContain('(0 of 1 free');
+        // The next one waits on the merged node's reply, saying who asks.
+        const next = tool(`${a.id}?for=${merged.id}`, 'ask_node', { nodeId: rootId, question: 'Q2' });
+        await until(async () => (await waiting(merged.id)) !== null);
+        expect((await waiting(merged.id))?.asks).toEqual([{ nodeTitle: 'Main thread', from: 'A question', question: 'Q2' }]);
+        await call('POST', `/nodes/${merged.id}/asks`, { allow: false });
+        expect(await next).toMatchObject({ isError: true });
+        llm.release();
+        await settle(merged.id);
+        // With no reply running on the node it would count against, nothing can be asked.
+        expect(await tool(`${a.id}?for=${merged.id}`, 'ask_node', { nodeId: rootId, question: 'Q3' })).toMatchObject({ isError: true });
+      });
+    });
+
+    it('shows the asked node by title on the tool call', async () => {
+      await chat(rootId, 'Scope it');
+      const [a] = await fork(rootId, ['A question']);
+      await chat(a.id, `[ask ${rootId.slice(0, 8)}]`);
+      expect((await detail(a.id)).messages.at(-1)!.toolCalls[0].node).toEqual({ id: rootId, title: 'Main thread' });
+    });
   });
 
   it('reset deletes all nodes and messages and leaves a fresh root', async () => {

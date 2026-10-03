@@ -18,14 +18,14 @@ The user works on two papers that sometimes connect. A finished node's result in
 - **Files:** Claude can only read inside the target project's folder, so an import carries the result text only. Optionally copy the source branch's attachments into the target's `.harness/uploads/`.
 - **GUI:** an "Import result from another project…" action (or a cross-project picker); imported nodes get a distinct badge and show the source project name, linking to the source node.
 
-## 5. Let the agent fork (via an MCP tool)
-When a reply lists several directions ("1. … 2. … 3. …"), the user wants to say "fork for each of these" and have the agent create the branches, instead of typing them into the fork dialog.
-- **Mechanism:** the harness exposes its own MCP server with a tool like `fork_branches({ branches: [{ prompt }] })` (later maybe `list_branches`, `read_result`, and `ask_node` from item 13). The agent calls it from inside a node; the harness forks *that* node.
-  - **Claude Code:** pass the server with `--mcp-config` (keep `--strict-mcp-config` so the user's own MCP servers stay out) and pre-approve only `mcp__harness__fork_branches`. Simplest transport: an HTTP MCP endpoint on our Hono server (`/mcp`), with the node id in the URL or a header so the tool knows which node is calling.
-  - **API provider:** the same tool as a regular custom tool in the request, handled by our server in the reply loop.
-- **Timing:** the tool is called while the parent's reply is still running, but a fork freezes the parent and the branches should inherit the *whole* reply (including the list). So the call records the requested branches, and the harness creates and starts them right after the parent's reply finishes. The tool result tells the agent "N branches will start when this reply ends".
-- **Confirmation (recommended default):** show the agent's proposed branches in the fork dialog, pre-filled, for the user to edit, add files to (see item 2) or confirm, instead of starting them silently. A setting could allow auto-start later.
-- **Done (the no-MCP part):** see "Fork from list items and table rows" in CLAUDE.md; it was built as picking list items and table rows in replies instead of a "Fork from this list" button. What is left of this item is the MCP tool above.
+## 5. Harness MCP tools: leftovers (fork_branches and ask_node are done)
+Built 2026-10-03, see "Harness MCP server" in CLAUDE.md. Left:
+- **API provider:** no harness tools there yet. Add `fork_branches` / `ask_node` as custom tools in the reply loop (handle `stop_reason: 'tool_use'`, run the tool on the server, send the `tool_result` back), and `askNode` (that node's `buildChatRequest` + the question). The merge note already mentions `ask_node` on both providers.
+- **Auto-start proposals:** a setting to start proposed branches without the review step.
+- **Dismiss a proposal:** the box stays under its reply while the node is open (a new reply without a proposal clears the graph chip, but the box stays). A "Dismiss" button would need a stored flag.
+- **`read_node({ nodeId })`:** a node's result or transcript as text, without a model call (cheaper than `ask_node`, but long).
+- **More tools on the same server:** permission approval for shell commands (item 11), `list_nodes` / `read_result` (read the project's finished results without a merge), a project bibliography (`add_source`, `.bib` export).
+- **ask_node answers are not stored separately:** they live in the asking reply's tool call (`ToolCall.output`, first 20,000 chars). Later turns of the asking node don't see them unless the reply quoted them (raw tool results aren't kept in history, like web searches).
 
 ## 8. Model and effort: leftovers
 Per-node model and effort is done (see "Done" below and "Model and effort per node" in CLAUDE.md). Left:
@@ -37,12 +37,12 @@ Per-node model and effort is done (see "Done" below and "Model and effort per no
 ## 11. Shell tool (file editing is done)
 File editing with a git worktree per node is built (2026-10-03, see "File editing" in CLAUDE.md). Left:
 - **Shell tool: done (2026-10-03), every command allowed** (the user's call). Not enforced: staying inside the copy (only asked in `editNote`). Safer options for later: Claude Code's sandbox (`--settings` with `sandbox` config; macOS/Linux/WSL only), an allow-list, or per-command approval (below). Nodes started before keep their old edit note, so they have the tool but weren't told to run commands in their copy.
-- **Approval in the GUI:** `-p` mode refuses anything not pre-approved. `--permission-prompt-tool mcp__harness__approve` (our MCP server, see item 5) lets the harness show "Branch X wants to run `latexmk main.tex` — Allow once / Always for this project / Deny" instead of failing.
+- **Approval in the GUI:** `-p` mode refuses anything not pre-approved. `--permission-prompt-tool mcp__harness__approve` (a tool on our MCP server, `tools/harness.ts`) lets the harness show "Branch X wants to run `latexmk main.tex` — Allow once / Always for this project / Deny" instead of failing.
 - **Apply automatically** unless there's a conflict (the user's idea for later); now Apply is always a separate step.
 - **Apply conflicts:** Apply aborts on a conflict with the user's branch. Possible: a "resolve" child node whose copy merges the user's branch in (markers for the model to resolve), then Apply that.
 - **Clean-up:** "Start over" leaves the old nodes' branches and worktrees (open nodes' copies under `.harness/work/`). A command to remove branches that are applied or belong to deleted nodes, with a confirm (never delete unapplied work silently).
 - **API provider:** no file tools, so editing is Claude Code only (`LLMProvider.canEdit`). Could add Edit/Write as custom tools.
-- **Prompt cache, unmeasured:** sibling branches now differ in `--allowedTools` (each allows its own copy). Permission rules are checked by the CLI and shouldn't be in the request, but `check:cache` hasn't been run since editing came in. Run it before relying on cheap forks.
+- **Prompt cache, measured:** sibling branches differ in `--allowedTools` (each allows its own copy) and in their MCP URL; `check:cache` runs them that way and they still share the cache (Haiku 4.5, CLI 2.1.287, 2026-10-03). Not yet re-measured on Sonnet/Opus.
 - **Card counts go stale:** `nodes.files_changed` is computed after each reply and Apply; a commit by the user in between isn't reflected until then.
 - **Uncommitted project changes:** nodes start from the last commit; the editing dialog warns when there are uncommitted changes, but nothing reminds later.
 - **Per-reply diffs:** each reply is one commit on the node's branch, so "what did this reply change" could be shown under the reply.
@@ -58,18 +58,6 @@ The code is mostly portable already (Node, `node:sqlite`, paths via `node:path`,
 - **Electron packaging (roadmap step 3):** electron-builder targets `dmg` (+ code signing and notarization for macOS, needs an Apple Developer account), `AppImage`/`deb` for Linux, NSIS for Windows. Check `node:sqlite` in Electron's Node on each.
 - **Folder dialog:** "Browse…" in the new-project dialog uses `osascript` on macOS and zenity/kdialog on Linux (`system/folder-picker.ts`); untested there.
 - **Data folder:** use the OS's app-data location in the packaged app (`app.getPath('userData')`: `~/Library/Application Support/…`, `~/.config/…`, `%APPDATA%\…`) instead of the repo's `data/`; the dev setup keeps `data/`.
-
-## 13. Keep the in-between context in cross-level merges
-A merged node starts from the merge base (the lowest common ancestor) plus the merged branches' results (see "What a merged node starts from" in CLAUDE.md). When the merged branches sit at different depths, the conversation of the nodes between the base and a branch is dropped. Example: `Root → {A → {A1, A2}, B}`; merging A1 + B uses base Root, so A's own messages are not in the merged node, only A1's result (written with A in view).
-- **Chosen direction: keep the merge as it is, and let the model ask the skipped nodes.** The merged node still starts from the base + the results (the nested trick stays, so prompts stay small and the base's cache is reused). Its merge message also lists the nodes on the way from the base to each merged branch, with their ids and titles, e.g. "A1's result was written in the context of node A (`<id>`, "Survey of ISD attacks"); ask it with `ask_node` if you need its details." The model can then fetch more context only when it needs it.
-- **Mechanism:** a tool on the harness MCP server from item 5, e.g. `ask_node({ nodeId, question })`, answering from that node's full context.
-  - **Claude Code:** answer with a one-shot run on a fork of that node's session (`--resume <node session> --fork-session --no-session-persistence`, like result drafts), so the node itself is never changed and its cache is reused. With no session, replay its context as a transcript (as `planSession` does).
-  - **API provider:** the same tool as a custom tool; the server builds that node's prompt (`buildChatRequest`) and asks the question.
-  - Maybe also `read_node({ nodeId })`, returning the node's result or transcript as text without a model call (cheaper, but long).
-- **Node ids, not session ids, in the prompt:** the harness maps a node id to its session. Session ids belong to Claude Code, can be cleared (migration 4 did), and don't exist for the API provider. The tool only accepts nodes of the same project that are ancestors of (or merged into) the asking node, so the model can't wander into unrelated branches.
-- **GUI:** show `ask_node` calls as tool rows in the chat ("Asked A: …"), with the answer collapsible, like web searches.
-- **Not chosen (for now):** pasting summaries of the intermediate nodes into the merge up front. That costs a model call per node at every merge even when unused, and frozen nodes have no result to reuse.
-- **Depends on** item 5's harness MCP server (`--mcp-config` + `--strict-mcp-config`, pre-approve only the harness tools).
 
 ## 16. Supported Claude Code versions, and telling the user when theirs isn't
 The Claude Code provider depends on details a CLI update can change without notice: flags (`--input-format stream-json`, `--include-partial-messages`, `--fork-session`, `--json-schema`, `--system-prompt`, `--setting-sources ''`, `--strict-mcp-config`, `--tools`); the stream-json event shapes (`system:init` with `session_id`, `stream_event` deltas, `tool_use`/`tool_result`, `rate_limit_event`, `result` with `structured_output`); the text format of WebSearch results (`Links: [...]`), and the internal `CLAUDE_CODE_TETHER_LIVE` variable that keeps forks cached (see item 14 under Done). Today a breaking update would show up as odd failures mid-research.
@@ -91,13 +79,19 @@ The Claude Code provider depends on details a CLI update can change without noti
 - **Tests:** in `session.test.ts`, a node with a session from another provider gets `new` plus a transcript, not `resume`; a parent with a session from another provider isn't forked.
 - Prepares the ground for mixing providers in one graph (one provider per node, not per app), which merges already allow because only results flow back.
 
+## 18. Settings page
+App settings are environment variables in `.env` for now (`HARNESS_PROVIDER`, `HARNESS_MODEL`, `HARNESS_EFFORT`, …), read at server start. A settings page (route `/settings`, planned in the project structure) should let the user change them in the app, stored in the database, without restarting.
+- **First entry: the ask_node question limit** (`HARNESS_ASK_LIMIT`, default 3): how many questions to other nodes one message allows before the model needs approval (see "Question limit" in CLAUDE.md). Changing it never touches the prompt cache (the number isn't in the tool definitions). Maybe also the approval timeout (25 min now, must stay under the CLI's 30-minute MCP tool timeout).
+- Later candidates: default model and effort, the provider, the placeholder delay for testing.
+
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
 - **2. Files per branch when forking:** done.
 - **6. Rename and model-written titles:** done (pencil on cards and in the chat header, Suggest button, automatic title after the first reply, `title_source`).
 - **7. Remember what was read in each node:** done (`read_upto` per node, opening position, "N new" badge on cards, follow-the-stream only at the bottom). Left: an unread marker line inside the chat at the first unread reply; marking read for results of finished branches.
-- **5 (part). Fork from list items and table rows:** done, without MCP (click list items or table rows in a reply, one instruction for all, one branch per pick; titles from the items; table rows carry their column names). Left: the agent-called `fork_branches` tool (the rest of item 5). Possible extras: pick plain paragraphs, keyboard picking, keep the selection when leaving the chat, a "select all rows/items" shortcut.
+- **5. Let the agent fork:** done. Without MCP: click list items, table rows or sections in a reply (one instruction for all, one branch per pick). With MCP (2026-10-03): the model's `fork_branches` tool proposes branches; the user reviews them in the pre-filled fork dialog. Leftovers in item 5 above. Possible extras: pick plain paragraphs, keyboard picking, keep the selection when leaving the chat, a "select all rows/items" shortcut.
+- **13. Keep the in-between context in cross-level merges:** done (2026-10-03) as chosen: the merge note lists the conversations the merge leaves out (the merged branches and the nodes between them and the base) with their node ids, and the model asks them with `ask_node` (a throwaway fork of that node's session; only ancestors of the asking node). Pasting summaries up front was not chosen.
 - **15. Fork from whole sections:** done (headings and bold lead-in lines; click the heading line to pick the section). Left: maybe ask the model in the system prompt to put alternative approaches under `###` headings.
 - **9. Clear "limit reached" message:** done (classified errors, banner with reset time and share used, e.g. "25% of your weekly limit used", Retry and Retry all). Left: capture a real limit hit to confirm the event shapes (and the monthly `-p` credit wording); retry automatically when the limit resets.
 - **10. One attach button:** done (paperclip with a Files/Folder menu).

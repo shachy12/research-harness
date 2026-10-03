@@ -1,4 +1,4 @@
-import { type Attachment, type DagNode, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
+import { type Attachment, type DagNode, type ForkProposal, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
 import { PencilIcon } from 'lucide-react'
 import { Fragment, useEffect, useEffectEvent, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ChangesPanel } from '@/features/editing/ChangesPanel'
 import { ForkDialog } from '@/features/fork/ForkDialog'
+import { ProposalBox } from '@/features/fork/ProposalBox'
 import { NodeModelPicker } from '@/features/model/NodeModelPicker'
 import { RenameDialog } from '@/features/rename/RenameDialog'
 import { ResultBlock } from '@/features/result/ResultBlock'
@@ -19,6 +20,7 @@ import { itemTitle, resolveSelection } from '@/lib/listItems'
 import { contextTokens, estimateTokens } from '@/lib/tokens'
 import { useDropZone } from '@/lib/useDropZone'
 import { useNow } from '@/lib/useNow'
+import { AskApprovalBox } from './AskApprovalBox'
 import { AttachMenu } from './AttachMenu'
 import { PendingAttachments } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
@@ -35,8 +37,11 @@ export function ChatPage() {
   return <ChatView key={nodeId} projectId={projectId!} nodeId={nodeId!} />
 }
 
-/** 'fork-selection' is the fork dialog started from the list items ticked in the replies. */
-type DialogKind = 'fork' | 'fork-selection' | 'result' | 'rename' | null
+/**
+ * 'fork-selection' is the fork dialog started from the list items ticked in the replies;
+ * a ForkProposal opens it with the branches the model proposed.
+ */
+type DialogKind = 'fork' | 'fork-selection' | ForkProposal | 'result' | 'rename' | null
 
 function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) {
   const detail = useNodeDetail(nodeId)
@@ -92,7 +97,7 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
         <Conversation key={node.id} detail={detail.data} onDialog={setDialog} />
       </ListSelectionContext>
 
-      {(dialog === 'fork' || dialog === 'fork-selection') && (
+      {dialog !== null && dialog !== 'result' && dialog !== 'rename' && (
         <ForkDialog
           node={node}
           inheritedTokens={historyTokens}
@@ -105,6 +110,7 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
                 }))
               : undefined
           }
+          proposal={typeof dialog === 'object' ? dialog : undefined}
           onClose={() => setDialog(null)}
         />
       )}
@@ -147,7 +153,9 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const startedAt = stream.startedAt ?? detail.run?.startedAt
   const elapsed = working && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
   const runningTool = stream.toolCalls.findLast((c) => c.status === 'running')
-  const currentActivity = runningTool
+  const currentActivity = stream.approval
+    ? 'Waiting for your approval'
+    : runningTool
     ? toolActivity(runningTool)
     : stream.thinking || stream.toolCalls.length > 0
       ? 'Thinking'
@@ -224,7 +232,12 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           )}
 
           {messages.map((m) => (
-            <MessageView key={m.id} id={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
+            <Fragment key={m.id}>
+              <MessageView id={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
+              {m.forkProposal && canWrite && (
+                <ProposalBox proposal={m.forkProposal} disabled={working} onReview={() => onDialog(m.forkProposal)} />
+              )}
+            </Fragment>
           ))}
           {showStreamed && stream.userText && <MessageView role="user" text={stream.userText} attachments={sentFiles} />}
           {showStreamed && (stream.replyText || stream.toolCalls.length > 0) && (
@@ -237,6 +250,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
               {elapsed && <span className="shrink-0">· {elapsed}</span>}
             </p>
           )}
+          {showStreamed && stream.approval && <AskApprovalBox nodeId={node.id} approval={stream.approval} />}
           {unanswered ? (
             <NoReply
               error={stream.error}

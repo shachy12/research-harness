@@ -1,4 +1,4 @@
-import type { Attachment, ChatStreamEvent, ErrorKind, ToolCall } from '@harness/shared'
+import type { AskApproval, Attachment, ChatStreamEvent, ErrorKind, ToolCall } from '@harness/shared'
 import { useEffect, useRef, useState } from 'react'
 import { stopReply, streamChat, watchChat } from '@/api/client'
 import { useRefreshAll } from '@/api/queries'
@@ -28,10 +28,12 @@ export interface StreamState {
   baseline: number
   active: boolean
   error: StreamError | null
+  /** ask_node questions the reply waits on until the user allows or denies them. */
+  approval: AskApproval | null
 }
 
 const IDLE: StreamState = {
-  userText: null, replyText: '', toolCalls: [], thinking: false, startedAt: null, baseline: -1, active: false, error: null,
+  userText: null, replyText: '', toolCalls: [], thinking: false, startedAt: null, baseline: -1, active: false, error: null, approval: null,
 }
 
 const upsert = (calls: ToolCall[], call: ToolCall) =>
@@ -55,7 +57,11 @@ export function useChatStream(nodeId: string) {
       case 'snapshot':
         setState((s) => ({
           ...s, replyText: event.text, toolCalls: event.toolCalls, thinking: event.thinking, startedAt: event.startedAt,
+          approval: event.approval,
         }))
+        break
+      case 'approval':
+        setState((s) => ({ ...s, approval: event.approval }))
         break
       case 'thinking':
         setState((s) => ({ ...s, thinking: true }))

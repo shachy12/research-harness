@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionPlan } from '../dag/session.ts';
-import { ClaudeCodeProvider, cliEnv, parseSearchLinks, toolArgs } from './claude-code.ts';
+import { ClaudeCodeProvider, cliEnv, mapEvent, newTurnState, parseSearchLinks, toolArgs } from './claude-code.ts';
 import type { ReplyContext, ReplyEvent } from './provider.ts';
 
 const FAKE_CLI = path.join(import.meta.dirname, 'fake-claude.mjs');
@@ -36,6 +36,7 @@ const ctx = (message: string, session: SessionPlan, nodeId = 'n1'): ReplyContext
   model: null,
   effort: null,
   edit: null,
+  mcpUrl: null,
 });
 
 const NEW: SessionPlan = { mode: 'new', sessionId: null, preamble: null, transcript: [] };
@@ -254,6 +255,58 @@ describe('ClaudeCodeProvider', () => {
     const [run] = log();
     expect(run.argv).toEqual(expect.arrayContaining(['--resume', 'SA', '--fork-session', '--no-session-persistence', '--json-schema']));
     expect(run.prompt).toBe('write the result');
+  });
+
+  describe('harness MCP tools', () => {
+    const url = (node: string) => `http://127.0.0.1:8787/api/mcp/${node}`;
+    const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
+
+    it('connects each node to its own endpoint, with the tools pre-approved and never deferred', () => {
+      const args = toolArgs(dir, null, url('a'));
+      expect(JSON.parse(flag(args, '--mcp-config'))).toEqual({
+        mcpServers: { harness: { type: 'http', url: url('a'), timeout: 30 * 60_000, alwaysLoad: true } },
+      });
+      expect(flag(args, '--allowedTools').split(',')).toContain('mcp__harness');
+      expect(toolArgs(dir, { dir: path.join(dir, 'copy') }, url('a'))).toContain('--mcp-config');
+      expect(toolArgs(dir, null)).not.toContain('--mcp-config');
+    });
+
+    it('siblings differ only in the URL, which the model never sees', () => {
+      const a = toolArgs(dir, null, url('a'));
+      const b = toolArgs(dir, null, url('b'));
+      expect(a.map((x) => x.replace(url('a'), 'URL'))).toEqual(b.map((x) => x.replace(url('b'), 'URL')));
+    });
+
+    it('shows ask_node calls with the asked node and its answer, and proposals with their titles', () => {
+      const state = newTurnState();
+      const ask = { type: 'tool_use', id: 't1', name: 'mcp__harness__ask_node', input: { nodeId: 'abc', question: 'Which bound?' } };
+      expect(mapEvent({ type: 'assistant', message: { content: [ask] } }, state)).toEqual([
+        { type: 'tool', call: { id: 't1', name: 'ask_node', input: 'Which bound?', status: 'running', results: [], node: { id: 'abc', title: '' } } },
+      ]);
+      const answer = { type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'The 2^128 bound.' }] };
+      expect(mapEvent({ type: 'user', message: { content: [answer] } }, state)[0]).toMatchObject({
+        call: { name: 'ask_node', status: 'done', output: 'The 2^128 bound.' },
+      });
+
+      const fork = { type: 'tool_use', id: 't2', name: 'mcp__harness__fork_branches', input: { branches: [{ title: 'X', prompt: 'Do X' }, { prompt: 'Do Y\nin detail' }] } };
+      expect(mapEvent({ type: 'assistant', message: { content: [fork] } }, state)[0]).toMatchObject({
+        call: { name: 'fork_branches', input: 'X · Do Y' },
+      });
+    });
+
+    it('answers a question in a throwaway fork of the node, with the same tools so it reads the cache', async () => {
+      const plan: SessionPlan = { mode: 'resume', sessionId: 'SA', preamble: null, transcript: [] };
+      const { answer, usage } = await provider.askNode({ ...ctx('the question', plan, 'asked'), mcpUrl: url('asked') }, new AbortController().signal);
+      expect(answer).toBe('answer: the question');
+      expect(usage).toEqual({ input: 5, cacheRead: 900, cacheWrite: 10 });
+
+      const [run] = log();
+      expect(run.argv).toEqual(expect.arrayContaining(['--resume', 'SA', '--fork-session', '--no-session-persistence', '--mcp-config']));
+      expect(run.argv).not.toContain('--json-schema');
+      // The edit tools are listed like in the node's replies, but not allowed.
+      expect(flag(run.argv!, '--tools')).toBe(flag(toolArgs(dir, { dir: path.join(dir, 'copy') }), '--tools'));
+      expect(flag(run.argv!, '--allowedTools')).toBe('WebSearch,WebFetch,mcp__harness');
+    });
   });
 });
 

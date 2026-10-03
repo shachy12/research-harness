@@ -9,6 +9,8 @@ const TOOL_ACTIVITY: Record<string, string> = {
   edit_file: 'Editing',
   write_file: 'Writing',
   shell: 'Running',
+  fork_branches: 'Proposing branches',
+  ask_node: 'Asking',
 };
 
 /** Tools that act on one local file, shown by its name. */
@@ -18,6 +20,8 @@ const FILE_TOOLS = new Set(['read_file', 'edit_file', 'write_file']);
 export function toolActivity(call: ToolCall): string {
   const what = TOOL_ACTIVITY[call.name] ?? 'Using a tool';
   if (FILE_TOOLS.has(call.name)) return `${what} ${call.input.split(/[\\/]/).pop()}`;
+  if (call.name === 'ask_node') return `${what} "${call.node?.title || 'an earlier node'}"`;
+  if (call.name === 'fork_branches') return what;
   return call.input ? `${what}: ${call.input}` : what;
 }
 

@@ -44,6 +44,11 @@ export interface ReplyContext {
    * and change files inside `dir` and nowhere else. Null: read-only, as before.
    */
   edit: { dir: string } | null;
+  /**
+   * This node's endpoint on the harness MCP server (fork_branches, ask_node; see tools/harness.ts),
+   * or null when the server doesn't offer it (tests). Providers without MCP support ignore it.
+   */
+  mcpUrl: string | null;
 }
 
 /** The models a provider offers and what a node without its own setting uses. */
@@ -70,6 +75,11 @@ export interface LLMProvider {
   models(): Promise<ModelCatalog>;
   /** Stream the assistant's reply to the new message. */
   streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent>;
+  /**
+   * Answer a question from another node, from this node's full context (ask_node). Like
+   * draftResult, it must not change the node's conversation. Absent: the provider can't.
+   */
+  askNode?(ctx: ReplyContext, signal: AbortSignal): Promise<{ answer: string; usage: TokenUsage | null }>;
   /** Write a branch's result report from its full context; must not change the node's conversation. */
   draftResult(ctx: ReplyContext, signal: AbortSignal): Promise<BranchResult>;
   /**

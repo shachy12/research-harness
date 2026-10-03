@@ -1,5 +1,6 @@
 import type { ToolCall } from '@harness/shared'
-import { CircleAlertIcon, FilePenIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, FolderSearchIcon, GlobeIcon, LoaderIcon, SearchIcon, TerminalIcon } from 'lucide-react'
+import { CircleAlertIcon, FilePenIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, FolderSearchIcon, GitForkIcon, GlobeIcon, LoaderIcon, MessageCircleQuestionMarkIcon, SearchIcon, TerminalIcon } from 'lucide-react'
+import { Markdown } from './Markdown'
 
 const LABEL: Record<string, { icon: typeof SearchIcon; running: string; done: string }> = {
   web_search: { icon: SearchIcon, running: 'Searching', done: 'Searched' },
@@ -10,14 +11,18 @@ const LABEL: Record<string, { icon: typeof SearchIcon; running: string; done: st
   edit_file: { icon: FilePenIcon, running: 'Editing', done: 'Edited' },
   write_file: { icon: FilePlusIcon, running: 'Writing', done: 'Wrote' },
   shell: { icon: TerminalIcon, running: 'Running', done: 'Ran' },
+  fork_branches: { icon: GitForkIcon, running: 'Proposing branches', done: 'Proposed branches' },
+  ask_node: { icon: MessageCircleQuestionMarkIcon, running: 'Asking', done: 'Asked' },
 }
 
 /** Tools that act on one local file. */
 const FILE_TOOLS = new Set(['read_file', 'edit_file', 'write_file'])
 
-/** Show local files by name, not by full path. */
+/** Show local files by name, not by full path; a question with the node it was asked of. */
 const displayInput = (call: ToolCall) =>
-  FILE_TOOLS.has(call.name) ? (call.input.split(/[\\/]/).pop() ?? call.input) : call.input
+  FILE_TOOLS.has(call.name) ? (call.input.split(/[\\/]/).pop() ?? call.input)
+  : call.name === 'ask_node' ? `"${call.node?.title || 'an earlier node'}": ${call.input}`
+  : call.input
 
 /** The searches and page fetches behind a reply, one collapsible row each. */
 export function ToolCalls({ calls }: { calls: ToolCall[] }) {
@@ -54,7 +59,12 @@ function ToolCallRow({ call }: { call: ToolCall }) {
         {(call.status === 'done' || call.output) && call.results.length === 0 && (
           <p className="font-mono break-all text-muted-foreground">{call.name === 'shell' ? `$ ${call.input}` : call.input}</p>
         )}
-        {call.output && (
+        {call.output && call.name === 'ask_node' ? (
+          // The asked node's answer.
+          <div className="max-h-96 overflow-auto rounded bg-background/60 p-2 text-sm">
+            <Markdown text={call.output} />
+          </div>
+        ) : call.output && (
           <pre className="max-h-64 overflow-auto rounded bg-background/60 p-2 font-mono whitespace-pre-wrap break-all text-foreground/80">
             {call.output}
           </pre>
