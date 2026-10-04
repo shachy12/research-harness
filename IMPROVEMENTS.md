@@ -77,9 +77,31 @@ The Claude Code provider depends on details a CLI update can change without noti
 - Prepares the ground for mixing providers in one graph (one provider per node, not per app), which merges already allow because only results flow back.
 
 ## 18. Settings page
-App settings are environment variables in `.env` for now (`HARNESS_PROVIDER`, `HARNESS_MODEL`, `HARNESS_EFFORT`, …), read at server start. A settings page (route `/settings`, planned in the project structure) should let the user change them in the app, stored in the database, without restarting.
+App settings are environment variables for now (the `.env` files were removed 2026-10-04) (`HARNESS_PROVIDER`, `HARNESS_MODEL`, `HARNESS_EFFORT`, …), read at server start. A settings page (route `/settings`, planned in the project structure) should let the user change them in the app, stored in the database, without restarting.
 - **First entry: the ask_node question limit** (`HARNESS_ASK_LIMIT`, default 3): how many questions to other nodes one message allows before the model needs approval (see "Question limit" in CLAUDE.md). Changing it never touches the prompt cache (the number isn't in the tool definitions). Maybe also the approval timeout (25 min now, must stay under the CLI's 30-minute MCP tool timeout).
 - Later candidates: default model and effort, the provider, the placeholder delay for testing.
+
+## 19. Keep working while a result draft is being written
+- **Problem:** when the user clicks Finish on a branch, the dialog waits for the model to draft the result (a one-shot run that can take a while), and the user can't do anything else in the meantime.
+- **Wanted:** the draft runs in the background, like replies already do (`RunManager`): the user can close the dialog, go back to the graph and keep working in other nodes. The node shows a "Drafting result…" state (card and chat header), and when the draft is ready it shows "Result ready to review" so the user can open it, edit and approve it. Closing the dialog must not cancel the draft (an explicit Cancel would).
+- Needs: the draft stored on the server while it runs and after it lands (not only in the dialog's state), a status in `NodeSummary`, and polling like the working indicator.
+
+## 20. Stay at the top of the reply while it streams
+- **Problem:** while a reply streams, the chat follows it down (`useChatScroll`: follow the stream when the user was at the bottom, and sending a message jumps to the bottom). The text scrolls away as it is written, so the user ends up watching the end of the answer instead of reading it. Harness is meant for reading and working with what the model writes, not for vibe research or coding.
+- **Wanted:** when a reply starts, put the top of the assistant's answer in view (under the user's message) and stay there. No auto-scroll while it streams; the user scrolls down at their own pace. Maybe a small "Reply continues below ↓" chip while it's still writing off-screen.
+- Touches `features/chat/useChatScroll.ts`: replace "follow only at the bottom" and "sending jumps to the bottom" with "scroll to the start of the new reply once, then leave the view alone". Opening position rules (never opened → top, unread → first unread reply, all read → end) stay as they are.
+
+## 21. Delete a node
+- **Problem:** nodes can't be removed. A dead-end branch or a test node stays in the graph forever.
+- **Tension with the design:** the graph is immutable and append-only, and merges depend on their branches. So deletion needs rules, not just a button. Options: (a) only leaf nodes that nothing was forked or merged from (simplest, no history is broken); (b) delete a whole subtree, refused if any node in it was merged into something outside it; (c) soft delete: hide it ("archived" like projects) and keep the data, so merged results and prompts still resolve.
+- Follow the project-delete pattern: back up the database first (`before-delete-node`, kept forever; if the backup fails nothing is deleted), stop its runs, confirm in a dialog that says what goes with it. Its git branch and worktree (`harness/<id>`), session id and uploads stay on disk, as for projects. Check that nothing else references the node (parents, merge edges, `ask_node` targets).
+- Recommended start: (c) or (a), to protect the user's research.
+
+## 22. Several root nodes per project (a forest)
+- **Wanted:** a way to create a new root node in an existing project, so a project is a forest: several independent starting points that share the project's folder and sidebar entry, but no context.
+- Today `POST /projects` makes one root ("Main thread") and the graph, layout, "Start over" and `/projects/:id` assume one root. Check: the dagre layout (several top-level trees side by side), the breadcrumb, project node counts, the root's model/effort role as the project default (each new root gets its own, a dialog like the new-project one), the git base for a root node's worktree (the user's current commit, already the case for the first node).
+- Maybe later: merge across roots (a merge with no common ancestor already gives "just the results", see CLAUDE.md), which makes a forest useful for comparing separate lines of research.
+- UI: a "New root" button on the graph (next to Fit).
 
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work). Leftovers worth doing later:

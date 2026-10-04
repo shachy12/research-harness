@@ -11,7 +11,7 @@
  * these fail again, check whether that variable still exists in the CLI.
  *
  * It goes through ClaudeCodeProvider itself, with CLAUDE* variables set as if started from inside
- * Claude Code (they broke caching before; the provider must remove them). Each node runs as in the
+ * Claude Code (they broke caching before; with HARNESS_ISOLATE_CLAUDE_ENV the provider removes them). Each node runs as in the
  * app: with its own editable copy (so siblings differ in --allowedTools) and the harness MCP tools,
  * served here by stand-ins.
  */
@@ -29,7 +29,7 @@ import { harnessMcpRoutes } from '../tools/harness.ts';
 
 const model = process.argv[2] ?? 'claude-haiku-4-5';
 const workDir = mkdtempSync(path.join(tmpdir(), 'harness-cache-check-'));
-Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'check-cache', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' });
+Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'check-cache', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', HARNESS_ISOLATE_CLAUDE_ENV: '1' });
 const provider = new ClaudeCodeProvider({ command: findClaudeExecutable(), model, effort: 'high' });
 
 // The harness MCP server with stand-in tools: only its tool definitions matter here.

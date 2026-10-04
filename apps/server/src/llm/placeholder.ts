@@ -8,7 +8,7 @@ import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent, TokenUsage } 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Used when no API key is configured, so the app can still be clicked through.
+ * Used only when HARNESS_PROVIDER=placeholder (tests, previews), so the app can be clicked through without a model.
  * Replies explain how to connect a real model; a message mentioning "search" shows a sample
  * search, so the tool display can be tried out. Results are drafted from the last reply.
  * "[test:limit]" in a message acts as if the usage limit was reached, "[test:warning]" as if it is close.
@@ -19,7 +19,7 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * It offers Claude's model ids so the pickers can be tried out, and says which one it was asked for.
  */
 export class PlaceholderProvider implements LLMProvider {
-  readonly label = 'placeholder (no API key)';
+  readonly label = 'placeholder (no model)';
   readonly kind = 'placeholder';
   readonly canEdit = true;
   private readonly wordDelayMs: number;
@@ -98,7 +98,7 @@ export class PlaceholderProvider implements LLMProvider {
       `No model is connected yet, so this is a placeholder reply. ` +
       `This node's prompt has ${request.turns.length} turns, including everything it inherits. ` +
       `Asked for model ${model ?? 'default'}, effort ${effort ?? 'default'}. ` +
-      `To get real answers, set ANTHROPIC_API_KEY in the .env file at the repository root and restart the server.` +
+      `To get real answers, remove HARNESS_PROVIDER=placeholder (Claude Code is the default) and restart the server.` +
       // Echo the message, so formatting (Markdown, math) can be tried out.
       `\n\nYour message, rendered:\n\n${question.split('\n\n[')[0]}`;
     for (const word of text.split(/(?<= )/)) {

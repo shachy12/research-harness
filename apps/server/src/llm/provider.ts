@@ -67,7 +67,7 @@ export interface ModelCatalog {
 export interface LLMProvider {
   /** The backend, shown in the header, e.g. "Claude Code" (models are chosen per node and project). */
   readonly label: string;
-  /** e.g. 'claude-code', 'anthropic', 'placeholder'. */
+  /** e.g. 'claude-code', 'placeholder'. */
   readonly kind: string;
   /** The provider can let the model edit files (see `ReplyContext.edit`). */
   readonly canEdit: boolean;

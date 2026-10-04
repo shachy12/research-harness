@@ -39,7 +39,7 @@ export function classifyError(err: unknown, resetsAt: string | null = null): Pro
   if (status === 401 || AUTH.test(text)) {
     return new ProviderError(
       'auth',
-      'Claude is not signed in. Run `claude` once in a terminal and log in (or check the API key), then retry.',
+      'Claude is not signed in. Run `claude` once in a terminal and log in (or check your Bedrock/Vertex settings), then retry.',
     );
   }
   return new ProviderError('other', detail || 'The model request failed');

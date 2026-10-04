@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { changesCache, describeSettings, switchWarning, withModel } from './modelSettings'
 
 const api: ModelsResponse = {
-  provider: 'anthropic',
+  provider: 'placeholder',
   models: [
     { id: 'claude-opus-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
     { id: 'claude-sonnet-5-5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
