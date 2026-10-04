@@ -53,22 +53,12 @@ async function main() {
   try {
     // Started from the Dock or a launcher, a packaged app lacks your shell's PATH (claude, git, latexmk…).
     if (app.isPackaged) useLoginShellPath();
-    loadEnvFiles();
     server = await listen();
     openWindow(devUrl ?? server.url);
   } catch (err) {
     console.error(err);
     dialog.showErrorBox('Harness could not start', err instanceof Error ? err.message : String(err));
     app.exit(1);
-  }
-}
-
-/** Settings files: the repository's `.env` when run from source, and one in the app's data folder. */
-function loadEnvFiles() {
-  const files = [process.env.HARNESS_ENV_FILE, app.isPackaged ? undefined : path.join(repoRoot, '.env'), path.join(app.getPath('userData'), '.env')];
-  for (const file of files) {
-    // Variables already set (by the launcher or an earlier file) win.
-    if (file && fs.existsSync(file)) process.loadEnvFile(file);
   }
 }
 

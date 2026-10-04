@@ -30,6 +30,8 @@ export interface ClaudeCodeOptions {
    */
   model: string;
   effort: Effort;
+  /** More model ids to offer (HARNESS_MODELS: e.g. Bedrock ids); they take every effort level. */
+  extraModels?: string[];
   /** Stop a node's process after this long without messages. */
   idleMs?: number;
 }
@@ -85,11 +87,14 @@ const TOOL_NAMES: Record<string, string> = {
 };
 
 /**
- * The environment for the CLI: ours, minus the variables a Claude Code session sets for its own
- * child processes (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CLAUDE_EFFORT, …). They leak in when the
- * server is started from inside Claude Code and change how the CLI behaves; with them, no run
- * reused the prompt cache of another (measured 2026-10-02). CLAUDE_CONFIG_DIR and a login token
- * the user set on purpose are kept.
+ * The environment for the CLI: ours, unchanged, so whatever the user set for the CLI (Bedrock,
+ * proxy, config dir, …) reaches it.
+ *
+ * With HARNESS_ISOLATE_CLAUDE_ENV=1 (a development switch, set by `check:cache`; use it when the
+ * server is started from inside a Claude Code session) the variables such a session sets for its
+ * own child processes (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CLAUDE_EFFORT, …) are removed. They
+ * change how the CLI behaves; with them, no run reused the prompt cache of another (measured
+ * 2026-10-02). CLAUDE_CONFIG_DIR, a login token and the Bedrock/Vertex/Foundry switches are kept.
  *
  * CLAUDE_CODE_TETHER_LIVE=false turns off the CLI's "tether" (server-side Message Threads, beta
  * message-threads-2026-08-12), which Anthropic enables remotely per account and model. With it,
@@ -99,8 +104,12 @@ const TOOL_NAMES: Record<string, string> = {
  * stops working.
  */
 export function cliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (!env.HARNESS_ISOLATE_CLAUDE_ENV) return { ...env, CLAUDE_CODE_TETHER_LIVE: 'false' };
   const keep = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN']);
-  const kept = Object.entries(env).filter(([key]) => !/^CLAUDE/i.test(key) || keep.has(key.toUpperCase()));
+  // The second group chooses where the CLI sends requests (Bedrock, Vertex, Foundry).
+  const kept = Object.entries(env).filter(
+    ([key]) => !/^CLAUDE/i.test(key) || keep.has(key.toUpperCase()) || /^CLAUDE_CODE_(USE_|SKIP_).*(BEDROCK|VERTEX|FOUNDRY|MANTLE)/i.test(key),
+  );
   return { ...Object.fromEntries(kept), CLAUDE_CODE_TETHER_LIVE: 'false' };
 }
 
@@ -137,7 +146,7 @@ export function findClaudeExecutable(env: NodeJS.ProcessEnv = process.env, platf
 /** A failure to start the CLI, with a message the user can act on when it isn't installed. */
 export function spawnError(err: Error, command: string): Error {
   if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return err;
-  return new Error(`Claude Code was not found (tried "${command}"). Install it (https://claude.com/claude-code), or set HARNESS_CLAUDE_PATH in .env to the full path of the claude executable.`);
+  return new Error(`Claude Code was not found (tried "${command}"). Install it (https://claude.com/claude-code), or set HARNESS_CLAUDE_PATH to the full path of the claude executable.`);
 }
 
 export class ClaudeCodeProvider implements LLMProvider {
@@ -153,10 +162,12 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 
   async models(): Promise<ModelCatalog> {
-    const known = MODELS.some((m) => m.id === this.options.model);
+    // The default model (HARNESS_MODEL, maybe an alias such as "opus" or a Bedrock id) and
+    // HARNESS_MODELS are offered as they are, next to the full ids.
+    const extra = [this.options.model, ...(this.options.extraModels ?? [])]
+      .filter((id, i, ids) => ids.indexOf(id) === i && !MODELS.some((m) => m.id === id));
     return {
-      // A HARNESS_MODEL alias such as "opus" is offered as it is, next to the full ids.
-      models: known ? MODELS : [{ id: this.options.model, efforts: ALL_EFFORTS }, ...MODELS],
+      models: [...extra.map((id) => ({ id, efforts: ALL_EFFORTS })), ...MODELS],
       defaultModel: this.options.model,
       defaultEffort: this.options.effort,
       forkKeepsCache: true,

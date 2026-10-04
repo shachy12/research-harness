@@ -94,7 +94,7 @@ export interface ModelOption {
 
 /** GET /api/models: what the model pickers offer. */
 export interface ModelsResponse {
-  /** 'claude-code' (subscription), 'anthropic' (API, pay per token) or 'placeholder'. */
+  /** 'claude-code' or 'placeholder'. */
   provider: string;
   models: ModelOption[];
   /** What a node with no setting of its own uses (always sent to the provider, never left to the account). */

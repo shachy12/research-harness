@@ -125,7 +125,7 @@ describe('ClaudeCodeProvider', () => {
   describe('keeps forks cacheable', () => {
     it('never passes a parent Claude Code session\'s CLAUDE* variables to the CLI', async () => {
       const saved = { ...process.env };
-      Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'parent', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_EFFORT: 'medium' });
+      Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'parent', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_EFFORT: 'medium', HARNESS_ISOLATE_CLAUDE_ENV: '1' });
       try {
         await collect(provider.streamReply(ctx('hello', NEW), new AbortController().signal));
       } finally {
@@ -153,9 +153,27 @@ describe('ClaudeCodeProvider', () => {
     });
   });
 
-  it('runs the CLI without the variables a parent Claude Code session sets', () => {
-    expect(cliEnv({ PATH: 'p', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', CLAUDE_EFFORT: 'medium', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k' }))
-      .toEqual({ PATH: 'p', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_TETHER_LIVE: 'false' });
+  it('offers HARNESS_MODELS ids and the default model next to the built-in ones, once each', async () => {
+    const p = new ClaudeCodeProvider({ command: 'x', model: 'bedrock-a', effort: 'low', extraModels: ['bedrock-b', 'bedrock-a', 'claude-opus-5-5'] });
+    const ids = (await p.models()).models.map((m) => m.id);
+    expect(ids).toEqual(['bedrock-a', 'bedrock-b', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-haiku-4-5']);
+  });
+
+  it('passes the environment through unchanged by default', () => {
+    const env = { PATH: 'p', CLAUDECODE: '1', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '9', AWS_REGION: 'us-east-1' };
+    expect(cliEnv(env)).toEqual({ ...env, CLAUDE_CODE_TETHER_LIVE: 'false' });
+  });
+
+  describe('with HARNESS_ISOLATE_CLAUDE_ENV', () => {
+    it('removes the variables a parent Claude Code session sets', () => {
+      expect(cliEnv({ HARNESS_ISOLATE_CLAUDE_ENV: '1', PATH: 'p', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 's', CLAUDE_EFFORT: 'medium', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k' }))
+        .toEqual({ HARNESS_ISOLATE_CLAUDE_ENV: '1', PATH: 'p', CLAUDE_CONFIG_DIR: 'c', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_TETHER_LIVE: 'false' });
+    });
+
+    it('keeps the variables that point the CLI at Bedrock, Vertex or Foundry', () => {
+      const env = { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '1', CLAUDE_CODE_USE_VERTEX: '1', AWS_REGION: 'us-east-1' };
+      expect(cliEnv({ HARNESS_ISOLATE_CLAUDE_ENV: '1', ...env })).toMatchObject(env);
+    });
   });
 
   it('turns off the CLI\'s Message Threads, which keep forks and resumes from reading the cache', () => {

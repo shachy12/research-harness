@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -14,9 +13,3 @@ export function dataDir(): string {
   return path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'), 'research-harness');
 }
 
-/** Settings files: HARNESS_ENV_FILE, `.env` in the current folder, `.env` in the data folder. Variables already set win. */
-export function loadEnvFiles(data: string) {
-  for (const file of [process.env.HARNESS_ENV_FILE, path.resolve('.env'), path.join(data, '.env')]) {
-    if (file && fs.existsSync(file)) process.loadEnvFile(file);
-  }
-}

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron';
 import { startServer, type RunningServer } from '../../server/src/server.ts';
-import { DEFAULT_PORT, dataDir, loadEnvFiles } from './config.ts';
+import { DEFAULT_PORT, dataDir } from './config.ts';
 
 /**
  * The window for `npx research-harness --app`: Electron's main process runs the Harness server
@@ -48,7 +48,6 @@ if (!app.requestSingleInstanceLock()) {
 
 async function main() {
   try {
-    loadEnvFiles(data);
     if (!fs.existsSync(path.join(webDir, 'index.html'))) throw new Error(`The web UI is missing (${webDir}). Reinstall the package.`);
     server = await listen();
     openWindow(server.url);
