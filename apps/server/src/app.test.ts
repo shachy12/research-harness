@@ -200,8 +200,9 @@ describe('API', () => {
     expect(events.map((e) => e.type)).toEqual(['user', 'thinking', 'tool', 'tool', 'delta', 'delta', 'done']);
 
     const done = events.at(-1) as Extract<ChatStreamEvent, { type: 'done' }>;
+    // offset: how much of the reply's text came before the call (here: none), so the chat shows it in place.
     expect(done.message.toolCalls).toEqual([
-      { id: 'call-1', name: 'web_search', input: 'memory papers', status: 'done', results: [{ title: 'A paper', url: 'https://example.org/paper' }] },
+      { id: 'call-1', name: 'web_search', input: 'memory papers', status: 'done', results: [{ title: 'A paper', url: 'https://example.org/paper' }], offset: 0 },
     ]);
 
     await chat(rootId, 'Thanks');
@@ -256,9 +257,10 @@ describe('API', () => {
     expect(b.title.endsWith('…')).toBe(true);
 
     const root = await detail(rootId);
-    expect(root.node.status).toBe('frozen');
+    expect(root.node.status).toBe('open');
     expect(root.childIds).toEqual([a.id, b.id]);
-    expect((await call('POST', `/nodes/${rootId}/messages`, { content: 'more' })).status).toBe(409);
+    expect(root.forks).toEqual([{ at: 2, childIds: [a.id, b.id] }]);
+    expect(a).toMatchObject({ forkPoint: 2, forkSession: 'session-1' });
 
     // Each branch got its prompt as the first message, with the parent's context before it.
     const child = await detail(a.id);
@@ -269,6 +271,23 @@ describe('API', () => {
     ]);
     const sent = llm.requests.find((r) => r.turns.at(-1)?.content === 'Survey retrieval methods')!;
     expect(sent.turns[0].content).toBe('Scope it');
+  });
+
+  it('a forked node goes on in a copy of its session; its branches keep the fork point', async () => {
+    await chat(rootId, 'Scope it');
+    const [a] = await fork(rootId, ['Side question']);
+
+    // The parent continues: its session is copied (forked), so the branch's fork point stays as it was.
+    await chat(rootId, 'Main thread goes on');
+    const parentRun = llm.contexts.findLast((c) => c.nodeId === rootId)!;
+    expect(parentRun.session).toMatchObject({ mode: 'fork', sessionId: 'session-1', preamble: null });
+    expect((await detail(a.id)).inherited).toHaveLength(2);
+
+    // Forking again later: the new branch gets everything up to now.
+    const [b] = await fork(rootId, ['Later question']);
+    expect(b.forkPoint).toBe(4);
+    expect((await detail(b.id)).inherited).toHaveLength(4);
+    expect((await detail(rootId)).forks.map((f) => f.at)).toEqual([2, 4]);
   });
 
   it('drafts a result without saving it, then finishing saves it', async () => {
@@ -827,7 +846,7 @@ describe('API', () => {
       expect((await put({ model: null, effort: null })).data).toMatchObject({ model: null, effort: null });
     });
 
-    it("branches copy their parent's settings unless given their own; frozen nodes keep theirs", async () => {
+    it("branches copy their parent's settings unless given their own; changing the parent later doesn't reach them", async () => {
       await call('PUT', `/nodes/${rootId}/model`, { model: 'big', effort: 'high' });
       await chat(rootId, 'Scope it');
       const { data } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
@@ -844,7 +863,8 @@ describe('API', () => {
       expect(llm.contexts.at(-1)).toMatchObject({ model: 'small', effort: null });
       expect(same).toMatchObject({ model: 'big', effort: 'high' });
       expect(other).toMatchObject({ model: 'small', effort: null });
-      expect((await call('PUT', `/nodes/${rootId}/model`, { model: 'small', effort: null })).status).toBe(409);
+      expect((await call('PUT', `/nodes/${rootId}/model`, { model: 'small', effort: null })).status).toBe(200);
+      expect((await detail(same.id)).node).toMatchObject({ model: 'big', effort: 'high' });
     });
 
     it('a merged node takes its branches\' setting; with different models, the first by name', async () => {

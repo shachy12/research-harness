@@ -60,19 +60,21 @@ async function reply(nodeId: string, message: string, session: SessionPlan) {
   const ctx = contextOf(nodeId, message, session);
   let usage: TokenUsage | null = null;
   let sessionId = '';
+  let text = '';
   for await (const e of provider.streamReply(ctx, new AbortController().signal)) {
     if (e.type === 'usage') usage = e.usage;
     if (e.type === 'session') sessionId = e.sessionId;
+    if (e.type === 'text') text += e.text;
   }
   if (!usage) throw new Error(`no usage reported for ${nodeId}`);
-  return { usage, sessionId };
+  return { usage, sessionId, text };
 }
 
 const total = (u: TokenUsage) => u.input + u.cacheRead + u.cacheWrite;
 const describe = (u: TokenUsage) => `read ${u.cacheRead} from the cache, wrote ${u.cacheWrite}, uncached ${u.input}`;
 let failed = false;
-function check(required: boolean, label: string, ok: boolean, u: TokenUsage) {
-  console.log(`${ok ? 'ok  ' : required ? 'FAIL' : 'note'}  ${label}: ${describe(u)}`);
+function check(required: boolean, label: string, ok: boolean, u: TokenUsage | string) {
+  console.log(`${ok ? 'ok  ' : required ? 'FAIL' : 'note'}  ${label}: ${typeof u === 'string' ? u : describe(u)}`);
   if (required && !ok) failed = true;
 }
 
@@ -108,14 +110,26 @@ const [c, d] = await Promise.all([
 check(true, 'sibling branches started together (first)', c.usage.cacheRead >= 0.8 * parentSize, c.usage);
 check(true, 'sibling branches started together (second)', d.usage.cacheRead >= 0.8 * parentSize, d.usage);
 
-// 4. Resuming the parent in a new process (after an idle stop or Stop).
-const resumed = await reply('parent', 'Say OK again.', { mode: 'resume', sessionId: first.sessionId, preamble: null, transcript: [] });
-check(true, 'parent resumed in a new process', resumed.usage.cacheRead >= 0.8 * parentSize, resumed.usage);
+// 4. The forked parent goes on, as the app does: in a copy of its session (`planSession`), so
+//    the session its branches came from stays the fork point. The copy reads the cache.
+const word = `PELICAN${stamp % 1000}`;
+const goesOn = await reply('parent', `Remember this code word for later: ${word}. Reply with just "noted".`, { mode: 'fork', sessionId: first.sessionId, preamble: null, transcript: [] });
+check(true, 'forked parent goes on in a copy of its session', goesOn.usage.cacheRead >= 0.8 * parentSize, goesOn.usage);
+check(true, 'the copy is a new session', goesOn.sessionId !== '' && goesOn.sessionId !== first.sessionId, `${first.sessionId} -> ${goesOn.sessionId}`);
+provider.release('parent');
 
-// 5. ask_node: another node's question is answered by a throwaway fork of the parent's session,
+// 5. A branch started from the fork point after that (e.g. a retry) doesn't see what the parent
+//    said later; the parent, resumed in a new process (after an idle stop or Stop), does.
+const late = await reply('branch-e', 'Was a code word mentioned anywhere in this conversation? Answer with the word, or NONE.', forkOf(first.sessionId, 'Code word'));
+check(true, 'a later branch sees only the fork point', !late.text.includes(word), late.text.trim().slice(0, 80));
+const resumed = await reply('parent', 'What was the code word? Answer with just the word.', { mode: 'resume', sessionId: goesOn.sessionId, preamble: null, transcript: [] });
+check(true, 'parent resumed in a new process', resumed.usage.cacheRead >= 0.8 * parentSize, resumed.usage);
+check(true, 'the resumed parent kept what it said after the fork', resumed.text.includes(word), resumed.text.trim().slice(0, 80));
+
+// 6. ask_node: another node's question is answered by a throwaway fork of the parent's session,
 //    which reads the parent's cache (same tools, though the edit tools aren't allowed there).
 const asked = await provider.askNode(
-  { ...contextOf('parent', 'Which shelf holds item 350? Answer in one line.', { mode: 'resume', sessionId: first.sessionId, preamble: null, transcript: [] }), edit: null },
+  { ...contextOf('parent', 'Which shelf holds item 350? Answer in one line.', { mode: 'resume', sessionId: goesOn.sessionId, preamble: null, transcript: [] }), edit: null },
   new AbortController().signal,
 );
 if (!asked.usage) throw new Error('no usage reported for ask_node');

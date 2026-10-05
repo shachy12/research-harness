@@ -85,6 +85,8 @@ export class PlaceholderProvider implements LLMProvider {
       yield* this.harnessCall(mcpUrl, 'ask_node', { nodeId, question: q }, q, { id: nodeId, title: '' });
     }
     if (/search/i.test(question)) {
+      // Some text first, then the search, then the rest: the chat shows the search in between.
+      yield { type: 'text', text: 'Searching first (placeholder sample).\n\n' };
       const call = { id: `sample-${Date.now()}`, name: 'web_search', input: question.slice(0, 80), status: 'running' as const, results: [] };
       yield { type: 'tool', call };
       await pause(40 * this.wordDelayMs);

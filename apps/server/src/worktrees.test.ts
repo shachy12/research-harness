@@ -122,6 +122,18 @@ describe('Worktrees', () => {
     expect(existsSync(path.join(c2.editDir, 'b1.txt'))).toBe(false);
   });
 
+  it('a forked node edits on; its branches start from its files at the fork', async () => {
+    await work(root(), (dir) => writeFileSync(path.join(dir, 'a.txt'), 'at the fork\n'));
+    const r = root();
+    const b = child(r, 'B');
+    await worktrees.fork(project, r.id, [b.id], 'forked');
+    expect(existsSync(worktrees.worktreeOf(project, r.id))).toBe(true); // the parent keeps its copy
+
+    await work(r, (dir) => writeFileSync(path.join(dir, 'a.txt'), 'after the fork\n')); // before B first runs
+    const copy = await work(b, () => {});
+    expect(readFileSync(path.join(copy.editDir, 'a.txt'), 'utf8')).toBe('at the fork\n');
+  });
+
   it('merges branches into the merged node’s copy, leaving conflict markers to resolve', async () => {
     const r = root();
     const [a, b] = [child(r, 'A'), child(r, 'B')];

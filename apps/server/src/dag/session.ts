@@ -1,4 +1,4 @@
-import { type Segment, fullSegments, inheritedSegments } from './context.ts';
+import { type Segment, fullSegments, inheritedSegments, mergeBase } from './context.ts';
 import type { GraphReader } from './graph.ts';
 import { type ChatTurn, branchStartNote, resultsTurn, segmentTurns } from './prompt.ts';
 
@@ -7,7 +7,9 @@ import { type ChatTurn, branchStartNote, resultsTurn, segmentTurns } from './pro
  * Computed before the new user message is saved.
  *
  *   resume:  the node already has a session; just continue it
- *   fork:    copy the parent's (or, for a merge, the base's) session and continue in the copy
+ *   fork:    copy the parent's session at the fork point (for a merge, the base's) and continue in
+ *            the copy; or, for a node whose session its branches were forked from, copy its own
+ *            session, so theirs stays as it was at the fork
  *   new:     start an empty session
  *
  * `preamble` goes before the first message: the branch-start note, or the merged results.
@@ -29,7 +31,13 @@ const turnsOf = (segments: Segment[]) => segments.flatMap(segmentTurns);
  */
 export function planSession(graph: GraphReader, nodeId: string, { retry = false } = {}): SessionPlan {
   const node = graph.node(nodeId);
-  if (node.sessionId) return { mode: 'resume', sessionId: node.sessionId, preamble: null, transcript: [] };
+  if (node.sessionId) {
+    // Branches were forked from this session: go on in a copy (the user doesn't notice; the copy
+    // reads the same cache), so the session stays the fork point. A finished node gets no more
+    // messages, so its session can't change and stays as it is.
+    const forked = node.status === 'open' && graph.children(nodeId).some((c) => c.forkSession === node.sessionId);
+    return { mode: forked ? 'fork' : 'resume', sessionId: node.sessionId, preamble: null, transcript: [] };
+  }
 
   // Messages exist but no session (written by another provider): replay everything as a transcript.
   const earlier = graph.messages(nodeId).length - (retry ? 1 : 0);
@@ -40,25 +48,18 @@ export function planSession(graph: GraphReader, nodeId: string, { retry = false 
 
   if (node.parentIds.length === 0) return { mode: 'new', sessionId: null, preamble: null, transcript: [] };
 
-  // The session to copy: the parent's, or for a merge node, the base's (where the merged branches forked).
+  // The session to copy: the parent's at the fork point, or for a merge node, the base's (where
+  // the merged branches forked). Nodes without a recorded fork point use the parent's session.
   const inherited = inheritedSegments(graph, nodeId);
   const results = inherited.find((s) => s.kind === 'results');
   const preamble = results ? resultsTurn(results) : branchStartNote(node.promptTitle);
   const sourceSegments = results ? inherited.slice(0, -1) : inherited;
-  const sourceId = results ? baseOf(inherited) : node.parentIds[0];
-  const source = sourceId ? graph.node(sourceId) : null;
+  const source = results
+    ? (mergeBase(graph, node.parentIds)?.session ?? null)
+    : node.forkPoint === null ? graph.node(node.parentIds[0]).sessionId : node.forkSession;
 
-  if (source?.sessionId) return { mode: 'fork', sessionId: source.sessionId, preamble, transcript: [] };
+  if (source) return { mode: 'fork', sessionId: source, preamble, transcript: [] };
   return { mode: 'new', sessionId: null, preamble, transcript: turnsOf(sourceSegments) };
-}
-
-/** The node whose full context precedes the merged results (the last messages segment before them). */
-function baseOf(inherited: Segment[]): string | null {
-  for (let i = inherited.length - 2; i >= 0; i--) {
-    const seg = inherited[i];
-    if (seg.kind === 'messages') return seg.node.id;
-  }
-  return null;
 }
 
 /** The text to send as a node's first message: earlier context (if any), the preamble, then the message. */

@@ -148,6 +148,10 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       const nodes: NodeSummary[] = graph.allNodes().map((node) => {
         const messages = graph.messages(node.id);
         const last = messages.at(-1);
+        const lastReply = messages.findLastIndex((m) => m.role === 'assistant');
+        // A fork after that reply (a branch whose fork point includes it) dealt with its proposal.
+        const forkPoints = graph.children(node.id).flatMap((c) => (c.forkPoint === null ? [] : [c.forkPoint]));
+        const forkedSince = forkPoints.some((at) => at > lastReply);
         return {
           ...node,
           messageCount: messages.length,
@@ -158,7 +162,10 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
           run: runs.status(node.id),
           titlePending: runs.isTitling(node.id),
           // Branches the model proposed in its last reply, while the user can still start them.
-          proposedBranches: node.status === 'open' ? (messages.findLast((m) => m.role === 'assistant')?.forkProposal?.branches.length ?? 0) : 0,
+          proposedBranches: node.status === 'open' && lastReply >= 0 && !forkedSince
+            ? (messages[lastReply].forkProposal?.branches.length ?? 0)
+            : 0,
+          forkedAtEnd: forkPoints.includes(messages.length),
         };
       });
       return c.json<GraphResponse>({ project, nodes, usage: runs.usage() });

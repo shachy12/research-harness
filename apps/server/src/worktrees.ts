@@ -148,17 +148,37 @@ export class Worktrees {
   /** Commit whatever the model changed in the node's worktree. Returns whether anything was committed. */
   commit(project: Project, nodeId: string, message: string): Promise<boolean> {
     const folder = this.workspaces.folderOf(project);
-    const worktree = this.worktreeOf(project, nodeId);
+    return this.queue.run(folder, () => this.commitCopy(this.worktreeOf(project, nodeId), message));
+  }
+
+  /**
+   * A node was forked and goes on: commit its copy and start each branch's git branch where it is
+   * now, so the branches get the files as they were at the fork even if the parent edits on
+   * before they first run. (A branch's worktree is still made at its first run, by `ensure`.)
+   */
+  fork(project: Project, parentId: string, childIds: string[], message: string): Promise<void> {
+    const folder = this.workspaces.folderOf(project);
     return this.queue.run(folder, async () => {
-      if (!existsSync(path.join(worktree, '.git'))) return false;
-      await git(worktree, ['add', '-A']);
-      if ((await runGit(worktree, ['diff', '--cached', '--quiet'])).code === 0) return false;
-      await git(worktree, [...HARNESS_COMMIT_ARGS, 'commit', '--no-verify', '-m', message]);
-      return true;
+      await this.commitCopy(this.worktreeOf(project, parentId), message);
+      const repo = await this.findRepo(folder);
+      const from = Worktrees.branchOf(parentId);
+      if (!repo || !(await this.branchExists(repo.top, from))) return;
+      for (const id of childIds) {
+        const branch = Worktrees.branchOf(id);
+        if (!(await this.branchExists(repo.top, branch))) await git(repo.top, ['branch', branch, from]);
+      }
     });
   }
 
-  /** Commit and remove a node's worktree (it was forked or finished); its branch keeps the files. */
+  private async commitCopy(worktree: string, message: string): Promise<boolean> {
+    if (!existsSync(path.join(worktree, '.git'))) return false;
+    await git(worktree, ['add', '-A']);
+    if ((await runGit(worktree, ['diff', '--cached', '--quiet'])).code === 0) return false;
+    await git(worktree, [...HARNESS_COMMIT_ARGS, 'commit', '--no-verify', '-m', message]);
+    return true;
+  }
+
+  /** Commit and remove a node's worktree (it was finished); its branch keeps the files. */
   retire(project: Project, nodeId: string, message: string): Promise<void> {
     const folder = this.workspaces.folderOf(project);
     const worktree = this.worktreeOf(project, nodeId);

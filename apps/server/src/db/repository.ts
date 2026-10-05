@@ -10,6 +10,7 @@ interface NodeRow {
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
   title_source: TitleSource; prompt_title: string | null; read_upto: string | null;
   model: string | null; effort: Effort | null; git_branch: string | null; files_changed: number | null;
+  fork_point: number | null; fork_session: string | null;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
@@ -25,6 +26,8 @@ const toNode = (r: NodeRow): DagNode => ({
   titleSource: r.title_source,
   promptTitle: r.prompt_title ?? r.title,
   parentIds: JSON.parse(r.parent_ids) as string[],
+  forkPoint: r.fork_point,
+  forkSession: r.fork_session,
   status: r.status,
   result: r.result ? (JSON.parse(r.result) as BranchResult) : null,
   sessionId: r.session_id,
@@ -134,13 +137,17 @@ export class Repository {
     titleSource?: TitleSource;
     model?: string | null;
     effort?: Effort | null;
+    /** A branch's fork point (see `DagNode.forkPoint` / `forkSession`). */
+    forkPoint?: number | null;
+    forkSession?: string | null;
   }): DagNode {
     const id = randomUUID();
     this.db
-      .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, model, effort, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?)`)
+      .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, model, effort,
+                  fork_point, fork_session, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?)`)
       .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds),
-        input.model ?? null, input.effort ?? null, now());
+        input.model ?? null, input.effort ?? null, input.forkPoint ?? null, input.forkSession ?? null, now());
     return this.getNode(id)!;
   }
 

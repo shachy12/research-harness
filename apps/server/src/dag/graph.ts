@@ -1,9 +1,10 @@
 import { type DagNode, type Message, lowestCommonAncestor as lcaOf } from '@harness/shared';
 
-/** Read access to one project's graph. The context logic only needs these two lookups. */
+/** Read access to one project's graph. The context logic only needs these lookups. */
 export interface GraphReader {
   node(id: string): DagNode;
   messages(nodeId: string): Message[];
+  children(id: string): DagNode[];
 }
 
 /** An in-memory snapshot of a project, used by the routes and by tests. */

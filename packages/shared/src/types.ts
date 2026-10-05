@@ -27,11 +27,12 @@ export interface Attachment {
 }
 
 /**
- * open:     accepts new messages
- * frozen:   has been forked; history is fixed so merges stay unambiguous
+ * open:     accepts new messages (also after it was forked: its branches keep what it was then)
  * finished: has an approved result that can be merged
+ *
+ * Until 2026-10-05 a forked node was 'frozen' (no more messages); migration 11 reopened them.
  */
-export type NodeStatus = 'open' | 'frozen' | 'finished';
+export type NodeStatus = 'open' | 'finished';
 
 export type Confidence = 'low' | 'medium' | 'high';
 
@@ -58,6 +59,16 @@ export interface DagNode {
   promptTitle: string;
   /** Empty for the root, one id for a normal branch, two or more for a merge node. */
   parentIds: string[];
+  /**
+   * A branch's fork point: how many of its parent's messages it inherits (the parent may go on
+   * after the fork). Null for the root and merge nodes.
+   */
+  forkPoint: number | null;
+  /**
+   * The parent's Claude Code session at the fork point. The parent continues in a copy of it
+   * (`planSession`), so this one stays as it was: the branch (or a merge based there) forks it.
+   */
+  forkSession: string | null;
   status: NodeStatus;
   result: BranchResult | null;
   /** The Claude Code session holding this node's conversation (claude-code provider only). */
@@ -153,6 +164,11 @@ export interface ToolCall {
   output?: string;
   /** The node an ask_node call asked (its title as of the call). */
   node?: { id: string; title: string };
+  /**
+   * How much of the reply's text came before the call (characters), so the chat shows it in place.
+   * Missing on replies saved before 2026-10-05: their calls show before the text.
+   */
+  offset?: number;
 }
 
 /** One entry of what a node inherits: an ancestor's message, or a merged branch's result. */
@@ -187,6 +203,8 @@ export interface NodeSummary extends DagNode {
   titlePending: boolean;
   /** Branches the model proposed in its last reply, waiting for the user (0: none). */
   proposedBranches: number;
+  /** Branches were forked off at the node's current end (nothing was added since): its card says "Forked". */
+  forkedAtEnd: boolean;
 }
 
 export interface RunStatus {
@@ -239,6 +257,8 @@ export interface NodeDetail {
   /** Everything the node inherits, in prompt order. */
   inherited: ContextItem[];
   childIds: string[];
+  /** Where branches were forked off this node: after `at` of its messages, these branches. Oldest first. */
+  forks: { at: number; childIds: string[] }[];
   /** The model is writing a reply right now (attach with GET /api/nodes/:id/stream). */
   running: boolean;
   run: RunStatus | null;

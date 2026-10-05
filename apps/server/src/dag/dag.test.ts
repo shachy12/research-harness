@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inheritedItems, skippedByMerge } from './context.ts';
+import { inheritedItems, mergeBase, skippedByMerge } from './context.ts';
 import { buildGraph, result } from './fixtures.ts';
 import { lowestCommonAncestor } from './graph.ts';
 import { SYSTEM_PROMPT, branchStartNote, buildChatRequest } from './prompt.ts';
@@ -12,11 +12,11 @@ import { SYSTEM_PROMPT, branchStartNote, buildChatRequest } from './prompt.ts';
 //       |
 //       M1             (branch of the merge node)
 const graph = buildGraph({
-  root: [[], { status: 'frozen', messages: ['u: scope it', 'a: three areas'] }],
+  root: [[], { messages: ['u: scope it', 'a: three areas'] }],
   A: [['root'], { result: result('A found'), messages: ['u: a question', 'a: a answer'] }],
   B: [['root'], { result: result('B found'), messages: ['u: b question', 'a: b answer'] }],
   C: [['root'], { messages: ['u: c question'] }],
-  M: [['A', 'B'], { status: 'frozen', messages: ['u: synthesize', 'a: synthesis'] }],
+  M: [['A', 'B'], { messages: ['u: synthesize', 'a: synthesis'] }],
   M1: [['M'], { messages: ['u: follow up'] }],
 });
 
@@ -72,6 +72,40 @@ describe('inherited context', () => {
   });
 });
 
+describe('fork points (a node that goes on after it was forked)', () => {
+  //   root: q1 a1 | q2 a2 | q3 a3     A forked after 2 messages (session S1), B after 4 (S2)
+  //    /    \
+  //   A      B          (both finished)
+  //    \    /
+  //      M
+  const forked = buildGraph({
+    root: [[], { sessionId: 'S3', messages: ['u: q1', 'a: a1', 'u: q2', 'a: a2', 'u: q3', 'a: a3'] }],
+    A: [['root'], { forkPoint: 2, forkSession: 'S1', result: result('A found'), messages: ['u: a q', 'a: a answer'] }],
+    B: [['root'], { forkPoint: 4, forkSession: 'S2', result: result('B found'), messages: ['u: b q', 'a: b answer'] }],
+    M: [['A', 'B']],
+  });
+  const inherited = (id: string) => inheritedItems(forked, id).map((i) => (i.kind === 'message' ? i.message.content : `result ${i.nodeTitle}`));
+
+  it('a branch inherits its parent only up to its fork point', () => {
+    expect(inherited('A')).toEqual(['q1', 'a1']);
+    expect(inherited('B')).toEqual(['q1', 'a1', 'q2', 'a2']);
+  });
+
+  it('a merge starts from the base at the earliest fork point, with its session from then', () => {
+    expect(mergeBase(forked, ['A', 'B'])).toEqual({ id: 'root', upto: 2, session: 'S1' });
+    expect(inherited('M')).toEqual(['q1', 'a1', 'result Title A', 'result Title B']);
+  });
+
+  it('cuts nothing when the base has nothing after the fork', () => {
+    const g = buildGraph({
+      root: [[], { sessionId: 'S0', messages: ['u: q', 'a: a'] }],
+      A: [['root'], { forkPoint: 2, forkSession: 'S0', result: result('A') }],
+      B: [['root'], { forkPoint: 2, forkSession: 'S0', result: result('B') }],
+    });
+    expect(mergeBase(g, ['A', 'B'])).toEqual({ id: 'root', upto: null, session: 'S0' });
+  });
+});
+
 describe('buildChatRequest', () => {
   it('uses the same system prompt for every node', () => {
     for (const id of ['root', 'A', 'M', 'M1']) {
@@ -117,8 +151,8 @@ describe('merge notes', () => {
   //   A1   A2            (both finished)
   // X = A1 + B (cross-level, base root), Y = A1 + A2 (base A)
   const nested = buildGraph({
-    root: [[], { status: 'frozen', messages: ['u: scope', 'a: two areas'] }],
-    A: [['root'], { status: 'frozen', messages: ['u: area a', 'a: a details'] }],
+    root: [[], { messages: ['u: scope', 'a: two areas'] }],
+    A: [['root'], { messages: ['u: area a', 'a: a details'] }],
     A1: [['A'], { result: result('A1 found'), messages: ['u: a1', 'a: a1 answer'] }],
     A2: [['A'], { result: result('A2 found'), messages: ['u: a2', 'a: a2 answer'] }],
     B: [['root'], { result: result('B found'), messages: ['u: b', 'a: b answer'] }],

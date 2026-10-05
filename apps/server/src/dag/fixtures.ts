@@ -2,7 +2,10 @@ import type { BranchResult, DagNode, Message } from '@harness/shared';
 import { GraphSnapshot } from './graph.ts';
 
 // Small builder for test graphs: node('A', ['root'], { messages: ['u: hi', 'a: hello'] }).
-type NodeSpec = { status?: DagNode['status']; result?: BranchResult; messages?: string[]; sessionId?: string };
+type NodeSpec = {
+  status?: DagNode['status']; result?: BranchResult; messages?: string[]; sessionId?: string;
+  forkPoint?: number; forkSession?: string;
+};
 
 export function result(findings: string): BranchResult {
   return { findings, evidence: `${findings} evidence`, openQuestions: '', confidence: 'medium' };
@@ -19,6 +22,8 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       titleSource: 'prompt',
       promptTitle: `Title ${id}`,
       parentIds,
+      forkPoint: spec.forkPoint ?? null,
+      forkSession: spec.forkSession ?? null,
       status: spec.status ?? (spec.result ? 'finished' : 'open'),
       result: spec.result ?? null,
       sessionId: spec.sessionId ?? null,

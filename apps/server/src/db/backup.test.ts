@@ -62,6 +62,25 @@ describe('backups', () => {
     expect((db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n).toBe(2);
   });
 
+  it('reopens forked nodes and gives their branches the fork point they had', () => {
+    const file = path.join(dir, 'harness.db');
+    const old = openDatabase(file, MIGRATIONS.slice(0, 10));
+    old.exec(`INSERT INTO projects (id, name, created_at) VALUES ('p', 'Paper', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, session_id, created_at) VALUES ('root', 'p', 'R', '[]', 'frozen', 'S0', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('a', 'p', 'A', '["root"]', 'finished', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('b', 'p', 'B', '["root"]', 'finished', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('m', 'p', 'M', '["a","b"]', 'open', 'now');
+      INSERT INTO messages (id, node_id, role, content, created_at) VALUES ('m1', 'root', 'user', 'q', 'now');
+      INSERT INTO messages (id, node_id, role, content, created_at) VALUES ('m2', 'root', 'assistant', 'a', 'now');`);
+    old.close();
+
+    const db = openDatabase(file);
+    const row = (id: string) => db.prepare('SELECT status, fork_point, fork_session FROM nodes WHERE id = ?').get(id);
+    expect(row('root')).toEqual({ status: 'open', fork_point: null, fork_session: null });
+    expect(row('a')).toEqual({ status: 'finished', fork_point: 2, fork_session: 'S0' });
+    expect(row('m')).toEqual({ status: 'open', fork_point: null, fork_session: null }); // a merge node is not a fork
+  });
+
   it('makes no migration backup for a new or an up-to-date database', () => {
     const file = path.join(dir, 'harness.db');
     openDatabase(file).close(); // new
