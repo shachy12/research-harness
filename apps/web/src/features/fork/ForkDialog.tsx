@@ -117,7 +117,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
             {` Each branch starts with this node's full context (~${inheritedTokens.toLocaleString()} tokens) and begins working as soon as you create it.`}
             {existingBranches > 0
               ? ` This node already has ${existingBranches} ${existingBranches === 1 ? 'branch; new ones are added next to it.' : 'branches; new ones are added next to them.'}`
-              : node.status === 'open' && ' After forking, this node is frozen; you can fork it again later to add more branches.'}
+              : node.status === 'open' && ' This node stays open: you can keep talking to it, and its branches keep only what it has now.'}
           </DialogDescription>
         </DialogHeader>
 

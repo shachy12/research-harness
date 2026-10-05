@@ -79,7 +79,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
     return node;
   };
 
-  /** A forked or finished node won't edit again: commit its copy and remove it (its branch stays). */
+  /** A finished node won't edit again: commit its copy and remove it (its branch stays). */
   const retireCopy = (node: DagNode) => {
     if (!node.gitBranch) return;
     worktrees
@@ -96,6 +96,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
         messages: graph.messages(node.id),
         inherited: inheritedItems(graph, node.id),
         childIds: graph.children(node.id).map((n) => n.id),
+        forks: forksOf(graph.children(node.id)),
         running: runs.isRunning(node.id),
         run: runs.status(node.id),
         titlePending: runs.isTitling(node.id),
@@ -186,7 +187,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
     })
 
     // Create branches and start each one working on its first message (with its files) right away.
-    // Forking freezes an open node so its history stays fixed.
+    // Fork: the node stays open; its branches start from what it has now (see below).
     .post('/:nodeId/fork', zValidator('json', forkSchema), async (c) => {
       const parent = requireNode(c.req.param('nodeId'));
       if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
@@ -202,14 +203,21 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
         branches.push({ prompt, title: title ?? titleFromPrompt(prompt), attachments: checked, ...settings });
       }
       if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
-      const children = repo.transaction(() => {
-        if (parent.status === 'open') repo.setStatus(parent.id, 'frozen');
-        return branches.map(({ title, model, effort }) =>
-          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id], model, effort }),
-        );
-      });
-      llm.release?.(parent.id); // the parent receives no more messages
-      retireCopy(parent); // queued before the children's copies are made from its branch
+      // The parent stays open. Each branch inherits what it has now (its fork point) and forks its
+      // session as it is now; the parent's next message continues in a copy (`planSession`).
+      const forkPoint = repo.listMessages(parent.id).length;
+      const children = repo.transaction(() =>
+        branches.map(({ title, model, effort }) =>
+          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id], model, effort, forkPoint, forkSession: parent.sessionId }),
+        ),
+      );
+      llm.release?.(parent.id); // its next message starts a new process on the copy
+      if (parent.gitBranch) {
+        // Queued before the children's copies are made: they start from the parent's files as they are now.
+        worktrees
+          .fork(project, parent.id, children.map((child) => child.id), `${parent.title}: forked`)
+          .catch((err: unknown) => console.error(`[git] fork ${parent.id}:`, err));
+      }
       children.forEach((child, i) => runs.start(child.id, branches[i].prompt, branches[i].attachments));
       return c.json(children, 201);
     })
@@ -251,7 +259,6 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
     .put('/:nodeId/result', zValidator('json', branchResultSchema), (c) => {
       const node = requireNode(c.req.param('nodeId'));
       if (node.parentIds.length === 0) throw new HttpError(400, 'The root node has no result to merge.');
-      if (node.status === 'frozen') throw conflict('This node was forked, so it can no longer be finished.');
       if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
 
       repo.setResult(node.id, c.req.valid('json'));
@@ -284,4 +291,14 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       repo.setGitInfo(node.id, node.gitBranch, await worktrees.countChanges(project, node.id));
       return c.json({ ok: true });
     });
+}
+
+/** Where branches were forked off a node, grouped by fork point (merge nodes are not forks). */
+function forksOf(children: DagNode[]): NodeDetail['forks'] {
+  const byPoint = new Map<number, string[]>();
+  for (const c of children) {
+    if (c.parentIds.length !== 1 || c.forkPoint === null) continue;
+    byPoint.set(c.forkPoint, [...(byPoint.get(c.forkPoint) ?? []), c.id]);
+  }
+  return [...byPoint].sort(([a], [b]) => a - b).map(([at, childIds]) => ({ at, childIds }));
 }

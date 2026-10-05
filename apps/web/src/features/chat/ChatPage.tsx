@@ -121,7 +121,12 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
 }
 
 function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: DialogKind) => void }) {
-  const { node, messages, inherited, childIds } = detail
+  const { node, messages, inherited, forks } = detail
+  /** The branches forked off after the first `count` messages (shown at that point in the chat). */
+  const forkMarker = (count: number) => {
+    const fork = forks.find((f) => f.at === count)
+    return fork && <ForkMarker projectId={node.projectId} childIds={fork.childIds} />
+  }
   const selection = useListSelection()
   const picked = selection ? resolveSelection(selection.items, messages.map((m) => m.id)) : []
   const stream = useChatStream(node.id)
@@ -213,7 +218,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             </h1>
             <StatusChip
               status={node.status}
-              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached)}
+              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached, forks.some((f) => f.at === messages.length))}
               elapsed={elapsed}
             />
             {node.parentIds.length > 1 && <MergeChip />}
@@ -231,12 +236,15 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             </p>
           )}
 
-          {messages.map((m) => (
+          {forkMarker(0)}
+          {messages.map((m, i) => (
             <Fragment key={m.id}>
               <MessageView id={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
-              {m.forkProposal && canWrite && (
+              {/* A proposal waits until it's reviewed: a fork after this reply dealt with it. */}
+              {m.forkProposal && canWrite && !forks.some((f) => f.at > i) && (
                 <ProposalBox proposal={m.forkProposal} disabled={working} onReview={() => onDialog(m.forkProposal)} />
               )}
+              {forkMarker(i + 1)}
             </Fragment>
           ))}
           {showStreamed && stream.userText && <MessageView role="user" text={stream.userText} attachments={sentFiles} />}
@@ -323,14 +331,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             </form>
           ) : (
             <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-              {node.status === 'frozen' ? (
-                <>
-                  Forked, so this node is frozen. Continue in a branch:{' '}
-                  <ChildLinks projectId={node.projectId} childIds={childIds} />
-                </>
-              ) : (
-                'Finished. Right-click it in the graph to include its result in a merge.'
-              )}
+              Finished. Right-click it in the graph to include its result in a merge.
             </p>
           )}
           <div className="flex flex-wrap gap-2">
@@ -384,17 +385,27 @@ function NoReply({ error, limit, retrying, retryError, onRetry }: {
   )
 }
 
-function ChildLinks({ projectId, childIds }: { projectId: string; childIds: string[] }) {
+/** Where branches were forked off: they inherit the conversation above this line, not what follows. */
+function ForkMarker({ projectId, childIds }: { projectId: string; childIds: string[] }) {
   const graph = useGraph(projectId)
   const titles = new Map(graph.data?.nodes.map((n) => [n.id, n.title]))
-  return childIds.map((id, i) => (
-    <Fragment key={id}>
-      {i > 0 && ', '}
-      <Link className="text-primary underline underline-offset-2" to={`/projects/${projectId}/nodes/${id}`}>
-        {titles.get(id) ?? 'branch'}
-      </Link>
-    </Fragment>
-  ))
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground" role="note">
+      <span className="h-px flex-1 bg-border" aria-hidden="true" />
+      <span className="max-w-[80%] text-center">
+        <span className="text-frozen">⑂</span> Forked here into{' '}
+        {childIds.map((id, i) => (
+          <Fragment key={id}>
+            {i > 0 && ', '}
+            <Link className="text-primary underline underline-offset-2" to={`/projects/${projectId}/nodes/${id}`}>
+              {titles.get(id) ?? 'branch'}
+            </Link>
+          </Fragment>
+        ))}
+      </span>
+      <span className="h-px flex-1 bg-border" aria-hidden="true" />
+    </div>
+  )
 }
 
 /** Ancestors through first parents; a merge node shows its merged branches instead. */

@@ -5,7 +5,6 @@ import { cn } from '@/lib/utils'
 
 const STATUS: Record<NodeStatus, { icon: string; label: string; className: string }> = {
   open: { icon: '○', label: 'Open', className: 'bg-open-soft text-open' },
-  frozen: { icon: '◆', label: 'Forked', className: 'bg-muted text-frozen' },
   finished: { icon: '✓', label: 'Finished', className: 'bg-done-soft text-done' },
 }
 
@@ -14,12 +13,13 @@ const ACTIVITY: Record<Activity, { label: string; className: string }> = {
   yours: { label: '● Your turn', className: 'bg-merge-soft text-merge' },
   failed: { label: '! No reply', className: 'bg-destructive/10 text-destructive' },
   limit: { label: '! Limit reached', className: 'bg-destructive/10 text-destructive' },
+  forked: { label: '◆ Forked', className: 'bg-muted text-frozen' },
 }
 
 const chip = 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap'
 
 /**
- * An open node shows what it's waiting for; forked and finished nodes show their status.
+ * An open node shows what it's waiting for; a finished node shows its status.
  * `elapsed` (e.g. "1:42") is shown while working, so a long research turn visibly keeps going.
  */
 export function StatusChip({ status, activity = null, elapsed, className }: {

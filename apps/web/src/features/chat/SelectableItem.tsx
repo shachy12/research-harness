@@ -21,9 +21,12 @@ const INTERACTIVE = 'a, button, input, summary, select, textarea'
  * leaves the item as it was.
  *
  * With `handle` (a selector), only that part of the element reacts: a section is picked by its heading.
+ * `base` is where the rendered Markdown starts in the reply's text (a reply is rendered in pieces
+ * between its tool calls), so items of different pieces never share an offset.
  */
 function useSelectable(
   messageId: string,
+  base: number,
   start: number | undefined,
   end: number | undefined,
   build: () => Built,
@@ -33,11 +36,12 @@ function useSelectable(
   const [hover, setHover] = useState(false)
   if (!selection || start === undefined || end === undefined) return null
 
-  const picked = selection.items.some((i) => i.messageId === messageId && i.start === start)
-  const included = selection.items.some((i) => isInside({ messageId, start, end }, i))
+  const range = { messageId, start: base + start, end: base + end }
+  const picked = selection.items.some((i) => i.messageId === messageId && i.start === range.start)
+  const included = selection.items.some((i) => isInside(range, i))
   const toggle = () => {
     const item = build()
-    if (item) selection.toggle({ messageId, start, end, ...item })
+    if (item) selection.toggle({ ...range, ...item })
   }
 
   /** The pointer is on this element's own part, not on an item inside it (or, with a handle, off the handle). */
@@ -66,13 +70,13 @@ function useSelectable(
 
 /**
  * A list item in a reply. `markdown` is the exact text that was rendered: the offsets in
- * `node.position` refer to it.
+ * `node.position` refer to it (`base` places it in the reply, see `useSelectable`).
  */
-export function SelectableListItem({ node, children, className, messageId, markdown, ...rest }: ComponentProps<'li'> &
-  ExtraProps & { messageId: string; markdown: string }) {
+export function SelectableListItem({ node, children, className, messageId, markdown, base, ...rest }: ComponentProps<'li'> &
+  ExtraProps & { messageId: string; markdown: string; base: number }) {
   const start = node?.position?.start.offset
   const end = node?.position?.end.offset
-  const s = useSelectable(messageId, start, end, () => ({ text: itemSource(markdown, start!, end!) }))
+  const s = useSelectable(messageId, base, start, end, () => ({ text: itemSource(markdown, start!, end!) }))
   if (!s) return <li className={className} {...rest}>{children}</li>
 
   return (
@@ -93,12 +97,12 @@ export function SelectableListItem({ node, children, className, messageId, markd
 }
 
 /** A body row of a table in a reply; its text is one `Column: cell` line per cell. Header rows aren't pickable. */
-export function SelectableTableRow({ node, children, className, messageId, markdown, ...rest }: ComponentProps<'tr'> &
-  ExtraProps & { messageId: string; markdown: string }) {
+export function SelectableTableRow({ node, children, className, messageId, markdown, base, ...rest }: ComponentProps<'tr'> &
+  ExtraProps & { messageId: string; markdown: string; base: number }) {
   const start = node?.position?.start.offset
   const end = node?.position?.end.offset
   const isBodyRow = node?.children.some((c) => c.type === 'element' && c.tagName === 'td')
-  const s = useSelectable(messageId, isBodyRow ? start : undefined, end, () => tableRowItem(markdown, start!, end!))
+  const s = useSelectable(messageId, base, isBodyRow ? start : undefined, end, () => tableRowItem(markdown, start!, end!))
   if (!s) return <tr className={className} {...rest}>{children}</tr>
 
   return (
@@ -121,11 +125,11 @@ export function SelectableTableRow({ node, children, className, messageId, markd
  * A section of a reply (see `rehypeSections`): a heading or bold lead-in line and what follows it.
  * Clicking the heading picks the whole section; the items inside it stay pickable on their own.
  */
-export function SelectableSection({ node, children, className, messageId, markdown, ...rest }: ComponentProps<'section'> &
-  ExtraProps & { messageId: string; markdown: string }) {
+export function SelectableSection({ node, children, className, messageId, markdown, base, ...rest }: ComponentProps<'section'> &
+  ExtraProps & { messageId: string; markdown: string; base: number }) {
   const start = node?.position?.start.offset
   const end = node?.position?.end.offset
-  const s = useSelectable(messageId, start, end, () => sectionItem(markdown, start!, end!), '[data-section-head]')
+  const s = useSelectable(messageId, base, start, end, () => sectionItem(markdown, start!, end!), '[data-section-head]')
   if (!s) return <section className={className} {...rest}>{children}</section>
 
   return (

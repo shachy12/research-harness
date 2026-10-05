@@ -9,7 +9,7 @@ import { firstMessage, planSession } from './session.ts';
 //      \ /
 //       M                merge of A + B, no messages yet
 const graph = buildGraph({
-  root: [[], { status: 'frozen', sessionId: 'S0', messages: ['u: scope it', 'a: three areas'] }],
+  root: [[], { sessionId: 'S0', messages: ['u: scope it', 'a: three areas'] }],
   A: [['root'], { sessionId: 'SA', result: result('A found'), messages: ['u: a q', 'a: a answer'] }],
   B: [['root'], { sessionId: 'SB', result: result('B found'), messages: ['u: b q', 'a: b answer'] }],
   C: [['root']],
@@ -37,6 +37,39 @@ describe('planSession', () => {
     expect(plan.preamble).toContain('Findings: A found');
     expect(plan.preamble).toContain('Findings: B found');
     expect(plan.preamble).not.toContain('a answer');
+  });
+
+  it("a forked node goes on in a copy of its session, so its branches' fork point stays as it was", () => {
+    const g = buildGraph({
+      root: [[], { sessionId: 'S0', messages: ['u: q', 'a: a'] }],
+      A: [['root'], { forkPoint: 2, forkSession: 'S0' }],
+    });
+    expect(planSession(g, 'root')).toEqual({ mode: 'fork', sessionId: 'S0', preamble: null, transcript: [] });
+    expect(planSession(g, 'A')).toMatchObject({ mode: 'fork', sessionId: 'S0', preamble: branchStartNote('Title A') });
+  });
+
+  it('resumes once the forked node has its own copy, and never copies a finished node', () => {
+    const g = buildGraph({
+      root: [[], { sessionId: 'S1', messages: ['u: q', 'a: a', 'u: more', 'a: more'] }],
+      A: [['root'], { forkPoint: 2, forkSession: 'S0', result: result('A'), sessionId: 'SA', messages: ['u: x', 'a: y'] }],
+      B: [['A'], { forkPoint: 2, forkSession: 'SA' }],
+    });
+    expect(planSession(g, 'root')).toMatchObject({ mode: 'resume', sessionId: 'S1' });
+    expect(planSession(g, 'A')).toMatchObject({ mode: 'resume', sessionId: 'SA' }); // finished: its session can't change
+  });
+
+  it('a branch whose first reply never started forks the session from its fork point, not the parent now', () => {
+    const g = buildGraph({
+      root: [[], { sessionId: 'S1', messages: ['u: q', 'a: a', 'u: more', 'a: more'] }],
+      A: [['root'], { forkPoint: 2, forkSession: 'S0' }],
+    });
+    expect(planSession(g, 'A')).toMatchObject({ mode: 'fork', sessionId: 'S0' });
+    // Without a session at the fork point: the parent's messages up to it, as a transcript.
+    const noSession = buildGraph({
+      root: [[], { messages: ['u: q', 'a: a', 'u: more', 'a: more'] }],
+      A: [['root'], { forkPoint: 2 }],
+    });
+    expect(planSession(noSession, 'A').transcript.map((t) => t.content)).toEqual(['q', 'a']);
   });
 
   it('starts a new session for an empty root', () => {

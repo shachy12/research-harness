@@ -1,5 +1,6 @@
 import type { DagNode, FileChange } from '@harness/shared'
-import { CheckIcon, FilePenIcon } from 'lucide-react'
+import { CheckIcon, ChevronRightIcon, FilePenIcon } from 'lucide-react'
+import { useState } from 'react'
 import { useApplyChanges, useNodeChanges } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -9,6 +10,7 @@ const STATUS_LETTER: Record<FileChange['status'], string> = { added: 'A', modifi
 /**
  * The files this node's branch changes compared with the project, with their diff, and the step
  * that brings them into the project ("Apply"). Shown for nodes that have an editable copy.
+ * The file list starts collapsed (it can be long); the header with the totals and Apply stays.
  */
 export function ChangesPanel({ node, version, working }: {
   node: DagNode
@@ -19,6 +21,7 @@ export function ChangesPanel({ node, version, working }: {
 }) {
   const changes = useNodeChanges(node.id, node.gitBranch !== null, version)
   const apply = useApplyChanges()
+  const [expanded, setExpanded] = useState(false)
   if (!node.gitBranch) return null
 
   const data = changes.data
@@ -29,9 +32,16 @@ export function ChangesPanel({ node, version, working }: {
   return (
     <section aria-label="File changes" className="flex flex-col gap-2 rounded-xl border border-open/40 bg-open-soft/40 p-3 text-sm">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="flex items-center gap-1.5 font-semibold text-open">
+        <button
+          type="button"
+          className="flex items-center gap-1.5 font-semibold text-open"
+          aria-expanded={expanded}
+          title={expanded ? 'Hide the files' : 'Show the files'}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <ChevronRightIcon className={cn('size-4 transition-transform', expanded && 'rotate-90')} />
           <FilePenIcon className="size-4" /> File changes
-        </span>
+        </button>
         {data && data.files.length > 0 && (
           <span className="font-mono text-xs text-muted-foreground tabular-nums">
             {data.files.length} {data.files.length === 1 ? 'file' : 'files'} · <span className="text-done">+{additions}</span>{' '}
@@ -77,7 +87,7 @@ export function ChangesPanel({ node, version, working }: {
       )}
       {apply.isError && <p className="text-xs whitespace-pre-wrap text-destructive">{apply.error.message}</p>}
 
-      {data && data.files.length > 0 && (
+      {expanded && data && data.files.length > 0 && (
         <div className="flex flex-col gap-1">
           {data.files.map((f) => (
             <details key={f.path} className="group rounded-md border bg-background/70">

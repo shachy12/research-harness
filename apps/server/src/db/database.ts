@@ -83,6 +83,19 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`,
   // 10: branches the model proposed with its fork_branches tool in a reply (JSON ForkProposal).
   `ALTER TABLE messages ADD COLUMN fork_proposal TEXT;`,
+  // 11: a forked node stays open. Each branch records its fork point (how many of the parent's
+  // messages it inherits) and the parent's session at that point. Until now a forked parent was
+  // frozen, so for existing branches that is all of the parent's messages and its current session;
+  // frozen nodes become open (their status is the only thing changed).
+  `
+  ALTER TABLE nodes ADD COLUMN fork_point INTEGER;
+  ALTER TABLE nodes ADD COLUMN fork_session TEXT;
+  UPDATE nodes SET
+    fork_point = (SELECT COUNT(*) FROM messages m WHERE m.node_id = json_extract(nodes.parent_ids, '$[0]')),
+    fork_session = (SELECT p.session_id FROM nodes p WHERE p.id = json_extract(nodes.parent_ids, '$[0]'))
+  WHERE json_array_length(nodes.parent_ids) = 1;
+  UPDATE nodes SET status = 'open' WHERE status = 'frozen';
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

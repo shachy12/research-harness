@@ -255,7 +255,6 @@ export class RunManager {
   private requireWritable(nodeId: string): DagNode {
     const node = this.repo.getNode(nodeId);
     if (!node) throw notFound('Node');
-    if (node.status === 'frozen') throw conflict('This node was forked, so it is frozen. Continue in one of its branches.');
     if (node.status === 'finished') throw conflict('This branch is finished.');
     if (this.runs.has(nodeId)) throw conflict('A reply is already being generated for this node.');
     return node;
@@ -340,7 +339,9 @@ export class RunManager {
           run.activity = 'Thinking';
           emit({ type: 'thinking' });
         } else if (event.type === 'tool') {
-          const call = this.withNodeTitle(event.call, run.nodeId);
+          // Remember where in the text the call started (updates of the same call keep it).
+          const offset = run.toolCalls.get(event.call.id)?.offset ?? run.text.length;
+          const call = { ...this.withNodeTitle(event.call, run.nodeId), offset };
           run.toolCalls.set(call.id, call);
           run.activity = call.status === 'running' ? toolActivity(call) : 'Thinking';
           emit({ type: 'tool', call });
