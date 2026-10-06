@@ -1,5 +1,4 @@
 import type {
-  BranchResult,
   CreateProjectBody,
   DagNode,
   FolderGit,
@@ -108,19 +107,23 @@ export function useGraph(projectId: string) {
     // Always reload when the graph opens (a reply may have started meanwhile), and while any node
     // is working, keep refreshing so the cards' "Working…" / "Your turn" stay current.
     staleTime: 0,
-    // Also while a model-written title is on its way, so it shows up without a reload.
-    refetchInterval: (query) => (query.state.data?.nodes.some((n) => n.running || n.titlePending) ? 1500 : false),
+    // Also while a model-written title is on its way, so it shows up without a reload, and while a
+    // merge is writing its results.
+    refetchInterval: (query) =>
+      (query.state.data?.nodes.some((n) => n.running || n.titlePending || n.merge?.running) ? 1500 : false),
   })
 }
 
-export function useNodeDetail(nodeId: string) {
+export function useNodeDetail(nodeId: string, enabled = true) {
   return useQuery({
     queryKey: keys.node(nodeId),
     queryFn: ({ signal }) => api.get<NodeDetail>(`/nodes/${nodeId}`, signal),
+    enabled,
     // Opening a chat always loads it fresh, even if it was fetched moments ago (the default
     // staleTime would skip that): the opening scroll position depends on what has been read.
     refetchOnMount: 'always',
-    refetchInterval: (query) => (query.state.data?.titlePending ? 1500 : false),
+    // A merge writing its results starts its reply when they're done: keep checking so the chat sees it.
+    refetchInterval: (query) => (query.state.data?.titlePending || query.state.data?.merge?.running ? 1500 : false),
   })
 }
 
@@ -191,8 +194,8 @@ export function useMergePreview(projectId: string, parentIds: string[], enabled:
 export function useFork() {
   const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: ({ nodeId, branches }: { nodeId: string; branches: ForkBody['branches'] }) =>
-      api.post<DagNode[]>(`/nodes/${nodeId}/fork`, { branches }),
+    mutationFn: ({ nodeId, ...body }: { nodeId: string; branches: ForkBody['branches']; filesFromProject: boolean }) =>
+      api.post<DagNode[]>(`/nodes/${nodeId}/fork`, body),
     onSuccess: refresh,
   })
 }
@@ -232,17 +235,31 @@ export function useSuggestTitle() {
   })
 }
 
-export function useDraftResult() {
+/** Mark a node done (a green marker), or not. Sending it a message clears the mark too. */
+export function useSetDone() {
+  const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: (nodeId: string) => api.post<BranchResult>(`/nodes/${nodeId}/result/draft`),
+    mutationFn: ({ nodeId, done }: { nodeId: string; done: boolean }) => api.put<DagNode>(`/nodes/${nodeId}/done`, { done }),
+    onSuccess: refresh,
   })
 }
 
-export function useSaveResult() {
+/** Delete a node (a database backup is made first). Its children become roots. */
+export function useDeleteNode() {
   const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: ({ nodeId, result }: { nodeId: string; result: BranchResult }) =>
-      api.put<DagNode>(`/nodes/${nodeId}/result`, result),
+    mutationFn: (nodeId: string) => api.del<{ ok: true; orphans: string[] }>(`/nodes/${nodeId}`),
+    // Not awaited: the deleted node's chat must leave (the caller's onSuccess) before its data is
+    // refetched, or the failed refetch replaces the page and the caller's callback never runs.
+    onSuccess: () => void refresh(),
+  })
+}
+
+/** Another root in the project: an empty node with no parents. */
+export function useNewRoot(projectId: string) {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: () => api.post<DagNode>(`/projects/${projectId}/roots`),
     onSuccess: refresh,
   })
 }

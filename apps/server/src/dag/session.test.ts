@@ -48,14 +48,14 @@ describe('planSession', () => {
     expect(planSession(g, 'A')).toMatchObject({ mode: 'fork', sessionId: 'S0', preamble: branchStartNote('Title A') });
   });
 
-  it('resumes once the forked node has its own copy, and never copies a finished node', () => {
+  it('resumes once the forked node has its own copy; a node marked done is copied like any other', () => {
     const g = buildGraph({
       root: [[], { sessionId: 'S1', messages: ['u: q', 'a: a', 'u: more', 'a: more'] }],
-      A: [['root'], { forkPoint: 2, forkSession: 'S0', result: result('A'), sessionId: 'SA', messages: ['u: x', 'a: y'] }],
+      A: [['root'], { forkPoint: 2, forkSession: 'S0', status: 'finished', sessionId: 'SA', messages: ['u: x', 'a: y'] }],
       B: [['A'], { forkPoint: 2, forkSession: 'SA' }],
     });
     expect(planSession(g, 'root')).toMatchObject({ mode: 'resume', sessionId: 'S1' });
-    expect(planSession(g, 'A')).toMatchObject({ mode: 'resume', sessionId: 'SA' }); // finished: its session can't change
+    expect(planSession(g, 'A')).toMatchObject({ mode: 'fork', sessionId: 'SA' }); // done is only a marker: it can go on
   });
 
   it('a branch whose first reply never started forks the session from its fork point, not the parent now', () => {

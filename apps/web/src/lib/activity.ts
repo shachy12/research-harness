@@ -1,7 +1,9 @@
-import type { NodeStatus, Role } from '@harness/shared'
+import type { MergeState, NodeStatus, Role } from '@harness/shared'
 
 /**
  * What an open node is waiting for:
+ *   merging  a merge node writing the results of the nodes it merges (its reply starts after)
+ *   stopped  a merge node that stopped before its results were written (Retry starts it again)
  *   working  the model is writing a reply
  *   yours    the model replied (or nothing was asked yet): your turn
  *   failed   the last message is yours but no reply is running (it failed or was stopped early)
@@ -9,12 +11,14 @@ import type { NodeStatus, Role } from '@harness/shared'
  *   forked   it was just forked (nothing added since): the work goes on in its branches, though
  *            it stays open to continue
  */
-export type Activity = 'working' | 'yours' | 'failed' | 'limit' | 'forked'
+export type Activity = 'merging' | 'stopped' | 'working' | 'yours' | 'failed' | 'limit' | 'forked'
 
 export function activityOf(
-  status: NodeStatus, running: boolean, lastRole: Role | null, limitReached = false, forkedAtEnd = false,
+  status: NodeStatus, running: boolean, lastRole: Role | null, limitReached = false, forkedAtEnd = false, merge: MergeState | null = null,
 ): Activity | null {
+  if (merge?.running) return 'merging'
   if (running) return 'working'
+  if (merge) return 'stopped'
   if (status !== 'open') return null
   if (forkedAtEnd) return 'forked'
   if (lastRole !== 'user') return 'yours'

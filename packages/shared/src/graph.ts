@@ -30,3 +30,16 @@ export function lowestCommonAncestor(get: NodeLookup, ids: string[]): string | n
   if (common.length === 0) return null;
   return common.reduce((best, a) => (depth(get, a) > depth(get, best) ? a : best));
 }
+
+/**
+ * Where a merge of these nodes starts: their lowest common ancestor, where a merged node that is
+ * an ancestor of all the others counts too (merging a node with one of its descendants starts from
+ * that node). Null if they share no ancestor (e.g. nodes under different roots).
+ */
+export function mergeBaseOf(get: NodeLookup, ids: string[]): string | null {
+  if (ids.length === 0) return null;
+  const sets = ids.map((id) => ancestors(get, id).add(id));
+  const common = [...sets[0]].filter((a) => sets.every((s) => s.has(a)));
+  if (common.length === 0) return null;
+  return common.reduce((best, a) => (depth(get, a) > depth(get, best) ? a : best));
+}

@@ -33,9 +33,7 @@ export function branchStartNote(title: string): string {
 }
 
 export function resultsTurn(seg: Extract<Segment, { kind: 'results' }>): string {
-  const blocks = seg.branches
-    .filter((b) => b.result)
-    .map((b) => formatResult(b.promptTitle, b.result!));
+  const blocks = seg.results.map(({ node, result }) => formatResult(node.promptTitle, result));
   return [
     `[Merge node "${seg.mergeNode.promptTitle}". The following branches were explored separately and are merged here. Only their final results are included, not their transcripts.]`,
     ...blocks,
@@ -89,10 +87,15 @@ export function editNote(edit: {
   branch: string;
   merged: { title: string; files: string[] }[];
   conflicts: string[];
+  /** The copy started from the project's checked-out branch (this name), not the conversation's files. */
+  fromProject?: string | null;
 }): string {
+  const holds = edit.fromProject
+    ? `it holds the project files as they are on the project's branch ${edit.fromProject}, not as the conversation above left them: file changes made earlier in this conversation are not in it. `
+    : 'it holds the project files as the conversation above left them. ';
   const lines = [
     `[You can edit files in this conversation. Your own copy of the project is at ${edit.dir} (git branch ${edit.branch}); ` +
-      'it holds the project files as the conversation above left them. Make every change there, with Edit or Write and absolute paths. ' +
+      holds + 'Make every change there, with Edit or Write and absolute paths. ' +
       'The project folder itself and other copies are read-only for you; copies mentioned earlier in the conversation belong to other branches. ' +
       `You can also run shell commands with the Bash tool (e.g. to compile or run scripts): run them inside your copy (cd ${shellPath(edit.dir)} first) and never change files outside it. ` +
       'Files that commands create there (build outputs too) count as your changes, so delete the ones the user should not get. ' +
@@ -138,8 +141,8 @@ export function buildChatRequest(graph: GraphReader, nodeId: string, extraTurns:
   return { system: SYSTEM_PROMPT, turns: [...turns, ...extraTurns] };
 }
 
-export const DRAFT_RESULT_INSTRUCTION = `[This branch is finished. Write its result report, to be merged back into the main research.
-Use only what this branch established.
+export const DRAFT_RESULT_INSTRUCTION = `[This conversation is being merged with others into a new node. Write its result report: only this report goes into the merge, not the conversation.
+Use only what this conversation established.
 - findings: the key conclusions, self-contained and specific
 - evidence: the sources, data or reasoning that support them (keep source names and links)
 - openQuestions: what is still unresolved or worth a follow-up (empty if none)

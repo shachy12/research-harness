@@ -1,14 +1,16 @@
-import { type BranchResult, type ContextItem, type DagNode, type Message, ancestors, depth } from '@harness/shared';
-import { type GraphReader, lowestCommonAncestor } from './graph.ts';
+import { type BranchResult, type ContextItem, type DagNode, type Message, ancestors, depth, mergeBaseOf } from '@harness/shared';
+import type { GraphReader } from './graph.ts';
 
 /**
  * A node's full context is a flat list of segments, in prompt order:
  *
  *   root:        [own messages]
  *   branch:      [parent's full context up to the fork point] + [branch-start] + [own messages]
- *   merge node:  [base's full context up to the fork point] + [results of each merged branch] + [own messages]
+ *   merge node:  [base's full context up to the fork point] + [results of each merged node] + [own messages]
  *
- * where "base" is the lowest common ancestor of the merged branches. A node can go on after it was
+ * where "base" is the lowest common ancestor of the merged nodes (or one of them, if it is an
+ * ancestor of all the others; see `mergeBaseOf`). The results are the ones the merge node received
+ * when it was created (`DagNode.mergeResults`). A node can go on after it was
  * forked; its branches inherit only what it had then (`DagNode.forkPoint`), and a merge cuts the
  * base where the earliest of the merged branches' lines forked off it (`mergeBase`). Merged branches
  * contribute only their result, never their transcript. `skipped` lists the nodes whose
@@ -18,7 +20,7 @@ import { type GraphReader, lowestCommonAncestor } from './graph.ts';
 export type Segment =
   | { kind: 'messages'; node: DagNode; messages: Message[] }
   | { kind: 'branch-start'; node: DagNode }
-  | { kind: 'results'; mergeNode: DagNode; branches: DagNode[]; skipped: DagNode[] };
+  | { kind: 'results'; mergeNode: DagNode; results: { node: DagNode; result: BranchResult }[]; skipped: DagNode[] };
 
 /** What the node inherits, before its own messages. */
 export function inheritedSegments(graph: GraphReader, nodeId: string): Segment[] {
@@ -29,7 +31,12 @@ export function inheritedSegments(graph: GraphReader, nodeId: string): Segment[]
   const base = mergeBase(graph, node.parentIds);
   return [
     ...(base ? fullSegments(graph, base.id, base.upto) : []),
-    { kind: 'results', mergeNode: node, branches: node.parentIds.map((p) => graph.node(p)), skipped: skippedByMerge(graph, node.parentIds, base?.id ?? null) },
+    {
+      kind: 'results',
+      mergeNode: node,
+      results: (node.mergeResults ?? []).map((r) => ({ node: graph.node(r.nodeId), result: r.result })),
+      skipped: skippedByMerge(graph, node.parentIds, base?.id ?? null),
+    },
   ];
 }
 
@@ -39,7 +46,7 @@ export function inheritedSegments(graph: GraphReader, nodeId: string): Segment[]
  * the session holding exactly that context (the base's own session when nothing is cut off).
  */
 export function mergeBase(graph: GraphReader, branchIds: string[]): { id: string; upto: number | null; session: string | null } | null {
-  const id = lowestCommonAncestor(graph, branchIds);
+  const id = mergeBaseOf((n) => graph.node(n), branchIds);
   if (!id) return null;
   const get = (n: string) => graph.node(n);
   // The base's children on the way to the merged branches.
@@ -89,9 +96,7 @@ export function inheritedItems(graph: GraphReader, nodeId: string): ContextItem[
         items.push({ kind: 'message', nodeId: seg.node.id, nodeTitle: seg.node.title, message });
       }
     } else if (seg.kind === 'results') {
-      for (const b of seg.branches) {
-        if (b.result) items.push({ kind: 'result', nodeId: b.id, nodeTitle: b.title, result: b.result });
-      }
+      for (const { node, result } of seg.results) items.push({ kind: 'result', nodeId: node.id, nodeTitle: node.title, result });
     }
   }
   return items;

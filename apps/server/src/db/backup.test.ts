@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { KEEP_DAILY, backupDatabase, dailyBackup, listBackups, pruneDailyBackups } from './backup.ts';
 import { MIGRATIONS, backupDirOf, openDatabase } from './database.ts';
+import { Repository } from './repository.ts';
 
 let dir: string;
 beforeEach(() => {
@@ -79,6 +80,30 @@ describe('backups', () => {
     expect(row('root')).toEqual({ status: 'open', fork_point: null, fork_session: null });
     expect(row('a')).toEqual({ status: 'finished', fork_point: 2, fork_session: 'S0' });
     expect(row('m')).toEqual({ status: 'open', fork_point: null, fork_session: null }); // a merge node is not a fork
+  });
+
+  it('gives existing results the messages they cover, and existing merge nodes the results they received', () => {
+    const file = path.join(dir, 'harness.db');
+    const old = openDatabase(file, MIGRATIONS.slice(0, 11));
+    const r = (findings: string) => JSON.stringify({ findings, evidence: '', openQuestions: '', confidence: 'high' });
+    old.exec(`INSERT INTO projects (id, name, created_at) VALUES ('p', 'Paper', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('root', 'p', 'R', '[]', 'open', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, result, created_at) VALUES ('b', 'p', 'B', '["root"]', 'finished', '${r('B found')}', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, result, created_at) VALUES ('a', 'p', 'A', '["root"]', 'finished', '${r('A found')}', 'now');
+      INSERT INTO nodes (id, project_id, title, parent_ids, status, created_at) VALUES ('m', 'p', 'M', '["a","b"]', 'open', 'now');
+      INSERT INTO messages (id, node_id, role, content, created_at) VALUES ('m1', 'a', 'user', 'q', 'now');
+      INSERT INTO messages (id, node_id, role, content, created_at) VALUES ('m2', 'a', 'assistant', 'x', 'now');`);
+    old.close();
+
+    const repo = new Repository(openDatabase(file));
+    expect(repo.getNode('a')).toMatchObject({ status: 'finished', resultUpto: 2, mergePrompt: null, filesFromProject: false });
+    expect(repo.getNode('b')!.resultUpto).toBe(0);
+    expect(repo.getNode('root')).toMatchObject({ result: null, resultUpto: null, mergeResults: null });
+    // In merge order (a, then b), whatever order the nodes were created in.
+    expect(repo.getNode('m')!.mergeResults).toEqual([
+      { nodeId: 'a', upto: 2, result: JSON.parse(r('A found')) },
+      { nodeId: 'b', upto: 0, result: JSON.parse(r('B found')) },
+    ]);
   });
 
   it('makes no migration backup for a new or an up-to-date database', () => {
