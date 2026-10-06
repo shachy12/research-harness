@@ -14,6 +14,7 @@ import type {
   ProjectSummary,
 } from '@harness/shared'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from './client'
 
 // Query keys: what each piece of cached server data is called.
@@ -244,14 +245,39 @@ export function useSetDone() {
   })
 }
 
-/** Delete a node (a database backup is made first). Its children become roots. */
+/**
+ * Delete a node (it is only hidden, with its messages kept). Its children become roots. A toast
+ * offers Undo; the graph's "Deleted" list restores it later.
+ */
 export function useDeleteNode() {
   const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: (nodeId: string) => api.del<{ ok: true; orphans: string[] }>(`/nodes/${nodeId}`),
+    mutationFn: ({ nodeId }: { nodeId: string; title: string }) => api.del<{ ok: true; orphans: string[] }>(`/nodes/${nodeId}`),
     // Not awaited: the deleted node's chat must leave (the caller's onSuccess) before its data is
     // refetched, or the failed refetch replaces the page and the caller's callback never runs.
-    onSuccess: () => void refresh(),
+    onSuccess: (_, { nodeId, title }) => {
+      void refresh()
+      toast(`Deleted "${title}"`, {
+        duration: 10_000,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            api.post(`/nodes/${nodeId}/restore`)
+              .then(() => refresh())
+              .catch((err: Error) => toast.error(`Could not restore it: ${err.message}`))
+          },
+        },
+      })
+    },
+  })
+}
+
+/** Bring a deleted node back (with its children, if they are still roots). */
+export function useRestoreNode() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: (nodeId: string) => api.post<DagNode>(`/nodes/${nodeId}/restore`),
+    onSuccess: refresh,
   })
 }
 

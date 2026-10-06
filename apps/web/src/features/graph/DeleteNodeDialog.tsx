@@ -21,16 +21,16 @@ export function DeleteNodeDialog({ node, childCount, running, onDeleted, onClose
         <DialogHeader>
           <DialogTitle>Delete "{node.title}"?</DialogTitle>
           <DialogDescription>
-            This deletes its messages{running && ' and stops the reply it is writing'}. A backup of the database is saved
-            first (in <code className="text-xs">data/backups/</code>), so it can be recovered if needed. Its file changes
-            stay in its git branch.
+            It disappears from the graph{running && ' and the reply it is writing stops'}. Nothing is erased: you can undo
+            right after, or restore it later from "Deleted" on the graph. Its file changes stay in its git branch.
           </DialogDescription>
         </DialogHeader>
         {childCount > 0 && (
           <p className="rounded-lg border border-merge/40 bg-merge-soft px-3 py-2 text-sm text-merge">
             Its {childCount === 1 ? 'child becomes a separate root' : `${childCount} children become separate roots`}. They
             keep their own conversations, and the model in them still knows what came before, but the graph no longer
-            links them here and their chats no longer show this node's messages as inherited context.
+            links them here and their chats no longer show this node's messages as inherited context. Restoring this node
+            attaches them again.
           </p>
         )}
         {remove.isError && <p className="text-sm text-destructive">{remove.error.message}</p>}
@@ -39,7 +39,7 @@ export function DeleteNodeDialog({ node, childCount, running, onDeleted, onClose
           <Button
             variant="destructive"
             disabled={remove.isPending}
-            onClick={() => remove.mutate(node.id, { onSuccess: () => { onDeleted(); onClose() } })}
+            onClick={() => remove.mutate({ nodeId: node.id, title: node.title }, { onSuccess: () => { onDeleted(); onClose() } })}
           >
             {remove.isPending ? 'Deleting…' : 'Delete node'}
           </Button>

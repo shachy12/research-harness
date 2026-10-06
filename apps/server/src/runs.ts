@@ -516,11 +516,12 @@ export class RunManager {
     // Commit file changes before the run counts as finished, so a fork right after starts from them.
     if (ctx.edit) await this.commitEdits(run.nodeId, baseCtx.message);
 
-    // Save the reply, or whatever arrived before a failure or Stop
-    // (unless the node itself is gone, e.g. the project was reset mid-reply).
+    // Save the reply, or whatever arrived before a failure or Stop (also on a node deleted
+    // mid-reply, so restoring it brings the reply back; not if the node is gone, e.g. the project
+    // was reset).
     this.runs.delete(run.nodeId);
     const hasContent = run.text !== '' || run.toolCalls.size > 0;
-    const node = this.repo.getNode(run.nodeId);
+    const node = this.repo.getNode(run.nodeId, { includeDeleted: true });
     // Keep the session only if the reply got somewhere. A first reply that failed before writing
     // anything leaves no session behind, so a retry starts that conversation over cleanly.
     if (node && run.sessionId && (hasContent || !failure)) this.repo.setSessionId(run.nodeId, run.sessionId);

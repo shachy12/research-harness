@@ -117,6 +117,13 @@ export const MIGRATIONS: string[] = [
   )
   WHERE json_array_length(parent_ids) > 1;
   `,
+  // 13: deleting a node only marks it (`deleted_at`); it and its messages stay, hidden. Its
+  // children become roots; `deleted_links` keeps how they were attached (JSON DeletedLink[]), so
+  // restoring the node puts them back.
+  `
+  ALTER TABLE nodes ADD COLUMN deleted_at TEXT;
+  ALTER TABLE nodes ADD COLUMN deleted_links TEXT;
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

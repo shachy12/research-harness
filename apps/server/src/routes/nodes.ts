@@ -69,7 +69,7 @@ function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStre
   });
 }
 
-export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel, backup }: RouteDeps) {
+export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
@@ -172,21 +172,14 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
       return c.json({ ok: true });
     })
 
-    // Delete a node and its messages. Its children become roots (they keep their own conversations
-    // and sessions; the graph no longer links them). A backup of the database is made first (if that
-    // fails, nothing is deleted). Its git branch stays; its worktree is committed and removed.
+    // Delete a node: it is hidden with its messages kept (`restore` undoes it). Its children become
+    // roots (they keep their own conversations and sessions; the graph no longer links them). Its
+    // git branch stays; its worktree is committed and removed (made again if it is restored).
     .delete('/:nodeId', (c) => {
       const node = requireNode(c.req.param('nodeId'));
       const graph = repo.snapshot(node.projectId);
       const merging = graph.children(node.id).find((child) => runs.mergeState(child, graph.messages(child.id).length)?.running);
       if (merging) throw conflict(`"${merging.title}" is still writing the results of a merge with this node. Wait until it has started, or delete that merge first.`);
-      try {
-        const saved = backup?.('before-delete-node');
-        if (saved) console.log(`database backed up before deleting node "${node.title}": ${saved}`);
-      } catch (err) {
-        console.error('[delete node] backup failed:', err);
-        throw new HttpError(500, 'Could not back up the database, so nothing was deleted.');
-      }
       runs.stop(node.id);
       llm.release?.(node.id);
       const orphans = repo.deleteNode(node.id);
@@ -196,6 +189,13 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
           .catch((err: unknown) => console.error(`[git] retire ${node.id}:`, err));
       }
       return c.json({ ok: true, orphans });
+    })
+
+    // Undo a delete: the node comes back, and its children that are still roots are attached again.
+    .post('/:nodeId/restore', (c) => {
+      const restored = repo.restoreNode(c.req.param('nodeId'));
+      if (!restored) throw notFound('Deleted node');
+      return c.json(restored);
     })
 
     // Mark the node done (a green marker on its card), or not. Nothing else changes: it can still be

@@ -267,9 +267,21 @@ export interface AskApproval {
   expiresAt: string;
 }
 
+/** A deleted node, as the graph's "Deleted" list shows it (it can be restored). */
+export interface DeletedNode {
+  id: string;
+  title: string;
+  deletedAt: string;
+  messageCount: number;
+  /** Children it had when deleted (they became roots; restoring attaches them again). */
+  childCount: number;
+}
+
 export interface GraphResponse {
   project: Project;
   nodes: NodeSummary[];
+  /** Deleted nodes of the project, most recent first. */
+  deleted: DeletedNode[];
   usage: UsageLimit | null;
 }
 

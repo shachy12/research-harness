@@ -169,7 +169,7 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
           merge: runs.mergeState(node, messages.length),
         };
       });
-      return c.json<GraphResponse>({ project, nodes, usage: runs.usage() });
+      return c.json<GraphResponse>({ project, nodes, deleted: repo.listDeleted(project.id), usage: runs.usage() });
     })
 
     // What merging these branches does to their files: changed files and conflicts (nothing is changed).

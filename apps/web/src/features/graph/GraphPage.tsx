@@ -15,13 +15,14 @@ import { useGraph, useNewRoot, useRefreshAll } from '@/api/queries'
 import { api } from '@/api/client'
 import { UsageBanner } from '@/components/UsageBanner'
 import { Button } from '@/components/ui/button'
-import { PlusIcon, RotateCcwIcon } from 'lucide-react'
+import { PlusIcon, RotateCcwIcon, Trash2Icon } from 'lucide-react'
 import { MergeDialog } from '@/features/merge/MergeDialog'
 import { useMergeSelection } from '@/features/merge/selection'
 import { RenameDialog } from '@/features/rename/RenameDialog'
 import { layoutGraph } from './layout'
 import { type CardNode, NodeCard } from './NodeCard'
 import { DeleteNodeDialog } from './DeleteNodeDialog'
+import { DeletedNodesDialog } from './DeletedNodesDialog'
 import { ResetDialog } from './ResetDialog'
 import { forgetView, rememberView, rememberedView } from './viewMemory'
 
@@ -48,6 +49,8 @@ function GraphView({ projectId }: { projectId: string }) {
   const [resetOpen, setResetOpen] = useState(false)
   const [renaming, setRenaming] = useState<NodeSummary | null>(null)
   const [deleting, setDeleting] = useState<NodeSummary | null>(null)
+  const [deletedOpen, setDeletedOpen] = useState(false)
+  const deleted = graph.data?.deleted ?? []
   const [retrying, setRetrying] = useState(false)
   const flow = useReactFlow()
   const refresh = useRefreshAll()
@@ -168,6 +171,11 @@ function GraphView({ projectId }: { projectId: string }) {
           <Button variant="outline" size="sm" className="bg-card" onClick={() => setResetOpen(true)}>
             <RotateCcwIcon /> Start over
           </Button>
+          {deleted.length > 0 && (
+            <Button variant="outline" size="sm" className="bg-card" onClick={() => setDeletedOpen(true)}>
+              <Trash2Icon /> Deleted ({deleted.length})
+            </Button>
+          )}
         </Panel>
         <Panel position="bottom-left" className="flex flex-wrap items-center gap-2">
           <Button
@@ -200,6 +208,7 @@ function GraphView({ projectId }: { projectId: string }) {
       )}
 
       {renaming && <RenameDialog node={renaming} onClose={() => setRenaming(null)} />}
+      {deletedOpen && <DeletedNodesDialog deleted={deleted} onClose={() => setDeletedOpen(false)} />}
       {deleting && (
         <DeleteNodeDialog
           node={deleting}

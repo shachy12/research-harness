@@ -39,6 +39,7 @@ const node = (id: string, projectId: string): NodeSummary => ({
 const graphOf = (projectId: string): GraphResponse => ({
   project: { id: projectId, name: projectId, folder: null, archived: false, createdAt: '2026-10-06T00:00:00.000Z' },
   nodes: [node(`${projectId}-root`, projectId)],
+  deleted: [],
   usage: null,
 })
 

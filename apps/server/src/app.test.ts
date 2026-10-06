@@ -421,9 +421,50 @@ describe('API', () => {
     const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
     expect(graph.nodes.filter((n) => n.parentIds.length === 0).map((n) => n.id)).toEqual([rootId, a1.id, a2.id]);
 
+    expect(graph.deleted).toMatchObject([{ id: a.id, title: 'A question', messageCount: 2, childCount: 2 }]);
+
     // An orphan goes on in its own session (the model still has what came before).
     await chat(a1.id, 'More');
     expect(llm.contexts.at(-1)!.session).toMatchObject({ mode: 'resume', sessionId: 'session-1' });
+  });
+
+  it('restores a deleted node with its messages, and attaches its children again', async () => {
+    await chat(rootId, 'Scope it');
+    const [a] = await fork(rootId, ['A question']);
+    const [a1, a2] = await fork(a.id, ['A1 question', 'A2 question']);
+    const before = (await detail(a1.id)).node;
+    await call('DELETE', `/nodes/${a.id}`);
+    await call('DELETE', `/nodes/${a2.id}`); // deleted while orphaned: stays deleted
+
+    const { status, data } = await call<DagNode>('POST', `/nodes/${a.id}/restore`);
+    expect(status).toBe(200);
+    expect(data).toMatchObject({ id: a.id, parentIds: [rootId] });
+    expect((await detail(a.id)).messages.map((m) => m.content)).toEqual(['A question', 'Hello there']);
+    const back = (await detail(a1.id)).node;
+    expect(back).toMatchObject({ parentIds: [a.id], forkPoint: before.forkPoint, forkSession: before.forkSession });
+    expect((await detail(a1.id)).inherited.map((i) => i.kind === 'message' && i.message.content))
+      .toEqual(['Scope it', 'Hello there', 'A question', 'Hello there']);
+    const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+    expect(graph.nodes.map((n) => n.id)).not.toContain(a2.id);
+    expect(graph.deleted.map((d) => d.id)).toEqual([a2.id]);
+
+    // Restoring a2 now attaches it to a (a's parent link was kept for it).
+    await call('POST', `/nodes/${a2.id}/restore`);
+    expect((await detail(a2.id)).node.parentIds).toEqual([a.id]);
+    expect((await call('POST', `/nodes/${a2.id}/restore`)).status).toBe(404); // not deleted any more
+  });
+
+  it('a node whose parent was deleted after it comes back as a root', async () => {
+    await chat(rootId, 'Scope it');
+    const [a] = await fork(rootId, ['A question']);
+    const [a1] = await fork(a.id, ['A1 question']);
+    await call('DELETE', `/nodes/${a1.id}`);
+    await call('DELETE', `/nodes/${a.id}`);
+    await call('POST', `/nodes/${a1.id}/restore`);
+    expect((await detail(a1.id)).node).toMatchObject({ parentIds: [], forkPoint: null });
+    // Restoring a later doesn't pull a1 back under it: a1 was deleted when a was.
+    await call('POST', `/nodes/${a.id}/restore`);
+    expect((await detail(a1.id)).node.parentIds).toEqual([]);
   });
 
   it('deleting a node turns a merge of it that never started into an empty root; a running merge blocks it', async () => {

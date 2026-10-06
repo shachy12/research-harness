@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Attachment, BranchResult, DagNode, Effort, ForkProposal, MergedResult, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
+import type { Attachment, BranchResult, DagNode, DeletedNode, Effort, ForkProposal, MergedResult, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
@@ -12,6 +12,12 @@ interface NodeRow {
   model: string | null; effort: Effort | null; git_branch: string | null; files_changed: number | null;
   fork_point: number | null; fork_session: string | null;
   result_upto: number | null; merge_results: string | null; merge_prompt: string | null; files_from_project: number;
+  deleted_at: string | null; deleted_links: string | null;
+}
+
+/** How a child of a deleted node was attached before it became a root (restoring puts it back). */
+interface DeletedLink {
+  id: string; parentIds: string[]; forkPoint: number | null; forkSession: string | null; mergePrompt: string | null;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
@@ -81,9 +87,9 @@ export class Repository {
     const rows = this.db
       .prepare(
         `SELECT p.*,
-                (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count,
+                (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id AND n.deleted_at IS NULL) AS node_count,
                 COALESCE((SELECT MAX(m.created_at) FROM messages m JOIN nodes n ON n.id = m.node_id
-                          WHERE n.project_id = p.id), p.created_at) AS updated_at
+                          WHERE n.project_id = p.id AND n.deleted_at IS NULL), p.created_at) AS updated_at
          FROM projects p
          ORDER BY updated_at DESC, p.rowid`,
       )
@@ -123,16 +129,33 @@ export class Repository {
 
   // ---- nodes ----
 
-  getNode(id: string): DagNode | null {
+  /** A node, unless it doesn't exist or was deleted (`includeDeleted` finds those too). */
+  getNode(id: string, { includeDeleted = false } = {}): DagNode | null {
     const row = this.db.prepare('SELECT * FROM nodes WHERE id = ?').get(id) as NodeRow | undefined;
-    return row ? toNode(row) : null;
+    return row && (includeDeleted || row.deleted_at === null) ? toNode(row) : null;
   }
 
+  /** The project's nodes, without deleted ones. */
   listNodes(projectId: string): DagNode[] {
     const rows = this.db
-      .prepare('SELECT * FROM nodes WHERE project_id = ? ORDER BY created_at, rowid')
+      .prepare('SELECT * FROM nodes WHERE project_id = ? AND deleted_at IS NULL ORDER BY created_at, rowid')
       .all(projectId) as unknown as NodeRow[];
     return rows.map(toNode);
+  }
+
+  /** Deleted nodes of the project, most recently deleted first (they can be restored). */
+  listDeleted(projectId: string): DeletedNode[] {
+    const rows = this.db
+      .prepare(`SELECT n.*, (SELECT COUNT(*) FROM messages m WHERE m.node_id = n.id) AS message_count
+                FROM nodes n WHERE n.project_id = ? AND n.deleted_at IS NOT NULL ORDER BY n.deleted_at DESC, n.rowid DESC`)
+      .all(projectId) as unknown as (NodeRow & { message_count: number })[];
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      deletedAt: r.deleted_at!,
+      messageCount: r.message_count,
+      childCount: r.deleted_links ? (JSON.parse(r.deleted_links) as DeletedLink[]).length : 0,
+    }));
   }
 
   createNode(input: {
@@ -161,15 +184,19 @@ export class Repository {
   }
 
   /**
-   * Delete a node and its messages. Its children become roots (no parents, no fork point): they
-   * keep their own messages and sessions. A child merge that never started loses its pending first
-   * message (it becomes an empty root). Returns the children's ids.
+   * Delete a node: it is only marked deleted (hidden, with its messages kept), so it can be
+   * restored. Its children become roots (no parents, no fork point): they keep their own messages
+   * and sessions. A child merge that never started loses its pending first message (it becomes an
+   * empty root). How each child was attached is kept for `restoreNode`. Returns the children's ids.
    */
   deleteNode(id: string): string[] {
     return this.transaction(() => {
       const node = this.getNode(id);
       if (!node) return [];
       const children = this.listNodes(node.projectId).filter((n) => n.parentIds.includes(id));
+      const links: DeletedLink[] = children.map((c) => ({
+        id: c.id, parentIds: c.parentIds, forkPoint: c.forkPoint, forkSession: c.forkSession, mergePrompt: c.mergePrompt,
+      }));
       for (const child of children) {
         this.db
           .prepare(`UPDATE nodes SET parent_ids = '[]', fork_point = NULL, fork_session = NULL,
@@ -177,8 +204,35 @@ export class Repository {
                     WHERE id = ?`)
           .run(child.id);
       }
-      this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id); // messages cascade
+      this.db.prepare('UPDATE nodes SET deleted_at = ?, deleted_links = ? WHERE id = ?').run(now(), JSON.stringify(links), id);
       return children.map((c) => c.id);
+    });
+  }
+
+  /**
+   * Undo a delete: the node is back where it was, and its children that are still roots are
+   * attached to it again as before (a child deleted meanwhile too, so restoring it later puts it
+   * back here). If one of its own parents was deleted meanwhile, it comes back as a root. Returns
+   * the node, or null if it isn't a deleted node.
+   */
+  restoreNode(id: string): DagNode | null {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM nodes WHERE id = ? AND deleted_at IS NOT NULL').get(id) as NodeRow | undefined;
+      if (!row) return null;
+      const node = toNode(row);
+      if (node.parentIds.some((p) => !this.getNode(p))) {
+        this.db.prepare(`UPDATE nodes SET parent_ids = '[]', fork_point = NULL, fork_session = NULL WHERE id = ?`).run(id);
+      }
+      for (const link of JSON.parse(row.deleted_links ?? '[]') as DeletedLink[]) {
+        const child = this.getNode(link.id, { includeDeleted: true });
+        if (!child || child.parentIds.length > 0 || link.parentIds.some((p) => p !== id && !this.getNode(p))) continue;
+        this.db
+          .prepare('UPDATE nodes SET parent_ids = ?, fork_point = ?, fork_session = ?, merge_prompt = COALESCE(merge_prompt, ?) WHERE id = ?')
+          .run(JSON.stringify(link.parentIds), link.forkPoint, link.forkSession,
+            this.listMessages(link.id).length === 0 ? link.mergePrompt : null, link.id);
+      }
+      this.db.prepare('UPDATE nodes SET deleted_at = NULL, deleted_links = NULL WHERE id = ?').run(id);
+      return this.getNode(id);
     });
   }
 
@@ -265,7 +319,7 @@ export class Repository {
   /** Load a whole project into memory for the context logic. Projects are small enough for this. */
   snapshot(projectId: string): GraphSnapshot {
     const rows = this.db
-      .prepare('SELECT m.* FROM messages m JOIN nodes n ON n.id = m.node_id WHERE n.project_id = ? ORDER BY m.seq')
+      .prepare('SELECT m.* FROM messages m JOIN nodes n ON n.id = m.node_id WHERE n.project_id = ? AND n.deleted_at IS NULL ORDER BY m.seq')
       .all(projectId) as unknown as MessageRow[];
     return new GraphSnapshot(this.listNodes(projectId), rows.map(toMessage));
   }
