@@ -31,6 +31,11 @@ export interface NodeWorktree {
   /** For a merge node: what each merged branch changed, and files left with conflict markers. */
   merged: { title: string; files: string[] }[];
   conflicts: string[];
+  /**
+   * A branch whose copy started from the project's checked-out branch instead of its parent's
+   * files (`DagNode.filesFromProject`): that branch's name (or the commit, on a detached HEAD).
+   */
+  fromProject: string | null;
 }
 
 /**
@@ -105,8 +110,8 @@ export class Worktrees {
       const repo = (await this.findRepo(folder)) ?? (await this.initRepo(folder));
       const branch = Worktrees.branchOf(node.id);
       const worktree = this.worktreeOf(project, node.id);
-      const result = (created: boolean, merged: NodeWorktree['merged'] = [], conflicts: string[] = []): NodeWorktree => ({
-        branch, worktree, editDir: path.join(worktree, repo.rel), created, merged, conflicts,
+      const result = (created: boolean, merged: NodeWorktree['merged'] = [], conflicts: string[] = [], fromProject: string | null = null): NodeWorktree => ({
+        branch, worktree, editDir: path.join(worktree, repo.rel), created, merged, conflicts, fromProject,
       });
 
       if (existsSync(path.join(worktree, '.git'))) return result(false);
@@ -115,6 +120,15 @@ export class Worktrees {
         await git(repo.top, ['worktree', 'prune']);
         await git(repo.top, ['worktree', 'add', worktree, branch]);
         return result(false);
+      }
+
+      // A branch asked to start from the project's files: the user's current commit.
+      if (node.filesFromProject && node.parentIds.length === 1) {
+        const head = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+        const commit = await this.userCommit(repo.top);
+        await git(repo.top, ['worktree', 'prune']);
+        await git(repo.top, ['worktree', 'add', '-b', branch, worktree, commit]);
+        return result(true, [], [], head || commit.slice(0, 10));
       }
 
       // Named like the merged results in the prompt (by the title they were created with).
@@ -293,10 +307,16 @@ export class Worktrees {
 
   // ---- helpers ----
 
-  /** Where to start a node's branch from: the nearest node up the first-parent line that has a branch. */
+  /**
+   * Where to start a node's branch from: the nearest node up the first-parent line that has a
+   * branch. A node that starts from the project's files (and has no branch yet) ends the search:
+   * null means the user's current commit.
+   */
   private startOf(graph: GraphReader, nodeId: string): string | null {
     for (let id: string | undefined = nodeId; id; id = graph.node(id).parentIds[0]) {
-      if (graph.node(id).gitBranch) return graph.node(id).gitBranch;
+      const node = graph.node(id);
+      if (node.gitBranch) return node.gitBranch;
+      if (node.filesFromProject) return null;
     }
     return null;
   }

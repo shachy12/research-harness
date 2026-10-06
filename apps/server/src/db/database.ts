@@ -96,6 +96,27 @@ export const MIGRATIONS: string[] = [
   WHERE json_array_length(nodes.parent_ids) = 1;
   UPDATE nodes SET status = 'open' WHERE status = 'frozen';
   `,
+  // 12: 'finished' becomes a "done" marker that a new message clears, and any nodes can be merged:
+  // their results are drafted when the merge starts. `result_upto`: how many of the node's messages
+  // its stored result covers (an older result is drafted again). A merge node keeps the results it
+  // received (`merge_results`, JSON [{ nodeId, upto, result }]), since its branches can go on, and
+  // its first message (`merge_prompt`) until the drafts are done. `files_from_project`: a branch
+  // whose copy of the files starts from the project's checked-out branch, not its parent's copy.
+  // Existing finished nodes' results cover all their messages; existing merge nodes received them.
+  `
+  ALTER TABLE nodes ADD COLUMN result_upto INTEGER;
+  ALTER TABLE nodes ADD COLUMN merge_results TEXT;
+  ALTER TABLE nodes ADD COLUMN merge_prompt TEXT;
+  ALTER TABLE nodes ADD COLUMN files_from_project INTEGER NOT NULL DEFAULT 0;
+  UPDATE nodes SET result_upto = (SELECT COUNT(*) FROM messages m WHERE m.node_id = nodes.id)
+  WHERE result IS NOT NULL;
+  UPDATE nodes SET merge_results = (
+    SELECT json_group_array(json_object('nodeId', p.id, 'upto', p.result_upto, 'result', json(p.result)) ORDER BY j.key)
+    FROM json_each(nodes.parent_ids) j JOIN nodes p ON p.id = j.value
+    WHERE p.result IS NOT NULL
+  )
+  WHERE json_array_length(parent_ids) > 1;
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

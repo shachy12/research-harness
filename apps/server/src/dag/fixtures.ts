@@ -24,8 +24,12 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       parentIds,
       forkPoint: spec.forkPoint ?? null,
       forkSession: spec.forkSession ?? null,
-      status: spec.status ?? (spec.result ? 'finished' : 'open'),
+      status: spec.status ?? 'open',
       result: spec.result ?? null,
+      resultUpto: spec.result ? (spec.messages?.length ?? 0) : null,
+      mergeResults: null,
+      mergePrompt: null,
+      filesFromProject: false,
       sessionId: spec.sessionId ?? null,
       readUpto: null,
       model: null,
@@ -47,6 +51,15 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
         forkProposal: null,
         createdAt: '2026-01-01T00:00:00.000Z',
       });
+    });
+  }
+  // A merge node received its parents' results (as a merge stores them).
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const n of nodes) {
+    if (n.parentIds.length < 2) continue;
+    n.mergeResults = n.parentIds.flatMap((p) => {
+      const parent = byId.get(p)!;
+      return parent.result ? [{ nodeId: p, upto: parent.resultUpto, result: parent.result }] : [];
     });
   }
   return new GraphSnapshot(nodes, messages);

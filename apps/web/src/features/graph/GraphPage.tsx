@@ -8,32 +8,32 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
-  type Viewport,
 } from '@xyflow/react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
-import { useGraph, useRefreshAll } from '@/api/queries'
+import { useGraph, useNewRoot, useRefreshAll } from '@/api/queries'
 import { api } from '@/api/client'
 import { UsageBanner } from '@/components/UsageBanner'
 import { Button } from '@/components/ui/button'
-import { RotateCcwIcon } from 'lucide-react'
+import { PlusIcon, RotateCcwIcon } from 'lucide-react'
 import { MergeDialog } from '@/features/merge/MergeDialog'
 import { useMergeSelection } from '@/features/merge/selection'
 import { RenameDialog } from '@/features/rename/RenameDialog'
 import { layoutGraph } from './layout'
 import { type CardNode, NodeCard } from './NodeCard'
+import { DeleteNodeDialog } from './DeleteNodeDialog'
 import { ResetDialog } from './ResetDialog'
+import { forgetView, rememberView, rememberedView } from './viewMemory'
 
 const nodeTypes = { card: NodeCard }
 
-// Remember each project's pan/zoom and node count, so returning from a chat keeps the view,
-// and new nodes (after a fork or merge) trigger a re-fit.
-const viewMemory = new Map<string, { viewport: Viewport; nodeCount: number }>()
-
 export function GraphPage() {
+  const projectId = useParams().projectId!
+  // One React Flow per project (`key`): switching projects keeps this page mounted, and React Flow
+  // applies the remembered view (`defaultViewport`) only when it mounts.
   return (
-    <ReactFlowProvider>
-      <GraphView projectId={useParams().projectId!} />
+    <ReactFlowProvider key={projectId}>
+      <GraphView projectId={projectId} />
     </ReactFlowProvider>
   )
 }
@@ -47,28 +47,30 @@ function GraphView({ projectId }: { projectId: string }) {
   const [mergeOpen, setMergeOpen] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
   const [renaming, setRenaming] = useState<NodeSummary | null>(null)
+  const [deleting, setDeleting] = useState<NodeSummary | null>(null)
   const [retrying, setRetrying] = useState(false)
   const flow = useReactFlow()
   const refresh = useRefreshAll()
+  const newRoot = useNewRoot(projectId)
 
   const summaries = useMemo(() => graph.data?.nodes ?? [], [graph.data])
-  const finishedIds = useMemo(
-    () => new Set(summaries.filter((n) => n.status === 'finished').map((n) => n.id)),
-    [summaries],
-  )
+  // Any node can be merged, except a merge node that hasn't started yet (it has nothing to give).
+  const mergeableIds = useMemo(() => new Set(summaries.filter((n) => !n.merge).map((n) => n.id)), [summaries])
 
   useEffect(() => {
-    if (graph.data) selection.keepOnly(finishedIds)
-  }, [graph.data, finishedIds, selection])
+    if (graph.data) selection.keepOnly(mergeableIds)
+  }, [graph.data, mergeableIds, selection])
 
   const usage = graph.data?.usage ?? null
   const limitReached = usage?.status === 'reached'
   const { nodes, edges } = useMemo(
-    () => toFlow(summaries, selection.ids, shake, limitReached, setRenaming),
+    () => toFlow(summaries, selection.ids, shake, limitReached, setRenaming, setDeleting),
     [summaries, selection.ids, shake, limitReached],
   )
-  // Open nodes whose last message got no reply (failed, stopped, or hit the limit).
-  const unanswered = summaries.filter((n) => n.status === 'open' && !n.running && n.lastRole === 'user')
+  // Nodes whose last message got no reply (failed, stopped, or hit the limit), and merges that
+  // stopped before their results were written (Retry starts them again).
+  const unanswered = summaries.filter((n) =>
+    (!n.running && !n.merge && n.lastRole === 'user') || (n.merge !== null && !n.merge.running))
   const retryAll = async () => {
     setRetrying(true)
     await Promise.allSettled(unanswered.map((n) => api.post(`/nodes/${n.id}/retry`)))
@@ -77,15 +79,17 @@ function GraphView({ projectId }: { projectId: string }) {
   }
 
   // Fit the view the first time, and whenever the number of nodes changed since the last visit.
-  const memory = viewMemory.get(projectId)
+  // Each project's pan/zoom is remembered (viewMemory), so returning to it keeps the view; new or
+  // removed nodes (a fork, a merge, a delete) trigger a re-fit.
+  const memory = rememberedView(projectId)
   useEffect(() => {
     if (!graph.data) return
-    const remembered = viewMemory.get(projectId)
+    const remembered = rememberedView(projectId)
     if (!remembered || remembered.nodeCount !== nodes.length) {
       const nodeCount = nodes.length
       requestAnimationFrame(async () => {
         await flow.fitView({ padding: 0.2, maxZoom: 1, duration: remembered ? 300 : 0 })
-        viewMemory.set(projectId, { viewport: flow.getViewport(), nodeCount })
+        rememberView(projectId, { viewport: flow.getViewport(), nodeCount })
       })
     }
   }, [graph.data, nodes.length, projectId, flow])
@@ -112,16 +116,16 @@ function GraphView({ projectId }: { projectId: string }) {
         onNodeClick={(_, node) => navigate(`/projects/${projectId}/nodes/${node.id}`)}
         onNodeContextMenu={(event, node) => {
           event.preventDefault()
-          if (finishedIds.has(node.id)) {
+          if (mergeableIds.has(node.id)) {
             setHint(null)
             selection.toggle(node.id)
           } else {
-            setHint('Only finished nodes can be merged. Finish the branch first.')
+            setHint('This merge has not started yet, so it has nothing to merge.')
             setShake((s) => ({ id: node.id, key: (s?.key ?? 0) + 1 }))
           }
         }}
         onPaneContextMenu={(event) => event.preventDefault()}
-        onMoveEnd={(_, viewport) => viewMemory.set(projectId, { viewport, nodeCount: nodes.length })}
+        onMoveEnd={(_, viewport) => rememberView(projectId, { viewport, nodeCount: nodes.length })}
       >
         <Background gap={20} size={1.2} color="var(--edge)" />
         <Controls showInteractive={false} position="top-right" />
@@ -133,7 +137,7 @@ function GraphView({ projectId }: { projectId: string }) {
               </UsageBanner>
             ) : (
               <div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2 text-sm shadow-sm">
-                <span>{unanswered.length} branches have no reply.</span>
+                <span>{unanswered.length} nodes have no reply.</span>
                 <RetryAll count={unanswered.length} busy={retrying} onClick={retryAll} />
               </div>
             )}
@@ -150,6 +154,17 @@ function GraphView({ projectId }: { projectId: string }) {
             passes only its result
           </span>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="bg-card"
+            disabled={newRoot.isPending}
+            title="Start another independent conversation in this project (same folder, no shared context)"
+            onClick={() => newRoot.mutate()}
+          >
+            <PlusIcon /> New root
+          </Button>
+          {newRoot.isError && <span className="rounded-lg bg-card px-2 py-1 text-xs text-destructive">{newRoot.error.message}</span>}
           <Button variant="outline" size="sm" className="bg-card" onClick={() => setResetOpen(true)}>
             <RotateCcwIcon /> Start over
           </Button>
@@ -165,8 +180,8 @@ function GraphView({ projectId }: { projectId: string }) {
           <span className="rounded-lg border bg-card px-3 py-1.5 text-xs text-muted-foreground">
             {hint ??
               (selectedCount === 1
-                ? 'Select at least one more finished branch to merge.'
-                : 'Click a node to open its chat. Right-click finished nodes to select them for merge.')}
+                ? 'Select at least one more node to merge.'
+                : 'Click a node to open its chat. Right-click nodes to select them for merge.')}
           </span>
         </Panel>
       </ReactFlow>
@@ -178,13 +193,22 @@ function GraphView({ projectId }: { projectId: string }) {
           onDone={() => {
             selection.clear()
             setHint(null)
-            viewMemory.delete(projectId) // re-fit the view to the new, single root
+            forgetView(projectId) // re-fit the view to the new, single root
           }}
           onClose={() => setResetOpen(false)}
         />
       )}
 
       {renaming && <RenameDialog node={renaming} onClose={() => setRenaming(null)} />}
+      {deleting && (
+        <DeleteNodeDialog
+          node={deleting}
+          childCount={summaries.filter((n) => n.parentIds.includes(deleting.id)).length}
+          running={deleting.running}
+          onDeleted={() => setHint(null)}
+          onClose={() => setDeleting(null)}
+        />
+      )}
 
       {mergeOpen && (
         <MergeDialog
@@ -212,6 +236,7 @@ function toFlow(
   shake: { id: string; key: number } | null,
   limitReached: boolean,
   onRename: (node: NodeSummary) => void,
+  onDelete: (node: NodeSummary) => void,
 ) {
   const positions = layoutGraph(summaries)
   const nodes: CardNode[] = summaries.map((summary) => ({
@@ -224,6 +249,7 @@ function toFlow(
       shakeKey: shake?.id === summary.id ? shake.key : 0,
       limitReached,
       onRename,
+      onDelete,
     },
   }))
 

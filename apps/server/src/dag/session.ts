@@ -33,9 +33,8 @@ export function planSession(graph: GraphReader, nodeId: string, { retry = false 
   const node = graph.node(nodeId);
   if (node.sessionId) {
     // Branches were forked from this session: go on in a copy (the user doesn't notice; the copy
-    // reads the same cache), so the session stays the fork point. A finished node gets no more
-    // messages, so its session can't change and stays as it is.
-    const forked = node.status === 'open' && graph.children(nodeId).some((c) => c.forkSession === node.sessionId);
+    // reads the same cache), so the session stays the fork point.
+    const forked = graph.children(nodeId).some((c) => c.forkSession === node.sessionId);
     return { mode: forked ? 'fork' : 'resume', sessionId: node.sessionId, preamble: null, transcript: [] };
   }
 

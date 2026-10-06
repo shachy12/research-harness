@@ -3,13 +3,15 @@ import {
   type ChatStreamEvent,
   type DagNode,
   type ForkProposal,
+  type MergedResult,
+  type MergeState,
   type Message,
   type RunStatus,
   type ToolCall,
   type UsageLimit,
   toolActivity,
 } from '@harness/shared';
-import { buildChatRequest, editNote, withAttachments } from './dag/prompt.ts';
+import { DRAFT_RESULT_INSTRUCTION, buildChatRequest, editNote, withAttachments } from './dag/prompt.ts';
 import { type SessionPlan, planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
 import { type ProviderError, classifyError } from './llm/errors.ts';
@@ -40,6 +42,13 @@ interface Run {
   /** Questions waiting for the user's approval (see allowAsk). */
   waiting: WaitingAsks | null;
   listeners: Set<Listener>;
+  abort: AbortController;
+}
+
+/** A merge node drafting the results of the nodes it merges, before its first message. */
+interface MergeJob {
+  startedAt: string;
+  activity: string;
   abort: AbortController;
 }
 
@@ -83,6 +92,11 @@ export class RunManager {
   private limit: UsageLimit | null = null;
   /** Nodes whose model-written title is being generated. */
   private readonly titling = new Set<string>();
+  /** Merge nodes drafting their results, and why the last attempt failed (until it is retried). */
+  private readonly merges = new Map<string, MergeJob>();
+  private readonly mergeErrors = new Map<string, string>();
+  /** Result drafts running, by node, so two merges of the same node share one. */
+  private readonly drafts = new Map<string, Promise<MergedResult>>();
   /** A node's endpoint on the harness MCP server (null: no MCP tools). */
   private readonly mcpUrl: (nodeId: string) => string | null;
   readonly askLimit: number;
@@ -100,6 +114,133 @@ export class RunManager {
 
   isRunning(nodeId: string): boolean {
     return this.runs.has(nodeId);
+  }
+
+  /** A reply is running, or (a merge node) its results are being drafted. */
+  isBusy(nodeId: string): boolean {
+    return this.runs.has(nodeId) || this.merges.has(nodeId);
+  }
+
+  /**
+   * A merge node that hasn't started its first message: drafting its results, or stopped (the
+   * error says why; Retry starts it again). Null for other nodes.
+   */
+  mergeState(node: DagNode, messageCount: number): MergeState | null {
+    const job = this.merges.get(node.id);
+    if (job) return { running: true, startedAt: job.startedAt, activity: job.activity, error: null };
+    if (node.mergePrompt === null || messageCount > 0) return null;
+    return {
+      running: false,
+      startedAt: null,
+      activity: null,
+      error: this.mergeErrors.get(node.id) ?? 'The merge stopped before its results were written (was the app closed?).',
+    };
+  }
+
+  /**
+   * Draft the result of each node a merge node merges (in the background), save them on the merge
+   * node, then send its first message. A node that is replying is waited for; a node whose stored
+   * result still covers all its messages isn't drafted again.
+   */
+  startMerge(nodeId: string): void {
+    const node = this.repo.getNode(nodeId);
+    if (!node) throw notFound('Node');
+    if (node.mergePrompt === null || this.repo.listMessages(nodeId).length > 0) throw conflict('This merge has already started.');
+    if (this.isBusy(nodeId)) throw conflict('This merge is already running.');
+    const job: MergeJob = { startedAt: new Date().toISOString(), activity: 'Starting', abort: new AbortController() };
+    this.merges.set(nodeId, job);
+    this.mergeErrors.delete(nodeId);
+    void this.runMerge(node, job);
+  }
+
+  private async runMerge(node: DagNode, job: MergeJob): Promise<void> {
+    const signal = job.abort.signal;
+    const state = new Map<string, 'waiting' | 'drafting' | 'done'>(node.parentIds.map((id) => [id, 'waiting']));
+    const update = () => {
+      const waiting = [...state].find(([id, s]) => s === 'waiting' && this.isBusy(id));
+      const done = [...state.values()].filter((s) => s === 'done').length;
+      job.activity = waiting
+        ? `Waiting for "${this.repo.getNode(waiting[0])?.title ?? 'a node'}" to finish`
+        : `Writing the results: ${done} of ${state.size} done`;
+    };
+    try {
+      update();
+      const results = await Promise.all(node.parentIds.map(async (id) => {
+        await this.whenIdle(id, signal, update);
+        state.set(id, 'drafting');
+        update();
+        const result = await this.resultOf(id, signal);
+        state.set(id, 'done');
+        update();
+        return result;
+      }));
+      this.merges.delete(node.id);
+      if (!this.repo.getNode(node.id)) return; // deleted meanwhile (the project was reset)
+      this.repo.setMergeResults(node.id, results);
+      this.start(node.id, node.mergePrompt!);
+    } catch (err) {
+      const stopped = signal.aborted;
+      job.abort.abort(); // stop the other drafts
+      this.merges.delete(node.id);
+      if (!this.repo.getNode(node.id)) return;
+      if (err instanceof MergeError) {
+        this.mergeErrors.set(node.id, err.message);
+      } else if (stopped) {
+        this.mergeErrors.set(node.id, 'The merge was stopped.');
+      } else {
+        console.error(`[merge] node ${node.id}:`, err);
+        const error = classifyError(err, this.limit?.resetsAt ?? null);
+        this.noteFailure(error);
+        this.mergeErrors.set(node.id, `Could not write the results: ${error.message}`);
+      }
+    }
+  }
+
+  /** Wait until nothing runs on the node (a reply, or its own merge). */
+  private async whenIdle(nodeId: string, signal: AbortSignal, onWait: () => void): Promise<void> {
+    while (this.isBusy(nodeId)) {
+      if (signal.aborted) throw new Error('The merge was stopped.');
+      onWait();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  /** The node's result for a merge: the stored one if it covers all its messages, else a new draft. */
+  private resultOf(nodeId: string, signal: AbortSignal): Promise<MergedResult> {
+    const node = this.repo.getNode(nodeId);
+    if (!node) return Promise.reject(new MergeError('A merged node no longer exists.'));
+    const graph = this.repo.snapshot(node.projectId);
+    const messages = graph.messages(nodeId);
+    if (!messages.some((m) => m.role === 'assistant')) {
+      return Promise.reject(new MergeError(`"${node.title}" has no replies yet, so there is nothing to merge from it. Retry once it has one.`));
+    }
+    if (node.result && node.resultUpto === messages.length) {
+      return Promise.resolve({ nodeId, upto: node.resultUpto, result: node.result });
+    }
+    const running = this.drafts.get(nodeId);
+    if (running) return running;
+
+    const ctx: ReplyContext = {
+      nodeId,
+      workDir: this.workspaces.prepare(this.repo.getProject(node.projectId)!),
+      request: buildChatRequest(graph, nodeId, [{ role: 'user', content: DRAFT_RESULT_INSTRUCTION }]),
+      message: DRAFT_RESULT_INSTRUCTION,
+      session: planSession(graph, nodeId),
+      model: node.model,
+      effort: node.effort,
+      edit: null, // drafting runs without tools
+      mcpUrl: null,
+    };
+    const upto = messages.length;
+    const draft = this.llm
+      .draftResult(ctx, signal)
+      .then((result) => {
+        this.repo.setResult(nodeId, result, upto);
+        return { nodeId, upto, result };
+      })
+      .finally(() => this.drafts.delete(nodeId));
+    this.drafts.set(nodeId, draft);
+    return draft;
   }
 
   /** When the node's reply started and what it is doing, or null if nothing is running. */
@@ -205,8 +346,13 @@ export class RunManager {
     return userMessage;
   }
 
-  /** Answer the node's last message again: it got no reply (the reply failed or was stopped early). */
+  /**
+   * Answer the node's last message again: it got no reply (the reply failed or was stopped early).
+   * A merge node that stopped before its first message starts the merge again.
+   */
   retry(nodeId: string): void {
+    const pending = this.repo.getNode(nodeId);
+    if (pending?.mergePrompt != null && this.repo.listMessages(nodeId).length === 0) return this.startMerge(nodeId);
     const node = this.requireWritable(nodeId);
     const graph = this.repo.snapshot(node.projectId);
     const last = graph.messages(nodeId).at(-1);
@@ -247,21 +393,26 @@ export class RunManager {
     return true;
   }
 
-  /** Stop a running reply; what arrived so far is kept. */
+  /** Stop a running reply (what arrived so far is kept), or a merge drafting its results. */
   stop(nodeId: string): void {
     this.runs.get(nodeId)?.abort.abort();
+    this.merges.get(nodeId)?.abort.abort();
   }
 
   private requireWritable(nodeId: string): DagNode {
     const node = this.repo.getNode(nodeId);
     if (!node) throw notFound('Node');
-    if (node.status === 'finished') throw conflict('This branch is finished.');
     if (this.runs.has(nodeId)) throw conflict('A reply is already being generated for this node.');
+    if (this.merges.has(nodeId)) throw conflict('This merge is still writing its results; it starts on its own when they are done.');
+    if (node.mergePrompt !== null && node.mergeResults === null) {
+      throw conflict('This merge has not finished writing its results. Retry it first.');
+    }
     return node;
   }
 
-  /** Start answering the node's last (already saved) user message. */
+  /** Start answering the node's last (already saved) user message. A node marked done is open again. */
   private launch(node: DagNode, session: SessionPlan, message: string): void {
+    if (node.status === 'finished') this.repo.setStatus(node.id, 'open');
     const workDir = this.workspaces.prepare(this.repo.getProject(node.projectId)!);
     const request = buildChatRequest(this.repo.snapshot(node.projectId), node.id);
     const run: Run = {
@@ -299,7 +450,7 @@ export class RunManager {
     if (!node.gitBranch) this.repo.setGitInfo(node.id, copy.branch, null);
     const firstReply = !this.repo.listMessages(node.id).some((m) => m.role === 'assistant');
     const message = copy.created || firstReply
-      ? `${editNote({ dir: copy.editDir, branch: copy.branch, merged: copy.merged, conflicts: copy.conflicts })}\n\n${ctx.message}`
+      ? `${editNote({ dir: copy.editDir, branch: copy.branch, merged: copy.merged, conflicts: copy.conflicts, fromProject: copy.fromProject })}\n\n${ctx.message}`
       : ctx.message;
     return { ...ctx, message, edit: { dir: copy.editDir } };
   }
@@ -430,3 +581,6 @@ export class RunManager {
       .finally(() => this.titling.delete(node.id));
   }
 }
+
+/** A merge that can't go on for a reason the user can act on (not a model failure). */
+class MergeError extends Error {}

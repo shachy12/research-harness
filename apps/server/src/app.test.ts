@@ -99,8 +99,6 @@ class FakeProvider implements LLMProvider {
   };
 }
 
-const RESULT: BranchResult = { findings: 'It works', evidence: 'tests', openQuestions: '', confidence: 'high' };
-
 let llm: FakeProvider;
 let app: ReturnType<typeof createApp>;
 let rootId: string;
@@ -132,9 +130,18 @@ async function chat(nodeId: string, content: string): Promise<ChatStreamEvent[]>
 
 const detail = async (nodeId: string) => (await call<NodeDetail>('GET', `/nodes/${nodeId}`)).data;
 
-/** Wait until the node's background reply has finished. */
+/** Wait until the node's background reply (and for a merge node, the drafting of its results) has finished. */
 async function settle(nodeId: string) {
-  for (let i = 0; i < 100 && (await detail(nodeId)).running; i++) await new Promise((r) => setTimeout(r, 5));
+  const busy = async () => {
+    const d = await detail(nodeId);
+    return d.running || d.merge?.running === true;
+  };
+  for (let i = 0; i < 200 && (await busy()); i++) await new Promise((r) => setTimeout(r, 5));
+}
+
+/** Wait until the node's reply is running (a merge node starts it once its results are drafted). */
+async function untilRunning(nodeId: string) {
+  for (let i = 0; i < 200 && !(await detail(nodeId)).running; i++) await new Promise((r) => setTimeout(r, 5));
 }
 
 /** Fork, and wait for the branches' first replies. */
@@ -290,42 +297,34 @@ describe('API', () => {
     expect((await detail(rootId)).forks.map((f) => f.at)).toEqual([2, 4]);
   });
 
-  it('drafts a result without saving it, then finishing saves it', async () => {
-    const [a] = await fork(rootId, ['A question']);
-    const draft = await call<BranchResult>('POST', `/nodes/${a.id}/result/draft`);
-    expect(draft.data.findings).toBe('drafted');
-    expect((await detail(a.id)).node.status).toBe('open');
-
-    const finished = await call<DagNode>('PUT', `/nodes/${a.id}/result`, RESULT);
-    expect(finished.data).toMatchObject({ status: 'finished', result: RESULT });
-    expect((await call('POST', `/nodes/${a.id}/messages`, { content: 'more' })).status).toBe(409);
-  });
-
-  it('cannot draft a result for a branch without replies', async () => {
-    const repoNode = (await call<DagNode>('POST', '/projects/default/reset')).data; // fresh root, no replies
-    expect((await call('POST', `/nodes/${repoNode.id}/result/draft`)).status).toBe(400);
-  });
-
-  it('the root cannot be finished', async () => {
-    expect((await call('PUT', `/nodes/${rootId}/result`, RESULT)).status).toBe(400);
-  });
-
-  it('merges finished branches and starts the merged node on its first message', async () => {
+  it('marks a node done; a new message opens it again', async () => {
     await chat(rootId, 'Scope it');
-    const [a, b, c] = await fork(rootId, ['secret transcript of A', 'B question', 'C question']);
-    await call('PUT', `/nodes/${a.id}/result`, { ...RESULT, findings: 'A result' });
-    await call('PUT', `/nodes/${b.id}/result`, { ...RESULT, findings: 'B result' });
+    const done = await call<DagNode>('PUT', `/nodes/${rootId}/done`, { done: true });
+    expect(done.data.status).toBe('finished');
+    expect((await call<DagNode>('PUT', `/nodes/${rootId}/done`, { done: false })).data.status).toBe('open');
+
+    await call('PUT', `/nodes/${rootId}/done`, { done: true });
+    await chat(rootId, 'One more thing');
+    expect((await detail(rootId)).node.status).toBe('open');
+    // A done node can still be forked.
+    expect((await fork(rootId, ['Side question'])).length).toBe(1);
+  });
+
+  it('merges any nodes: drafts their results in the background, then starts the merged node', async () => {
+    await chat(rootId, 'Scope it');
+    const [a, b] = await fork(rootId, ['secret transcript of A', 'B question']);
 
     const body = (parentIds: string[]) => ({ parentIds, title: 'M', prompt: 'Synthesize' });
-    expect((await call('POST', '/projects/default/merge', body([a.id, c.id]))).status).toBe(409);
     expect((await call('POST', '/projects/default/merge', body([a.id, a.id]))).status).toBe(400);
 
     const merged = await call<DagNode>('POST', '/projects/default/merge', body([a.id, b.id]));
     expect(merged.status).toBe(201);
-    expect(merged.data.parentIds).toEqual([a.id, b.id]);
+    expect(merged.data).toMatchObject({ parentIds: [a.id, b.id], mergePrompt: 'Synthesize', status: 'open' });
     await settle(merged.data.id);
 
     const d = await detail(merged.data.id);
+    expect(d.merge).toBeNull();
+    expect(d.node.mergeResults?.map((r) => [r.nodeId, r.upto, r.result.findings])).toEqual([[a.id, 2, 'drafted'], [b.id, 2, 'drafted']]);
     expect(d.inherited.map((i) => (i.kind === 'result' ? `result:${i.nodeTitle}` : i.message.content))).toEqual([
       'Scope it',
       'Hello there',
@@ -333,10 +332,134 @@ describe('API', () => {
       'result:B question',
     ]);
     expect(d.messages.map((m) => m.content)).toEqual(['Synthesize', 'Hello there']);
+    // The drafted results are kept on the nodes, with how much of them they cover.
+    expect((await detail(a.id)).node).toMatchObject({ resultUpto: 2, status: 'open' });
 
     const prompt = llm.requests.at(-1)!.turns.map((t) => t.content).join('\n');
-    expect(prompt).toContain('A result');
+    expect(prompt).toContain('Findings: drafted');
     expect(prompt).not.toContain('Hello there\nsecret transcript of A'); // the branch transcript is not included
+
+    // Merging again without new messages reuses the results; a node that went on is drafted again.
+    const drafts = () => llm.requests.filter((r) => r.turns.at(-1)?.content.includes('Write its result report')).length;
+    const before = drafts();
+    await chat(a.id, 'More on A');
+    const again = (await call<DagNode>('POST', '/projects/default/merge', body([a.id, b.id]))).data;
+    await settle(again.id);
+    expect(drafts()).toBe(before + 1);
+    expect((await detail(again.id)).node.mergeResults?.map((r) => r.upto)).toEqual([4, 2]);
+    // The first merge keeps the results it got.
+    expect((await detail(merged.data.id)).node.mergeResults?.map((r) => r.upto)).toEqual([2, 2]);
+  });
+
+  it('a merge waits for a node that is still replying', async () => {
+    await chat(rootId, 'Scope it');
+    const [a, b] = await fork(rootId, ['A question', 'B question']);
+    const sending = chat(a.id, 'slow follow-up');
+    await new Promise((r) => setTimeout(r, 10));
+    const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Go' })).data;
+    await new Promise((r) => setTimeout(r, 20));
+    const card = (await call<GraphResponse>('GET', '/projects/default/graph')).data.nodes.find((n) => n.id === merged.id)!;
+    expect(card.merge).toMatchObject({ running: true, activity: 'Waiting for "A question" to finish' });
+    expect((await call('POST', `/nodes/${merged.id}/messages`, { content: 'too early' })).status).toBe(409);
+    llm.release();
+    await sending;
+    await settle(merged.id);
+    expect((await detail(merged.id)).node.mergeResults?.map((r) => r.upto)).toEqual([4, 2]);
+  });
+
+  it('a merge of a node without replies stops with a reason, and Retry starts it again', async () => {
+    await chat(rootId, 'Scope it');
+    const empty = (await call<DagNode>('POST', '/projects/default/roots')).data;
+    const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [rootId, empty.id], prompt: 'Go' })).data;
+    await settle(merged.id);
+    const d = await detail(merged.id);
+    expect(d.merge).toMatchObject({ running: false, error: expect.stringContaining('"New thread" has no replies yet') });
+    expect(d.messages).toEqual([]);
+    expect((await call('POST', `/nodes/${merged.id}/messages`, { content: 'too early' })).status).toBe(409);
+
+    await chat(empty.id, 'Now it has one');
+    expect((await call('POST', `/nodes/${merged.id}/retry`)).status).toBe(200);
+    await settle(merged.id);
+    expect((await detail(merged.id)).merge).toBeNull();
+    // Two roots share no ancestor: the merged node starts from the results alone.
+    expect((await detail(merged.id)).inherited.map((i) => i.kind)).toEqual(['result', 'result']);
+  });
+
+  it('merging a node with its own branch starts from that node, up to the fork point', async () => {
+    await chat(rootId, 'Scope it');
+    const [a] = await fork(rootId, ['A question']);
+    await chat(rootId, 'Main thread goes on');
+    const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [rootId, a.id], prompt: 'Go' })).data;
+    await settle(merged.id);
+    const d = await detail(merged.id);
+    expect(d.inherited.map((i) => (i.kind === 'result' ? `result:${i.nodeTitle}` : i.message.content))).toEqual([
+      'Scope it',
+      'Hello there',
+      'result:Main thread',
+      'result:A question',
+    ]);
+  });
+
+  it('deletes a node; its children become roots that keep their own conversations', async () => {
+    await chat(rootId, 'Scope it');
+    const [a] = await fork(rootId, ['A question']);
+    const [a1, a2] = await fork(a.id, ['A1 question', 'A2 question']);
+    const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a1.id, a2.id], prompt: 'Go' })).data;
+    await settle(merged.id);
+
+    const { status, data } = await call<{ ok: true; orphans: string[] }>('DELETE', `/nodes/${a.id}`);
+    expect(status).toBe(200);
+    expect(data.orphans).toEqual([a1.id, a2.id]);
+    expect((await call('GET', `/nodes/${a.id}`)).status).toBe(404);
+
+    const orphan = await detail(a1.id);
+    expect(orphan.node).toMatchObject({ parentIds: [], forkPoint: null, forkSession: null });
+    expect(orphan.inherited).toEqual([]);
+    expect(orphan.messages.map((m) => m.content)).toEqual(['A1 question', 'Hello there']);
+    // The merge of the two orphans keeps its parents and results; it now has no shared base.
+    expect((await detail(merged.id)).inherited.map((i) => i.kind)).toEqual(['result', 'result']);
+    const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+    expect(graph.nodes.filter((n) => n.parentIds.length === 0).map((n) => n.id)).toEqual([rootId, a1.id, a2.id]);
+
+    // An orphan goes on in its own session (the model still has what came before).
+    await chat(a1.id, 'More');
+    expect(llm.contexts.at(-1)!.session).toMatchObject({ mode: 'resume', sessionId: 'session-1' });
+  });
+
+  it('deleting a node turns a merge of it that never started into an empty root; a running merge blocks it', async () => {
+    await chat(rootId, 'Scope it');
+    const empty = (await call<DagNode>('POST', '/projects/default/roots')).data;
+    const stopped = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [rootId, empty.id], prompt: 'Go' })).data;
+    await settle(stopped.id);
+    expect((await detail(stopped.id)).merge?.running).toBe(false);
+
+    const [a] = await fork(rootId, ['A question']);
+    const sending = chat(a.id, 'slow follow-up');
+    await new Promise((r) => setTimeout(r, 10));
+    const waiting = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, rootId], prompt: 'Later' })).data;
+    expect((await call('DELETE', `/nodes/${a.id}`)).status).toBe(409); // its merge is waiting for it
+    llm.release();
+    await sending;
+    await settle(waiting.id);
+
+    await call('DELETE', `/nodes/${empty.id}`);
+    const d = await detail(stopped.id);
+    expect(d.node).toMatchObject({ parentIds: [], mergePrompt: null });
+    expect(d.merge).toBeNull();
+    await chat(stopped.id, 'Now a normal root');
+    expect((await detail(stopped.id)).messages).toHaveLength(2);
+  });
+
+  it('adds more roots to a project; each starts from nothing', async () => {
+    await call('PUT', `/nodes/${rootId}/model`, { model: 'small', effort: null });
+    const { status, data: second } = await call<DagNode>('POST', '/projects/default/roots');
+    expect(status).toBe(201);
+    expect(second).toMatchObject({ title: 'New thread', parentIds: [], model: 'small', titleSource: 'prompt' });
+    const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+    expect(graph.nodes.filter((n) => n.parentIds.length === 0)).toHaveLength(2);
+    await chat(second.id, 'A separate question');
+    expect(llm.contexts.at(-1)!.session).toMatchObject({ mode: 'new', transcript: [] });
+    expect(llm.requests.at(-1)!.turns.map((t) => t.content)).toEqual(['A separate question']);
   });
 
   describe('harness MCP tools', () => {
@@ -391,10 +514,8 @@ describe('API', () => {
     it('asks a node this one descends from, and only those', async () => {
       await chat(rootId, 'Scope it');
       const [a, b] = await fork(rootId, ['A question', 'B question']);
-      await call('PUT', `/nodes/${a.id}/result`, { ...RESULT, findings: 'A result' });
-      await call('PUT', `/nodes/${b.id}/result`, { ...RESULT, findings: 'B result' });
       const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Synthesize slowly' })).data;
-      await new Promise((r) => setTimeout(r, 10)); // its reply is running (until released)
+      await untilRunning(merged.id); // its reply is running (until released)
 
       // The merge note names the merged branches by id.
       const prompt = llm.requests.at(-1)!.turns.map((t) => t.content).join('\n');
@@ -421,10 +542,8 @@ describe('API', () => {
       async function mergedAndRunning() {
         await chat(rootId, 'Scope it');
         const [a, b] = await fork(rootId, ['A question', 'B question']);
-        await call('PUT', `/nodes/${a.id}/result`, { ...RESULT, findings: 'A result' });
-        await call('PUT', `/nodes/${b.id}/result`, { ...RESULT, findings: 'B result' });
         const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Synthesize slowly' })).data;
-        await new Promise((r) => setTimeout(r, 10));
+        await untilRunning(merged.id);
         return { a, b, merged };
       }
       const waiting = async (nodeId: string) => (await detail(nodeId)).run?.approval ?? null;
@@ -779,8 +898,6 @@ describe('API', () => {
   it('gives a merged node a default title the model may replace, unless the user wrote one', async () => {
     await chat(rootId, 'Scope it');
     const [a, b] = await fork(rootId, ['A', 'B']);
-    await call('PUT', `/nodes/${a.id}/result`, RESULT);
-    await call('PUT', `/nodes/${b.id}/result`, RESULT);
     const auto = await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Go' });
     expect(auto.data).toMatchObject({ title: 'Synthesis: A + B', titleSource: 'prompt' });
     await settle(auto.data.id);
@@ -871,7 +988,6 @@ describe('API', () => {
       await call('PUT', `/nodes/${rootId}/model`, { model: 'big', effort: 'low' });
       await chat(rootId, 'Scope it');
       const [a, b, c] = await fork(rootId, ['A', 'B', 'C']);
-      for (const n of [a, b, c]) await call('PUT', `/nodes/${n.id}/result`, RESULT);
       const merge = async (ids: string[]) =>
         (await call<DagNode>('POST', '/projects/default/merge', { parentIds: ids, prompt: 'Synthesize' })).data;
 
@@ -879,7 +995,6 @@ describe('API', () => {
       expect(same).toMatchObject({ model: 'big', effort: 'low' });
       await settle(same.id);
 
-      // c is switched to "small" before finishing (via the database: finished nodes can't change).
       repo.setModelSettings(c.id, 'small', null);
       const mixed = await merge([c.id, a.id]);
       expect(mixed).toMatchObject({ model: 'big', effort: 'low' }); // "big" < "small"
@@ -910,7 +1025,11 @@ describe('API', () => {
   describe('file editing', () => {
     /** Wait for a reply, including the git work around it (slower than the fake model). */
     async function idle(nodeId: string) {
-      for (let i = 0; i < 400 && (await detail(nodeId)).running; i++) await new Promise((r) => setTimeout(r, 25));
+      const busy = async () => {
+        const d = await detail(nodeId);
+        return d.running || d.merge?.running === true;
+      };
+      for (let i = 0; i < 400 && (await busy()); i++) await new Promise((r) => setTimeout(r, 25));
     }
     const projectFolder = () => workspaces.folderOf(repo.getProject('default')!);
 
@@ -949,7 +1068,6 @@ describe('API', () => {
       expect(new Set(dirs).size).toBe(2);
       for (const k of kids) expect((await detail(k.id)).node.filesChanged).toBe(1);
 
-      for (const k of kids) await call('PUT', `/nodes/${k.id}/result`, RESULT);
       const preview = (await call<MergePreview>('POST', '/projects/default/merge/preview', { parentIds: kids.map((k) => k.id) })).data;
       expect(preview.conflicts).toEqual(['shared.md']);
 
@@ -958,6 +1076,29 @@ describe('API', () => {
       const first = llm.contexts.at(-1)!;
       expect(first.message).toContain('conflict markers');
       expect(readFileSync(path.join(first.edit!.dir, 'shared.md'), 'utf8')).toContain('<<<<<<<');
+    });
+
+    it('starts branches from the project’s files when asked', async () => {
+      llm.canEdit = true;
+      await chat(rootId, 'Start [write parent.md]');
+      await idle(rootId);
+      const { data: [fresh] } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
+        filesFromProject: true,
+        branches: [{ prompt: 'Fresh start [write fresh.md]', title: 'Fresh' }],
+      });
+      expect(fresh.filesFromProject).toBe(true);
+      await idle(fresh.id);
+      const run = llm.contexts.at(-1)!;
+      expect(existsSync(path.join(run.edit!.dir, 'parent.md'))).toBe(false); // the parent's edit isn't there
+      expect(existsSync(path.join(run.edit!.dir, 'fresh.md'))).toBe(true);
+      expect(run.message).toContain('not as the conversation above left them');
+
+      // Its own branches start from its copy, as usual.
+      const [child] = await fork(fresh.id, ['Go on [write child.md]']);
+      await idle(child.id);
+      const childDir = llm.contexts.at(-1)!.edit!.dir;
+      expect(existsSync(path.join(childDir, 'fresh.md'))).toBe(true);
+      expect(existsSync(path.join(childDir, 'parent.md'))).toBe(false);
     });
 
     it('checks a chosen folder, then makes it a repository when the project is created', async () => {

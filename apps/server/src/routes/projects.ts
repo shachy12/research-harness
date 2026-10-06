@@ -20,7 +20,7 @@ import {
 } from '@harness/shared';
 import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
-import { conflict, HttpError, notFound } from './errors.ts';
+import { HttpError, notFound } from './errors.ts';
 
 export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, loadModels, checkModel }: RouteDeps) {
   return new Hono()
@@ -28,7 +28,7 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       c.json<ProjectSummary[]>(
         repo.listProjects().map((p) => ({
           ...p,
-          running: repo.listNodes(p.id).some((n) => runs.isRunning(n.id)),
+          running: repo.listNodes(p.id).some((n) => runs.isBusy(n.id)),
         })),
       ),
     )
@@ -166,6 +166,7 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
             ? (messages[lastReply].forkProposal?.branches.length ?? 0)
             : 0,
           forkedAtEnd: forkPoints.includes(messages.length),
+          merge: runs.mergeState(node, messages.length),
         };
       });
       return c.json<GraphResponse>({ project, nodes, usage: runs.usage() });
@@ -182,17 +183,17 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       return c.json<MergePreview>(await worktrees.previewMerge(project, graph, parentIds));
     })
 
-    // Create a merge node from finished branches and start it working on its first message.
+    // Merge any nodes: the merge node is created right away; it drafts each node's result in the
+    // background (RunManager.startMerge), then starts working on its first message.
     .post('/:projectId/merge', zValidator('json', mergeSchema), async (c) => {
       const projectId = c.req.param('projectId');
       const { title, prompt, model, effort } = c.req.valid('json');
       const parentIds = [...new Set(c.req.valid('json').parentIds)];
-      if (parentIds.length < 2) throw new HttpError(400, 'Select at least two different branches');
+      if (parentIds.length < 2) throw new HttpError(400, 'Select at least two different nodes');
 
       const parents = parentIds.map((id) => {
         const parent = repo.getNode(id);
         if (!parent || parent.projectId !== projectId) throw notFound(`Node ${id}`);
-        if (parent.status !== 'finished') throw conflict(`"${parent.title}" is not finished yet`);
         return parent;
       });
       // The model and effort chosen in the merge dialog; left out, the branches' setting, or if they
@@ -203,10 +204,20 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
       // A title the user wrote is final; the default one may be replaced by a model-written title.
       const node = title
-        ? repo.createNode({ projectId, title, parentIds, titleSource: 'user', ...settings })
-        : repo.createNode({ projectId, title: defaultMergeTitle(parents.map((p) => p.title)), parentIds, ...settings });
-      runs.start(node.id, prompt);
+        ? repo.createNode({ projectId, title, parentIds, titleSource: 'user', mergePrompt: prompt, ...settings })
+        : repo.createNode({ projectId, title: defaultMergeTitle(parents.map((p) => p.title)), parentIds, mergePrompt: prompt, ...settings });
+      runs.startMerge(node.id);
       return c.json(node, 201);
+    })
+
+    // Another root in the project: an empty node with no parents, sharing the project's folder but
+    // no context. It takes the first root's model and effort (the project's default, in effect).
+    .post('/:projectId/roots', (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      const first = repo.listNodes(project.id).find((n) => n.parentIds.length === 0);
+      const root = repo.createNode({ projectId: project.id, title: 'New thread', parentIds: [], model: first?.model ?? null, effort: first?.effort ?? null });
+      return c.json(root, 201);
     })
 
     // Start over: delete all nodes and messages, keep the project with a fresh root.

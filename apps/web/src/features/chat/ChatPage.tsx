@@ -1,8 +1,8 @@
 import { type Attachment, type DagNode, type ForkProposal, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
-import { PencilIcon } from 'lucide-react'
+import { PencilIcon, Trash2Icon } from 'lucide-react'
 import { Fragment, useEffect, useEffectEvent, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { useGraph, useNodeDetail, useRetry } from '@/api/queries'
+import { useGraph, useNodeDetail, useRetry, useSetDone } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
 import { UsageBanner } from '@/components/UsageBanner'
 import { activityOf } from '@/lib/activity'
@@ -12,9 +12,8 @@ import { ChangesPanel } from '@/features/editing/ChangesPanel'
 import { ForkDialog } from '@/features/fork/ForkDialog'
 import { ProposalBox } from '@/features/fork/ProposalBox'
 import { NodeModelPicker } from '@/features/model/NodeModelPicker'
+import { DeleteNodeDialog } from '@/features/graph/DeleteNodeDialog'
 import { RenameDialog } from '@/features/rename/RenameDialog'
-import { ResultBlock } from '@/features/result/ResultBlock'
-import { ResultDialog } from '@/features/result/ResultDialog'
 import { describeReset, limitName } from '@/lib/limit'
 import { itemTitle, resolveSelection } from '@/lib/listItems'
 import { contextTokens, estimateTokens } from '@/lib/tokens'
@@ -41,7 +40,7 @@ export function ChatPage() {
  * 'fork-selection' is the fork dialog started from the list items ticked in the replies;
  * a ForkProposal opens it with the branches the model proposed.
  */
-type DialogKind = 'fork' | 'fork-selection' | ForkProposal | 'result' | 'rename' | null
+type DialogKind = 'fork' | 'fork-selection' | ForkProposal | 'rename' | 'delete' | null
 
 function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) {
   const detail = useNodeDetail(nodeId)
@@ -97,11 +96,11 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
         <Conversation key={node.id} detail={detail.data} onDialog={setDialog} />
       </ListSelectionContext>
 
-      {dialog !== null && dialog !== 'result' && dialog !== 'rename' && (
+      {dialog !== null && dialog !== 'rename' && dialog !== 'delete' && (
         <ForkDialog
           node={node}
           inheritedTokens={historyTokens}
-          existingBranches={detail.data.childIds.length}
+          existingBranches={detail.data.forks.reduce((n, f) => n + f.childIds.length, 0)}
           items={
             dialog === 'fork-selection'
               ? resolveSelection(selection.items, detail.data.messages.map((m) => m.id)).map((i) => ({
@@ -114,14 +113,22 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
           onClose={() => setDialog(null)}
         />
       )}
-      {dialog === 'result' && <ResultDialog node={node} onClose={() => setDialog(null)} />}
       {dialog === 'rename' && <RenameDialog node={node} onClose={() => setDialog(null)} />}
+      {dialog === 'delete' && (
+        <DeleteNodeDialog
+          node={node}
+          childCount={detail.data.childIds.length}
+          running={detail.data.running}
+          onDeleted={() => navigate(graphUrl)}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </div>
   )
 }
 
 function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: DialogKind) => void }) {
-  const { node, messages, inherited, forks } = detail
+  const { node, messages, inherited, forks, merge } = detail
   /** The branches forked off after the first `count` messages (shown at that point in the chat). */
   const forkMarker = (count: number) => {
     const fork = forks.find((f) => f.at === count)
@@ -132,8 +139,10 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const stream = useChatStream(node.id)
   const files = useAttachments(node.projectId)
   const retry = useRetry()
+  const setDone = useSetDone()
   const [draft, setDraft] = useState('')
-  const canWrite = node.status === 'open'
+  // A merge node takes messages once its results are written and its first message was sent.
+  const canWrite = merge === null
   // Drop files and folders anywhere on the chat to attach them to the next message.
   const drop = useDropZone(files.addPicked, canWrite)
 
@@ -154,9 +163,9 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
   // Progress while working: what the model is doing right now, and for how long.
   const working = stream.active || detail.running
-  const now = useNow(working)
-  const startedAt = stream.startedAt ?? detail.run?.startedAt
-  const elapsed = working && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
+  const now = useNow(working || merge?.running === true)
+  const startedAt = stream.startedAt ?? detail.run?.startedAt ?? merge?.startedAt
+  const elapsed = (working || merge?.running) && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
   const runningTool = stream.toolCalls.findLast((c) => c.status === 'running')
   const currentActivity = stream.approval
     ? 'Waiting for your approval'
@@ -187,8 +196,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
     files.clear()
   }
 
-  const hasReply = messages.some((m) => m.role === 'assistant')
-  const canFinish = node.status === 'open' && node.parentIds.length > 0
+  const done = node.status === 'finished'
   // The last message is yours and nothing is answering it: the reply failed or was stopped early.
   const unanswered = canWrite && !working && messages.at(-1)?.role === 'user'
   const limitReached = detail.usage?.status === 'reached'
@@ -215,10 +223,20 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
               >
                 <PencilIcon />
               </Button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="align-middle text-muted-foreground hover:text-destructive"
+                aria-label="Delete"
+                title="Delete this node"
+                onClick={() => onDialog('delete')}
+              >
+                <Trash2Icon />
+              </Button>
             </h1>
             <StatusChip
               status={node.status}
-              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached, forks.some((f) => f.at === messages.length))}
+              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached, forks.some((f) => f.at === messages.length), merge)}
               elapsed={elapsed}
             />
             {node.parentIds.length > 1 && <MergeChip />}
@@ -228,7 +246,16 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
           <InheritedContext items={inherited} />
 
-          {messages.length === 0 && !stream.active && (
+          {merge && (
+            <MergeProgress
+              merge={merge}
+              prompt={node.mergePrompt}
+              retrying={retry.isPending}
+              retryError={retry.error?.message}
+              onRetry={() => retry.mutate(node.id)}
+            />
+          )}
+          {messages.length === 0 && !stream.active && !merge && (
             <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
               {inherited.length
                 ? 'This node already has the context above. Ask its question to start.'
@@ -277,7 +304,6 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
           )}
 
           <ChangesPanel node={node} version={`${node.filesChanged}-${messages.length}`} working={working} />
-          {node.result && <ResultBlock result={node.result} onEdit={() => onDialog('result')} />}
           <div ref={endRef} />
         </div>
       </div>
@@ -331,16 +357,24 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
             </form>
           ) : (
             <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-              Finished. Right-click it in the graph to include its result in a merge.
+              You can write here once the merge has written its results and started.
             </p>
           )}
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" disabled={stream.active} onClick={() => onDialog('fork')}>
+            <Button variant="outline" size="sm" disabled={stream.active || !canWrite} onClick={() => onDialog('fork')}>
               ⑂ Fork
             </Button>
-            {canFinish && (
-              <Button variant="outline" size="sm" disabled={!hasReply || stream.active} onClick={() => onDialog('result')}>
-                ✓ Finish branch
+            {canWrite && (
+              <Button
+                variant="outline"
+                size="sm"
+                aria-pressed={done}
+                className={done ? 'border-done/70 bg-done-soft text-done hover:bg-done-soft/70 hover:text-done' : undefined}
+                title={done ? 'Marked done. Click to unmark; sending a message unmarks it too.' : 'Mark this node done (a green marker on the graph). Sending a message later unmarks it.'}
+                disabled={setDone.isPending}
+                onClick={() => setDone.mutate({ nodeId: node.id, done: !done })}
+              >
+                ✓ {done ? 'Done' : 'Mark done'}
               </Button>
             )}
             {canWrite && (
@@ -381,6 +415,39 @@ function NoReply({ error, limit, retrying, retryError, onRetry }: {
         {retrying ? 'Retrying…' : 'Retry'}
       </Button>
       {retryError && <span className="basis-full">{retryError}</span>}
+    </div>
+  )
+}
+
+/** A merge node writing the results of the nodes it merges, or stopped before it could. */
+function MergeProgress({ merge, prompt, retrying, retryError, onRetry }: {
+  merge: NonNullable<NodeDetail['merge']>
+  prompt: string | null
+  retrying: boolean
+  retryError?: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-merge/40 bg-merge-soft px-4 py-3 text-sm">
+      {merge.running ? (
+        <p className="flex items-center gap-2 font-medium text-merge">
+          <span className="size-2 shrink-0 animate-pulse rounded-full bg-merge" aria-hidden="true" />
+          Merge in progress · {merge.activity}…
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3 text-destructive">
+          <span className="min-w-0 flex-1">{merge.error}</span>
+          <Button size="sm" variant="outline" className="bg-background text-foreground" disabled={retrying} onClick={onRetry}>
+            {retrying ? 'Retrying…' : 'Retry the merge'}
+          </Button>
+          {retryError && <span className="basis-full">{retryError}</span>}
+        </div>
+      )}
+      <p className="text-muted-foreground">
+        Each merged node's result is written first; then this node starts with them on your first message
+        {prompt ? ':' : '.'}
+      </p>
+      {prompt && <p className="rounded-md bg-background/70 px-3 py-2 whitespace-pre-wrap">{prompt}</p>}
     </div>
   )
 }

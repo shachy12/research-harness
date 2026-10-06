@@ -134,6 +134,7 @@ export class PlaceholderProvider implements LLMProvider {
   }
 
   async draftResult({ request }: ReplyContext): Promise<BranchResult> {
+    await pause(this.wordDelayMs * 25); // like a short model call, so the "Merging…" state can be seen
     const lastReply = request.turns.findLast((t) => t.role === 'assistant')?.content ?? '';
     return {
       findings: lastReply.slice(0, 500) || 'No findings yet.',

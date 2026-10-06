@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Attachment, BranchResult, DagNode, Effort, ForkProposal, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
+import type { Attachment, BranchResult, DagNode, Effort, ForkProposal, MergedResult, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
@@ -11,6 +11,7 @@ interface NodeRow {
   title_source: TitleSource; prompt_title: string | null; read_upto: string | null;
   model: string | null; effort: Effort | null; git_branch: string | null; files_changed: number | null;
   fork_point: number | null; fork_session: string | null;
+  result_upto: number | null; merge_results: string | null; merge_prompt: string | null; files_from_project: number;
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
@@ -30,6 +31,10 @@ const toNode = (r: NodeRow): DagNode => ({
   forkSession: r.fork_session,
   status: r.status,
   result: r.result ? (JSON.parse(r.result) as BranchResult) : null,
+  resultUpto: r.result_upto,
+  mergeResults: r.merge_results ? (JSON.parse(r.merge_results) as MergedResult[]) : null,
+  mergePrompt: r.merge_prompt,
+  filesFromProject: r.files_from_project === 1,
   sessionId: r.session_id,
   readUpto: r.read_upto,
   model: r.model,
@@ -140,15 +145,41 @@ export class Repository {
     /** A branch's fork point (see `DagNode.forkPoint` / `forkSession`). */
     forkPoint?: number | null;
     forkSession?: string | null;
+    /** A merge node's first message, sent once its results are drafted. */
+    mergePrompt?: string | null;
+    filesFromProject?: boolean;
   }): DagNode {
     const id = randomUUID();
     this.db
       .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, model, effort,
-                  fork_point, fork_session, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?)`)
+                  fork_point, fork_session, merge_prompt, files_from_project, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds),
-        input.model ?? null, input.effort ?? null, input.forkPoint ?? null, input.forkSession ?? null, now());
+        input.model ?? null, input.effort ?? null, input.forkPoint ?? null, input.forkSession ?? null,
+        input.mergePrompt ?? null, input.filesFromProject ? 1 : 0, now());
     return this.getNode(id)!;
+  }
+
+  /**
+   * Delete a node and its messages. Its children become roots (no parents, no fork point): they
+   * keep their own messages and sessions. A child merge that never started loses its pending first
+   * message (it becomes an empty root). Returns the children's ids.
+   */
+  deleteNode(id: string): string[] {
+    return this.transaction(() => {
+      const node = this.getNode(id);
+      if (!node) return [];
+      const children = this.listNodes(node.projectId).filter((n) => n.parentIds.includes(id));
+      for (const child of children) {
+        this.db
+          .prepare(`UPDATE nodes SET parent_ids = '[]', fork_point = NULL, fork_session = NULL,
+                      merge_prompt = CASE WHEN EXISTS (SELECT 1 FROM messages WHERE node_id = nodes.id) THEN merge_prompt END
+                    WHERE id = ?`)
+          .run(child.id);
+      }
+      this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id); // messages cascade
+      return children.map((c) => c.id);
+    });
   }
 
   /** The model and effort the node's next replies use (null: the provider's default). */
@@ -191,10 +222,14 @@ export class Repository {
     return Number(result.changes) > 0;
   }
 
-  setResult(id: string, result: BranchResult): void {
-    this.db
-      .prepare("UPDATE nodes SET result = ?, status = 'finished' WHERE id = ?")
-      .run(JSON.stringify(result), id);
+  /** The result drafted for a merge, covering the node's first `upto` messages (its status stays). */
+  setResult(id: string, result: BranchResult, upto: number): void {
+    this.db.prepare('UPDATE nodes SET result = ?, result_upto = ? WHERE id = ?').run(JSON.stringify(result), upto, id);
+  }
+
+  /** The results a merge node received (set once, when its drafts are done). */
+  setMergeResults(id: string, results: MergedResult[]): void {
+    this.db.prepare('UPDATE nodes SET merge_results = ? WHERE id = ?').run(JSON.stringify(results), id);
   }
 
   // ---- messages ----

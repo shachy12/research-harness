@@ -76,6 +76,8 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
   const [instruction, setInstruction] = useState('')
   const parentSettings: ModelSettings = { model: node.model, effort: node.effort }
   const [branches, setBranches] = useState<Branch[]>(() => initialBranches(parentSettings, items, proposal))
+  // The branches' copies of the files start from the project folder's branch, not this node's copy.
+  const [filesFromProject, setFilesFromProject] = useState(false)
   const fork = useFork()
   const catalog = useModels().data
   const navigate = useNavigate()
@@ -91,6 +93,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
     fork.mutate(
       {
         nodeId: node.id,
+        filesFromProject,
         branches: filled.map((b) => ({
           prompt: promptOf(b).trim(),
           title: b.item?.title ?? b.title ?? undefined,
@@ -175,6 +178,24 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
               + Add branch
             </Button>
           </div>
+          {catalog?.canEdit && (
+            <label className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5 size-4 accent-primary"
+                checked={filesFromProject}
+                onChange={(e) => setFilesFromProject(e.target.checked)}
+              />
+              <span>
+                Start the files from the project folder&apos;s branch
+                <span className="block text-xs text-muted-foreground">
+                  {filesFromProject
+                    ? "The branches keep this node's conversation, but their copies of the files start from the branch checked out in the project folder. File changes made in this node and its ancestors are not in them."
+                    : "Off: the branches' copies of the files start from this node's copy, with the changes made in this conversation."}
+                </span>
+              </span>
+            </label>
+          )}
           {fork.isError && <p className="text-sm text-destructive">{fork.error.message}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>

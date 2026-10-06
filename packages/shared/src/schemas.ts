@@ -85,9 +85,11 @@ export const modelSettingsSchema = z.object({
 /**
  * Each branch's prompt is its first message (sent with its attachments). Its title is `title` when
  * given (a branch made from a list item is named after the item), else the prompt, shortened.
- * `model` / `effort` left out means the parent's.
+ * `model` / `effort` left out means the parent's. `filesFromProject`: the branches' copies of the
+ * files start from the project folder's checked-out branch instead of the parent's copy.
  */
 export const forkSchema = z.object({
+  filesFromProject: z.boolean().default(false),
   branches: z
     .array(z.object({
       prompt: z.string().trim().min(1),
@@ -101,16 +103,22 @@ export const forkSchema = z.object({
 });
 
 /**
- * The merged node starts working on `prompt` (its first message) right away. Without a `title`, it
- * gets a default one that the model may later replace. `model` / `effort` left out: the branches'
- * setting, or if they differ, the model first by name (`mergeModelSettings`).
+ * Merge any nodes. The merged node is created right away; each node's result is drafted in the
+ * background, then it starts working on `prompt` (its first message). Without a `title`, it gets a
+ * default one that the model may later replace. `model` / `effort` left out: the nodes' setting,
+ * or if they differ, the model first by name (`mergeModelSettings`).
  */
 export const mergeSchema = z.object({
-  parentIds: z.array(z.string().min(1)).min(2, 'Select at least two branches'),
+  parentIds: z.array(z.string().min(1)).min(2, 'Select at least two nodes'),
   title: z.string().trim().min(1).max(200).optional(),
   prompt: z.string().trim().min(1, 'Write the first message'),
   model: modelField.optional(),
   effort: effortField.optional(),
+});
+
+/** Mark a node done (a green marker), or not. A new message clears it too. */
+export const doneSchema = z.object({
+  done: z.boolean(),
 });
 
 /** Allow or deny the ask_node questions a reply is waiting on. */

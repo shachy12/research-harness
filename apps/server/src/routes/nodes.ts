@@ -7,7 +7,7 @@ import {
   type NodeChanges,
   type NodeDetail,
   askDecisionSchema,
-  branchResultSchema,
+  doneSchema,
   forkSchema,
   markReadSchema,
   modelSettingsSchema,
@@ -19,10 +19,7 @@ import { type Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { RouteDeps } from '../app.ts';
 import { inheritedItems } from '../dag/context.ts';
-import { DRAFT_RESULT_INSTRUCTION, buildChatRequest } from '../dag/prompt.ts';
-import { planSession } from '../dag/session.ts';
 import { classifyError } from '../llm/errors.ts';
-import type { ReplyContext } from '../llm/index.ts';
 import { cleanTitle } from '../llm/title.ts';
 import type { RunManager } from '../runs.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
@@ -72,34 +69,28 @@ function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStre
   });
 }
 
-export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel }: RouteDeps) {
+export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel, backup }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
     return node;
   };
 
-  /** A finished node won't edit again: commit its copy and remove it (its branch stays). */
-  const retireCopy = (node: DagNode) => {
-    if (!node.gitBranch) return;
-    worktrees
-      .retire(repo.getProject(node.projectId)!, node.id, `${node.title}: final state`)
-      .catch((err: unknown) => console.error(`[git] retire ${node.id}:`, err));
-  };
-
   return new Hono()
     .get('/:nodeId', (c) => {
       const node = requireNode(c.req.param('nodeId'));
       const graph = repo.snapshot(node.projectId);
+      const messages = graph.messages(node.id);
       return c.json<NodeDetail>({
         node,
-        messages: graph.messages(node.id),
+        messages,
         inherited: inheritedItems(graph, node.id),
         childIds: graph.children(node.id).map((n) => n.id),
         forks: forksOf(graph.children(node.id)),
         running: runs.isRunning(node.id),
         run: runs.status(node.id),
         titlePending: runs.isTitling(node.id),
+        merge: runs.mergeState(node, messages.length),
         usage: runs.usage(),
       });
     })
@@ -114,7 +105,6 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
     // Change the model and effort for the node's next replies (the history stays as it is).
     .put('/:nodeId/model', zValidator('json', modelSettingsSchema), async (c) => {
       const node = requireNode(c.req.param('nodeId'));
-      if (node.status !== 'open') throw conflict('Only open nodes can change their model.');
       if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
       const { model, effort } = c.req.valid('json');
       await checkModel(model, effort);
@@ -155,6 +145,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
     .post('/:nodeId/messages', zValidator('json', sendMessageSchema), (c) => {
       const node = requireNode(c.req.param('nodeId'));
       const { content, attachments } = c.req.valid('json');
+      // A node marked done is open again once it gets a message (RunManager.start).
       const checked = workspaces.validate(repo.getProject(node.projectId)!, attachments);
       if ('error' in checked) throw new HttpError(400, checked.error);
       const userMessage = runs.start(node.id, content, checked);
@@ -167,7 +158,8 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       return watchRun(c, runs, c.req.param('nodeId'));
     })
 
-    // Answer the last message again after its reply failed or was stopped before writing anything.
+    // Answer the last message again after its reply failed or was stopped before writing anything
+    // (a merge that stopped while writing its results starts again).
     .post('/:nodeId/retry', (c) => {
       runs.retry(requireNode(c.req.param('nodeId')).id);
       return c.json({ ok: true });
@@ -180,6 +172,40 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       return c.json({ ok: true });
     })
 
+    // Delete a node and its messages. Its children become roots (they keep their own conversations
+    // and sessions; the graph no longer links them). A backup of the database is made first (if that
+    // fails, nothing is deleted). Its git branch stays; its worktree is committed and removed.
+    .delete('/:nodeId', (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      const graph = repo.snapshot(node.projectId);
+      const merging = graph.children(node.id).find((child) => runs.mergeState(child, graph.messages(child.id).length)?.running);
+      if (merging) throw conflict(`"${merging.title}" is still writing the results of a merge with this node. Wait until it has started, or delete that merge first.`);
+      try {
+        const saved = backup?.('before-delete-node');
+        if (saved) console.log(`database backed up before deleting node "${node.title}": ${saved}`);
+      } catch (err) {
+        console.error('[delete node] backup failed:', err);
+        throw new HttpError(500, 'Could not back up the database, so nothing was deleted.');
+      }
+      runs.stop(node.id);
+      llm.release?.(node.id);
+      const orphans = repo.deleteNode(node.id);
+      if (node.gitBranch) {
+        worktrees
+          .retire(repo.getProject(node.projectId)!, node.id, `${node.title}: state when deleted`)
+          .catch((err: unknown) => console.error(`[git] retire ${node.id}:`, err));
+      }
+      return c.json({ ok: true, orphans });
+    })
+
+    // Mark the node done (a green marker on its card), or not. Nothing else changes: it can still be
+    // messaged (which clears the mark), forked and merged.
+    .put('/:nodeId/done', zValidator('json', doneSchema), (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      repo.setStatus(node.id, c.req.valid('json').done ? 'finished' : 'open');
+      return c.json(repo.getNode(node.id)!);
+    })
+
     // Stop the running reply; what arrived so far is kept.
     .post('/:nodeId/stop', (c) => {
       runs.stop(requireNode(c.req.param('nodeId')).id);
@@ -187,12 +213,20 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
     })
 
     // Create branches and start each one working on its first message (with its files) right away.
-    // Fork: the node stays open; its branches start from what it has now (see below).
+    // Fork: the node stays open; its branches start from what it has now (see below). With
+    // `filesFromProject` their copies of the files start from the project's checked-out branch.
     .post('/:nodeId/fork', zValidator('json', forkSchema), async (c) => {
       const parent = requireNode(c.req.param('nodeId'));
-      if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
+      const busy = () => {
+        if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
+        if (runs.isBusy(parent.id) || runs.mergeState(parent, repo.listMessages(parent.id).length)) {
+          throw conflict('This merge has not started yet, so there is nothing to fork from.');
+        }
+      };
+      busy();
 
       const project = repo.getProject(parent.projectId)!;
+      const { filesFromProject } = c.req.valid('json');
       const branches: { prompt: string; title: string; attachments: Attachment[]; model: string | null; effort: Effort | null }[] = [];
       for (const { prompt, title, attachments, model, effort } of c.req.valid('json').branches) {
         const checked = workspaces.validate(project, attachments);
@@ -202,17 +236,18 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
         if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
         branches.push({ prompt, title: title ?? titleFromPrompt(prompt), attachments: checked, ...settings });
       }
-      if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
+      busy();
       // The parent stays open. Each branch inherits what it has now (its fork point) and forks its
       // session as it is now; the parent's next message continues in a copy (`planSession`).
       const forkPoint = repo.listMessages(parent.id).length;
       const children = repo.transaction(() =>
         branches.map(({ title, model, effort }) =>
-          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id], model, effort, forkPoint, forkSession: parent.sessionId }),
+          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id], model, effort, forkPoint, forkSession: parent.sessionId, filesFromProject }),
         ),
       );
       llm.release?.(parent.id); // its next message starts a new process on the copy
-      if (parent.gitBranch) {
+      // Branches starting from the project's files get their git branch at their first run (`ensure`).
+      if (parent.gitBranch && !filesFromProject) {
         // Queued before the children's copies are made: they start from the parent's files as they are now.
         worktrees
           .fork(project, parent.id, children.map((child) => child.id), `${parent.title}: forked`)
@@ -220,51 +255,6 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       }
       children.forEach((child, i) => runs.start(child.id, branches[i].prompt, branches[i].attachments));
       return c.json(children, 201);
-    })
-
-    // Ask the model to draft this branch's result. Nothing is saved until the user approves it.
-    .post('/:nodeId/result/draft', async (c) => {
-      const node = requireNode(c.req.param('nodeId'));
-      if (node.status !== 'open') throw conflict('Only open branches can be finished.');
-      if (node.parentIds.length === 0) throw new HttpError(400, 'The root node has no result to merge.');
-      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
-      const graph = repo.snapshot(node.projectId);
-      if (!graph.messages(node.id).some((m) => m.role === 'assistant')) {
-        throw new HttpError(400, 'This branch has no replies yet.');
-      }
-
-      const ctx: ReplyContext = {
-        nodeId: node.id,
-        workDir: workspaces.prepare(repo.getProject(node.projectId)!),
-        request: buildChatRequest(graph, node.id, [{ role: 'user', content: DRAFT_RESULT_INSTRUCTION }]),
-        message: DRAFT_RESULT_INSTRUCTION,
-        session: planSession(graph, node.id),
-        model: node.model,
-        effort: node.effort,
-        edit: null, // drafting runs without tools
-        mcpUrl: null,
-      };
-      try {
-        return c.json(await llm.draftResult(ctx, c.req.raw.signal));
-      } catch (err) {
-        console.error(`[draft] node ${node.id}:`, err);
-        const error = classifyError(err);
-        runs.noteFailure(error);
-        // The dialog shows this and offers to write the result by hand.
-        throw new HttpError(502, error.message);
-      }
-    })
-
-    // Approve (or edit) the result. This finishes the branch.
-    .put('/:nodeId/result', zValidator('json', branchResultSchema), (c) => {
-      const node = requireNode(c.req.param('nodeId'));
-      if (node.parentIds.length === 0) throw new HttpError(400, 'The root node has no result to merge.');
-      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
-
-      repo.setResult(node.id, c.req.valid('json'));
-      llm.release?.(node.id); // a finished branch receives no more messages
-      retireCopy(node);
-      return c.json(repo.getNode(node.id)!);
     })
 
     // What applying the node's file changes would bring into the project (null: it has none).

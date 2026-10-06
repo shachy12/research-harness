@@ -27,16 +27,18 @@ export interface Attachment {
 }
 
 /**
- * open:     accepts new messages (also after it was forked: its branches keep what it was then)
- * finished: has an approved result that can be merged
+ * open:     the usual state
+ * finished: the user marked it done (shown as "Done", in green). Only a marker: a new message
+ *           makes it open again, and any node can be merged whatever its status.
  *
  * Until 2026-10-05 a forked node was 'frozen' (no more messages); migration 11 reopened them.
+ * Until 2026-10-06 'finished' meant an approved result and no more messages.
  */
 export type NodeStatus = 'open' | 'finished';
 
 export type Confidence = 'low' | 'medium' | 'high';
 
-/** The distilled output of a branch. Only this flows into a merge, never the transcript. */
+/** The distilled output of a node, drafted when it is merged. Only this flows into a merge, never the transcript. */
 export interface BranchResult {
   findings: string;
   evidence: string;
@@ -70,7 +72,22 @@ export interface DagNode {
    */
   forkSession: string | null;
   status: NodeStatus;
+  /** The last result drafted for a merge (reused by the next merge if nothing was added since). */
   result: BranchResult | null;
+  /** How many of the node's messages `result` covers. */
+  resultUpto: number | null;
+  /**
+   * A merge node: the result each merged node gave it (in merge order). Fixed once drafted, even
+   * if those nodes go on. Null until the drafts are done, and for other nodes.
+   */
+  mergeResults: MergedResult[] | null;
+  /** A merge node's first message, sent once the results are drafted. */
+  mergePrompt: string | null;
+  /**
+   * Its copy of the files starts from the project folder's checked-out branch instead of its
+   * parent's copy (chosen in the fork dialog; a root always does).
+   */
+  filesFromProject: boolean;
   /** The Claude Code session holding this node's conversation (claude-code provider only). */
   sessionId: string | null;
   /**
@@ -92,6 +109,26 @@ export interface DagNode {
   /** How many files its branch changes compared with the project, as of its last reply (null: no branch). */
   filesChanged: number | null;
   createdAt: string;
+}
+
+/** One merged node's result as a merge node received it. */
+export interface MergedResult {
+  nodeId: string;
+  /** How many of that node's messages it covers. */
+  upto: number | null;
+  result: BranchResult;
+}
+
+/**
+ * A merge node whose results are still being drafted (`running`), or whose drafting stopped
+ * (`error`; Retry starts it again). Null once its first message was sent.
+ */
+export interface MergeState {
+  running: boolean;
+  startedAt: string | null;
+  /** e.g. "Writing the results: 1 of 3 done". */
+  activity: string | null;
+  error: string | null;
 }
 
 /** How hard the model thinks before answering (Claude's effort levels, lowest to highest). */
@@ -171,7 +208,7 @@ export interface ToolCall {
   offset?: number;
 }
 
-/** One entry of what a node inherits: an ancestor's message, or a merged branch's result. */
+/** One entry of what a node inherits: an ancestor's message, or a merged node's result. */
 export type ContextItem =
   | { kind: 'message'; nodeId: string; nodeTitle: string; message: Message }
   | { kind: 'result'; nodeId: string; nodeTitle: string; result: BranchResult };
@@ -205,6 +242,8 @@ export interface NodeSummary extends DagNode {
   proposedBranches: number;
   /** Branches were forked off at the node's current end (nothing was added since): its card says "Forked". */
   forkedAtEnd: boolean;
+  /** A merge node still drafting its results (see MergeState). */
+  merge: MergeState | null;
 }
 
 export interface RunStatus {
@@ -263,6 +302,7 @@ export interface NodeDetail {
   running: boolean;
   run: RunStatus | null;
   titlePending: boolean;
+  merge: MergeState | null;
   usage: UsageLimit | null;
 }
 
