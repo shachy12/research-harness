@@ -1,0 +1,129 @@
+# Releases the npm package research-harness. Started by hand: Actions → Release → Run workflow (on
+# main), or `gh workflow run release.yml -f bump=patch`.
+#
+# 1. Runs CI (type checks, lint, tests); nothing happens unless it passes.
+# 2. Raises the version and commits it on a new branch release/vX.Y.Z.
+# 3. Publishes to npm (trusted publishing: npm accepts this workflow without a token).
+# 4. Pushes the branch and the tag vX.Y.Z, creates the GitHub release with the package attached.
+# 5. Opens a pull request release/vX.Y.Z → main. Merge it, so main has the new version before the
+#    next release.
+#
+# The tag and release are made only after npm accepted the package, so a failed publish never
+# leaves a tag for a version that doesn't exist.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump (from 0.2.3: patch → 0.2.4, minor → 0.3.0, major → 1.0.0)'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # push the release branch and tag, create the release
+      pull-requests: write # open the release pull request
+      id-token: write # npm trusted publishing
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUMP: ${{ inputs.bump }}
+    steps:
+      - name: Check that the release runs from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run the release from main (it was started on $GITHUB_REF)."
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # all history and tags, for the release notes
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - name: Make sure npm supports trusted publishing (11.5.1 or later)
+        run: |
+          if ! node -e "const [a, b, c] = process.argv[1].split('.').map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)" "$(npm -v)"; then
+            npm install -g npm@11
+          fi
+          npm -v
+
+      - name: Raise the version
+        run: |
+          VERSION=$(node .github/scripts/bump-version.mjs "$BUMP")
+          PREVIOUS=$(git tag -l 'v*' --sort=-v:refname | head -n 1)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PREVIOUS=$PREVIOUS" >> "$GITHUB_ENV"
+          echo "Releasing $VERSION (previous release: ${PREVIOUS:-none})"
+          # Stop before publishing anything if this version exists already, e.g. because the last
+          # release's pull request isn't merged into main yet.
+          if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+            echo "::error::Tag v$VERSION exists already. Is the pull request of the last release merged into main?"
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "release/v$VERSION" > /dev/null; then
+            echo "::error::Branch release/v$VERSION exists already (left by an earlier run?). Delete it and run again."
+            exit 1
+          fi
+          if [ -n "$(npm view "research-harness@$VERSION" version 2> /dev/null)" ]; then
+            echo "::error::research-harness $VERSION is on npm already."
+            exit 1
+          fi
+
+      - name: Commit the version on the release branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "release/v$VERSION"
+          git commit -m "Release v$VERSION" -- apps/cli/package.json package-lock.json
+          git tag -a "v$VERSION" -m "research-harness $VERSION"
+
+      # prepack builds the web UI and the bundles. The tarball made here is the one published and
+      # attached to the release.
+      - name: Build the package
+        working-directory: apps/cli
+        run: npm pack
+
+      - name: Publish to npm
+        working-directory: apps/cli
+        run: npm publish "research-harness-$VERSION.tgz"
+
+      - name: Push the release branch and tag
+        run: git push origin "release/v$VERSION" "v$VERSION"
+
+      - name: Create the GitHub release
+        run: |
+          {
+            echo '## Changes'
+            if [ -n "$PREVIOUS" ]; then
+              git log --no-merges --format='- %s (%h)' "$PREVIOUS..HEAD" | grep -v '^- Release v' || true
+              echo
+              echo "**Full changes:** $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$PREVIOUS...v$VERSION"
+            fi
+          } > release-notes.md
+          gh release create "v$VERSION" --verify-tag --title "v$VERSION" --notes-file release-notes.md "apps/cli/research-harness-$VERSION.tgz"
+
+      - name: Open the pull request into main
+        run: |
+          BODY="Brings the version bump of [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION) (published to npm) into main. Merge it before the next release."
+          if ! gh pr create --base main --head "release/v$VERSION" --title "Release v$VERSION" --body "$BODY"; then
+            echo "::warning::Couldn't open the pull request (is 'Allow GitHub Actions to create and approve pull requests' off in Settings → Actions → General?). Open it here: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...release/v$VERSION?expand=1"
+          fi

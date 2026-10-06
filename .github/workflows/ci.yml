@@ -1,0 +1,29 @@
+# Type checks, lint and tests. Runs on pull requests and pushes to main, and as the first job of
+# the Release workflow (workflow_call), which publishes only if this passes.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # Install scripts are skipped, as npm 12 does on the development machine (Electron's binary
+      # isn't needed for the tests).
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
