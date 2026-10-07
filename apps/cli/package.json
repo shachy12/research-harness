@@ -1,6 +1,6 @@
 {
   "name": "research-harness",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Harness: DAG-based LLM research chat. Run it with npx research-harness.",
   "author": "Shahar Shechter",
   "license": "UNLICENSED",
