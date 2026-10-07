@@ -7,7 +7,8 @@ describe('login shell PATH', () => {
     expect(pathFromShellOutput('no markers')).toBeNull();
   });
 
-  it("puts the shell's entries first without duplicates", () => {
+  // Only used on macOS and Linux; on Windows path.delimiter is ';', not the ':' written here.
+  it.runIf(process.platform !== 'win32')("puts the shell's entries first without duplicates", () => {
     expect(mergePaths('/home/me/.local/bin:/usr/bin', '/usr/bin:/bin:')).toBe('/home/me/.local/bin:/usr/bin:/bin');
   });
 
