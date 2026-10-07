@@ -254,6 +254,18 @@ describe('API', () => {
     expect((await detail(rootId)).run).toBeNull();
   });
 
+  it('a Stop while the node’s files are being prepared keeps the model from starting', async () => {
+    llm.canEdit = true; // the first run makes the node's git copy, which takes a moment
+    const sending = chat(rootId, 'Hi');
+    for (let i = 0; i < 200 && (await detail(rootId)).run?.activity !== 'Preparing files'; i++) await new Promise((r) => setTimeout(r, 1));
+    await call('POST', `/nodes/${rootId}/stop`);
+    expect((await sending).at(-1)).toMatchObject({ type: 'error', error: 'Stopped before any reply arrived.' });
+    expect(llm.contexts).toHaveLength(0);
+
+    // The next message runs normally.
+    expect((await chat(rootId, 'Again')).at(-1)).toMatchObject({ type: 'done', message: { content: 'Hello there' } });
+  });
+
   it('fork names each branch after its prompt and starts it working', async () => {
     await chat(rootId, 'Scope it');
     const longPrompt = `Compare retrieval methods for long conversations ${'and more detail '.repeat(10)}`;

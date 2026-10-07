@@ -1,5 +1,5 @@
 import { type Attachment, MAX_FOLDER_BYTES, MAX_FOLDER_FILES, MAX_UPLOAD_BYTES } from '@harness/shared'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { uploadFile, uploadFolder } from '@/api/client'
 import type { PickedFolder, PickedItems } from '@/lib/dropped-files'
 
@@ -17,12 +17,33 @@ export interface PendingFile {
 let nextKey = 0
 const MB = 1024 * 1024
 
+/** Where a composer keeps its finished uploads while they aren't sent (see `drafts.ts`). */
+export interface KeepAttachments {
+  /** Uploads kept from before (shown as ready). */
+  initial: Attachment[]
+  /** An upload finished; called even after the composer has closed, so the draft still gets it. */
+  onAdded: (attachment: Attachment) => void
+  onRemoved: (attachment: Attachment) => void
+}
+
 /**
  * Files and folders picked for the next message. Each one uploads right away (into the project's
  * `.harness/uploads/`), so sending only has to pass the finished uploads along.
  */
-export function useAttachments(projectId: string) {
-  const [files, setFiles] = useState<PendingFile[]>([])
+export function useAttachments(projectId: string, keep?: KeepAttachments) {
+  const [files, setFiles] = useState<PendingFile[]>(() =>
+    (keep?.initial ?? []).map((attachment) => ({
+      key: `f${nextKey++}`,
+      name: attachment.name,
+      size: attachment.size,
+      kind: attachment.kind ?? 'file',
+      fileCount: attachment.fileCount,
+      status: 'ready',
+      attachment,
+    })),
+  )
+  // Removed (or sent) before their upload finished: don't keep them when it does.
+  const dropped = useRef(new Set<string>())
   const update = (key: string, change: Partial<PendingFile>) =>
     setFiles((list) => list.map((f) => (f.key === key ? { ...f, ...change } : f)))
 
@@ -35,7 +56,10 @@ export function useAttachments(projectId: string) {
     }
     setFiles((list) => [...list, { ...item, key, status: 'uploading' }])
     upload().then(
-      (attachment) => update(key, { status: 'ready', attachment, name: attachment.name }),
+      (attachment) => {
+        update(key, { status: 'ready', attachment, name: attachment.name })
+        if (!dropped.current.has(key)) keep?.onAdded(attachment)
+      },
       (err: unknown) => update(key, { status: 'error', error: err instanceof Error ? err.message : 'Upload failed' }),
     )
   }
@@ -72,8 +96,17 @@ export function useAttachments(projectId: string) {
       if (picked.files.length) addFiles(picked.files)
       if (picked.folders.length) addFolders(picked.folders)
     },
-    remove: (key: string) => setFiles((list) => list.filter((f) => f.key !== key)),
-    clear: () => setFiles([]),
+    remove: (key: string) => {
+      dropped.current.add(key)
+      const removed = files.find((f) => f.key === key)?.attachment
+      if (removed) keep?.onRemoved(removed)
+      setFiles((list) => list.filter((f) => f.key !== key))
+    },
+    /** Forget everything (after sending); the caller clears what it kept itself. */
+    clear: () => {
+      for (const f of files) dropped.current.add(f.key)
+      setFiles([])
+    },
     ready: files.flatMap((f) => (f.status === 'ready' && f.attachment ? [f.attachment] : [])),
     uploading: files.some((f) => f.status === 'uploading'),
   }

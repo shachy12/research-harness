@@ -476,6 +476,8 @@ export class RunManager {
 
     try {
       ctx = await this.prepareEdit(run, baseCtx);
+      // Stopped while the files were being prepared: the provider would never see that abort.
+      if (run.abort.signal.aborted) throw new Error('Stopped before the model started.');
       for await (const event of this.llm.streamReply(ctx, run.abort.signal)) {
         if (event.type === 'session') {
           run.sessionId = event.sessionId;
