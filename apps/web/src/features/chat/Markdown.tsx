@@ -8,7 +8,12 @@ import { prepareMath } from '@/lib/math'
 import { rehypeSections } from '@/lib/sections'
 import { SelectableListItem, SelectableSection, SelectableTableRow } from './SelectableItem'
 
-const KATEX: [typeof rehypeKatex, { throwOnError: boolean; strict: boolean }] = [rehypeKatex, { throwOnError: false, strict: false }]
+// Shorthands models use without defining them (KaTeX itself has \R, \N, \Z); unknown ones show in red.
+const MACROS = { '\\F': '\\mathbb{F}', '\\Q': '\\mathbb{Q}', '\\C': '\\mathbb{C}', '\\E': '\\mathbb{E}' }
+const KATEX: [typeof rehypeKatex, { throwOnError: boolean; strict: boolean; macros: Record<string, string> }] = [
+  rehypeKatex,
+  { throwOnError: false, strict: false, macros: MACROS },
+]
 
 const link: Components['a'] = (props) => <a {...props} target="_blank" rel="noreferrer" />
 

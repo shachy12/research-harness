@@ -13,9 +13,21 @@ export function prepareMath(text: string): string {
   return parts.map((part, i) => (i % 2 === 1 ? part : prepareProse(part))).join('')
 }
 
+/**
+ * The indentation a new line needs to stay in the block that `line` is part of, e.g. 3 spaces under
+ * "3. text". Without it, a `$$` line put inside a list item would end the list item.
+ */
+function contentIndent(line: string): string {
+  const [, space = '', marker = ''] = /^([ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?/.exec(line) ?? []
+  return space + ' '.repeat(marker.length)
+}
+
 function prepareProse(text: string): string {
   const converted = text
-    .replace(/\\\[([\s\S]+?)\\\]/g, (_, body: string) => `\n$$\n${body.trim()}\n$$\n`)
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, body: string, offset: number, all: string) => {
+      const indent = contentIndent(all.slice(all.lastIndexOf('\n', offset - 1) + 1, offset))
+      return `\n${indent}$$\n${indent}${body.trim()}\n${indent}$$\n`
+    })
     .replace(/\\\((.+?)\\\)/g, (_, body: string) => `$${body.trim()}$`)
 
   let out = ''
@@ -43,8 +55,10 @@ function prepareProse(text: string): string {
         !converted.slice(lineStart, i).trim() &&
         !converted.slice(stop, lineEnd === -1 ? undefined : lineEnd).trim()
       // On a line of its own, `$$…$$` is a displayed equation; remark-math needs the $$ on their
-      // own lines for that (otherwise it renders inline).
-      out += ownLine ? `$$\n${converted.slice(i + 2, end).trim()}\n$$` : converted.slice(i, stop)
+      // own lines for that (otherwise it renders inline). The new lines keep the line's indentation,
+      // so an equation inside a list item stays in it.
+      const indent = converted.slice(lineStart, i)
+      out += ownLine ? `$$\n${indent}${converted.slice(i + 2, end).trim()}\n${indent}$$` : converted.slice(i, stop)
       i = stop
       continue
     }
