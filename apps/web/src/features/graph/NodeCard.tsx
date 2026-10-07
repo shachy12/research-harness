@@ -3,6 +3,7 @@ import { Handle, type Node, type NodeProps, Position } from '@xyflow/react'
 import { FilePenIcon, PencilIcon, Trash2Icon } from 'lucide-react'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
 import { formatElapsed } from '@harness/shared'
+import { useDrafts } from '@/features/chat/drafts'
 import { activityOf } from '@/lib/activity'
 import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
@@ -29,6 +30,7 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
   const now = useNow(n.running || merging)
   const startedAt = n.run?.startedAt ?? n.merge?.startedAt
   const elapsed = startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
+  const draft = useDrafts()[n.id]
 
   return (
     <div
@@ -49,6 +51,14 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
         {n.unread > 0 && (
           <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] leading-none font-semibold text-primary-foreground">
             {n.unread} new
+          </span>
+        )}
+        {draft && (
+          <span
+            className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none font-semibold text-muted-foreground"
+            title={draft.text.trim() ? `Unsent: ${draft.text.trim().slice(0, 200)}` : 'Unsent attachments'}
+          >
+            ✎ Draft
           </span>
         )}
         {n.proposedBranches > 0 && (

@@ -88,16 +88,9 @@ App settings are environment variables for now (the `.env` files were removed 20
 - **Rough effort:** basic version (one shell per node, in the chat) ~1 day; packaging the native module for desktop (Windows/Linux) and npx and testing each ~0.5–1 day; surviving reloads with replay and several tabs +0.5 day.
 - **Cheap alternative (~1 hour):** an "Open terminal here" button that starts the OS's own terminal (Windows Terminal, Terminal.app, gnome-terminal…) in the node's worktree, per OS like the folder picker. No native module, no new security surface; the terminal just isn't inside the window.
 
-## 24. Keep unsent drafts per node
-- **Wanted:** text typed in a node's composer and not sent is still there when you leave the node (another node, the graph, another project) and come back.
-- **Today:** the draft is plain React state in `ChatPage.tsx` `Conversation` (`const [draft, setDraft] = useState('')`), so it is thrown away when the chat page unmounts.
-- **How:** keep drafts per node id outside the component, like the merge selection (`features/merge/selection.ts`, a small external store), and mirror them to localStorage (e.g. `harness.drafts`, `{ [nodeId]: text }`) so they also survive a reload or an app restart. Save as you type (lightly debounced), clear on send; drop the entry when the text is emptied, and when the node is deleted. Wrap localStorage in try/catch (it can throw).
-- **Also worth keeping:** files attached but not sent (`useAttachments`: they are already uploaded, so only their `Attachment` records need storing), and the fork dialog's half-written branches (decide whether closing the dialog should keep them).
-- **Graph hint (optional):** a small "Draft" mark on cards whose node has unsent text, so it isn't forgotten.
-- Small: ~1–2 hours for the text; attachments and the fork dialog a bit more.
-
 ## Done
 Implemented on 2026-10-02 (see CLAUDE.md for how they work), unless dated otherwise. Leftovers worth doing later:
+- **24. Unsent drafts per node** (2026-10-07; see "Unsent drafts" in CLAUDE.md): the composer text and its uploaded attachments, kept per node in localStorage, with a "✎ Draft" mark on graph cards. Left: the fork and merge dialogs still forget half-written messages when closed; drafts of deleted nodes stay in localStorage (kept on purpose, so Undo/restore gets them back; tiny).
 - **Done marker, background merges of any nodes, fork from the project's files, several roots** (2026-10-06, asked for directly; see "Done, merges and results" in CLAUDE.md). This replaced the Finish step, so items 3 (stream the result draft) and 19 (draft in the background) are moot, and 22 (a forest of roots) is done. Deleting nodes (item 21) is done too, as a soft delete with Undo and a "Deleted" list; children become roots (see CLAUDE.md). Not done: deleting a whole subtree at once; purging deleted nodes for good (they stay in the database forever). Left: no Stop button for a merge that is writing its results (`POST /nodes/:id/stop` already aborts it); the merge job is in memory, so an app restart leaves the merge "stopped" until Retry; result drafts are not streamed; merging a node with its own descendant includes that node's result, which repeats what the base context already has up to the fork point.
 - **1. LaTeX support:** done (KaTeX rendering, delimiter safety net, prompt section). Left: syntax highlighting for code blocks, Mermaid diagrams; check whether resumed Claude Code sessions pick up the new system prompt.
 - **2. Files per branch when forking:** done.

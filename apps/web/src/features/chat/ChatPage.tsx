@@ -24,6 +24,7 @@ import { AttachMenu } from './AttachMenu'
 import { PendingAttachments } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
 import { useAttachments } from './useAttachments'
+import { keepDraftFiles, useDraft } from './drafts'
 import { ListSelectionContext, useListSelection, useListSelectionState } from './listSelection'
 import { SelectionBar } from './SelectionBar'
 import { useChatScroll } from './useChatScroll'
@@ -137,10 +138,12 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const selection = useListSelection()
   const picked = selection ? resolveSelection(selection.items, messages.map((m) => m.id)) : []
   const stream = useChatStream(node.id)
-  const files = useAttachments(node.projectId)
+  // What you wrote and attached but haven't sent is kept per node, also when you leave it.
+  const draft = useDraft(node.id)
+  const [keepFiles] = useState(() => keepDraftFiles(node.id))
+  const files = useAttachments(node.projectId, keepFiles)
   const retry = useRetry()
   const setDone = useSetDone()
-  const [draft, setDraft] = useState('')
   // A merge node takes messages once its results are written and its first message was sent.
   const canWrite = merge === null
   // Drop files and folders anywhere on the chat to attach them to the next message.
@@ -189,9 +192,9 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   }, [detail.running])
 
   const submit = () => {
-    const text = draft.trim()
+    const text = draft.text.trim()
     if (!text || stream.active || files.uploading) return
-    setDraft('')
+    draft.clear()
     send(text, files.ready)
     files.clear()
   }
@@ -332,8 +335,8 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
                 aria-label="Message"
                 rows={2}
                 placeholder="Message this node… (Enter to send, Shift+Enter for a new line)"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                value={draft.text}
+                onChange={(e) => draft.setText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault()
@@ -347,7 +350,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
               ) : (
                 <Button
                   type="submit"
-                  disabled={!draft.trim() || files.uploading}
+                  disabled={!draft.text.trim() || files.uploading}
                   title={files.uploading ? 'Waiting for uploads to finish' : undefined}
                 >
                   Send
