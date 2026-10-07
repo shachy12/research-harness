@@ -31,6 +31,11 @@ describe('prepareMath', () => {
     expect(prepareMath('inline $$x$$ here')).toBe('inline $$x$$ here')
   })
 
+  it('keeps a displayed equation inside its list item', () => {
+    expect(prepareMath('3. where\n   $$p:=1$$\n   and')).toBe('3. where\n   $$\n   p:=1\n   $$\n   and')
+    expect(prepareMath('- see \\[x\\] ok')).toBe('- see \n  $$\n  x\n  $$\n ok')
+  })
+
   it('leaves code alone', () => {
     const text = 'code `$x$` and ```latex\n\\(a\\) $5 $6\n```'
     expect(prepareMath(text)).toBe(text)
