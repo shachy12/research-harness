@@ -8,13 +8,15 @@ Ask a question, fork it into branches that each explore one direction, work them
 
 ![Harness demo: fork a question into branches, merge the results, continue](docs/demo.gif)
 
-## Why this exists (and a warning)
+## Why this exists
 
-This harness has exactly one target user: me. Feature requests will be read, considered, and quite possibly ignored. If it fits how you work, great. If not, there are plenty of chat apps that will happily scroll forever.
+Models can now write pages of confident text in seconds. Reading, checking and actually understanding those pages still takes a human, and one endless chat thread makes that harder with every reply.
 
-The idea behind it: a model can produce pages of confident text in seconds, and a single endless thread is where understanding goes to die. This app breaks the work into pieces small enough for a human to read, follow and question. The model does the heavy lifting; you stay the one who knows what's going on.
+Research Harness is my attempt to keep up. It breaks the work into small branches you can read, follow and question, keeps every result next to where it came from, and lets you choose what flows back. The model does the heavy lifting; you stay the one who knows what's going on.
 
 A tool for thinking *with* an LLM, not for handing your thinking *to* one.
+
+**A friendly note:** I built this around my own research workflow, so it's shaped by how I work. If it fits yours too, wonderful, and I'd love to hear about it. Ideas and feature requests are welcome, though I can't promise to get to all of them.
 
 ## Quick start
 
