@@ -135,7 +135,7 @@ This starts the server on http://localhost:8787 and the web UI on http://localho
 | `npm run desktop:dist` | Build an installer for this OS in `apps/desktop/release/` |
 | `npm test` | Server and web tests (Vitest) |
 | `npm run typecheck` | TypeScript checks |
-| `npm run lint` | ESLint |
+| `npm run lint` | Lint (oxlint) |
 
 Set `HARNESS_PROVIDER=placeholder` to click through the app without calling a model.
 
