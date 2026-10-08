@@ -42,8 +42,12 @@ export interface ClaudeCodeOptions {
 const TOOLS = 'WebSearch,WebFetch,Read,Glob,Grep';
 const PRE_APPROVED = 'WebSearch,WebFetch';
 // With an editable copy (always, see worktrees.ts), Edit and Write are added and allowed only inside it
-// (`Edit(<path>/**)`, relative to the working folder; the rule covers Write too, verified with CLI
-// 2.1.287). Edits anywhere else are refused like reads outside the folder.
+// (`Edit(<path>/**)`; the rule covers Write too, verified with CLI 2.1.287). Edits anywhere else are
+// refused like reads outside the folder. The rules are given twice, relative to the project folder and
+// as absolute paths (`//c/Users/…`): after the model `cd`s into its copy (a git worktree), the CLI
+// sometimes moves its own working folder there (seen 2026-10-08, CLI 2.1.287), and relative rules then
+// point inside the copy, so writes were refused. A `Read` rule for the project folder keeps the
+// uploads and the project's files readable in that case (by default only the working folder is).
 // Bash comes with them and is allowed for every command (the user's call, 2026-10-03): unlike Edit,
 // a shell command can't be limited to the copy, so editNote asks the model to run commands there.
 // On Windows the CLI runs it in Git Bash.
@@ -316,7 +320,18 @@ export function toolArgs(workDir: string, edit: ReplyContext['edit'], mcpUrl: st
   if (!edit) return ['--tools', TOOLS, '--allowedTools', PRE_APPROVED + harness, ...mcpArgs(mcpUrl)];
   const rel = path.relative(workDir, edit.dir).split(path.sep).join('/');
   if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`The editable copy must be inside the project folder: ${edit.dir}`);
-  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},Edit(${rel}/**),Bash${harness}`, ...mcpArgs(mcpUrl)];
+  const edits = `Edit(${rel}/**),Edit(${absoluteRule(edit.dir)}/**),Read(${absoluteRule(workDir)}/**)`;
+  return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', `${PRE_APPROVED},${edits},Bash${harness}`, ...mcpArgs(mcpUrl)];
+}
+
+/**
+ * A folder as an absolute path in Claude Code's permission rules: `//` and the path in POSIX form
+ * (`C:\Users\x` → `//c/Users/x`, `/home/x` → `//home/x`). The `//C:/…` form doesn't match on Windows
+ * (verified with CLI 2.1.287).
+ */
+export function absoluteRule(dir: string): string {
+  const posix = path.resolve(dir).split(path.sep).join('/').replace(/^([A-Za-z]):/, (_, d: string) => `/${d.toLowerCase()}`);
+  return `/${posix}`;
 }
 
 /**

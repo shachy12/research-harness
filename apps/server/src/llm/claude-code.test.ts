@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionPlan } from '../dag/session.ts';
-import { ClaudeCodeProvider, cliEnv, findClaudeExecutable, mapEvent, newTurnState, parseSearchLinks, toolArgs } from './claude-code.ts';
+import { ClaudeCodeProvider, absoluteRule, cliEnv, findClaudeExecutable, mapEvent, newTurnState, parseSearchLinks, toolArgs } from './claude-code.ts';
 import type { ReplyContext, ReplyEvent } from './provider.ts';
 
 const FAKE_CLI = path.join(import.meta.dirname, 'fake-claude.mjs');
@@ -74,8 +74,18 @@ describe('ClaudeCodeProvider', () => {
     const starts = log().filter((e) => e.argv).map((e) => e.argv!);
     expect(starts).toHaveLength(1);
     expect(starts[0]).toEqual(expect.arrayContaining(['--tools', 'WebSearch,WebFetch,Read,Glob,Grep,Edit,Write,Bash']));
-    expect(starts[0]).toEqual(expect.arrayContaining(['--allowedTools', 'WebSearch,WebFetch,Edit(.harness/work/abcd1234/**),Bash']));
+    // Relative and absolute rules: the CLI may move its working folder into the copy after a `cd`.
+    const allowed = `WebSearch,WebFetch,Edit(.harness/work/abcd1234/**),Edit(${absoluteRule(edit.dir)}/**),Read(${absoluteRule(dir)}/**),Bash`;
+    expect(starts[0]).toEqual(expect.arrayContaining(['--allowedTools', allowed]));
     expect(() => toolArgs(dir, { dir: path.dirname(dir) })).toThrow(/inside the project folder/);
+  });
+
+  it('writes absolute permission rules in the form the CLI matches', () => {
+    if (process.platform === 'win32') {
+      expect(absoluteRule('C:\\Users\\Me\\GPU OS\\.harness\\work\\ab')).toBe('//c/Users/Me/GPU OS/.harness/work/ab');
+    } else {
+      expect(absoluteRule('/home/me/GPU OS/.harness/work/ab')).toBe('//home/me/GPU OS/.harness/work/ab');
+    }
   });
 
   it('reports shell commands with the end of their output', async () => {

@@ -151,14 +151,14 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
 
   // The streamed copies are shown until the refetched saved messages replace them, so nothing appears twice.
   const [sentFiles, setSentFiles] = useState<Attachment[]>([])
-  const { scrollRef, endRef, onScroll, followNext } = useChatScroll({
+  const { scrollRef, endRef, onScroll, pinNext } = useChatScroll({
     nodeId: node.id,
     messages,
     readUpto: node.readUpto,
     contentKey: [messages.length, stream.replyText, stream.userText, stream.toolCalls.length],
   })
   const send = (text: string, attachments: Attachment[] = []) => {
-    followNext() // your own message always jumps to the bottom
+    pinNext() // your message goes to the top; the reply then grows below it without moving the view
     setSentFiles(attachments)
     void stream.send(text, attachments, messages.length)
   }

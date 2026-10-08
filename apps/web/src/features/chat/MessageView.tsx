@@ -17,7 +17,7 @@ export function MessageView({ id, role, text, toolCalls = [], attachments = [], 
   streaming?: boolean
 }) {
   return (
-    <div className="flex min-w-0 scroll-mt-4 flex-col gap-1.5" data-message-id={id}>
+    <div className="flex min-w-0 scroll-mt-4 flex-col gap-1.5" data-message-id={id} data-role={role}>
       <div className="text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
         {role === 'user' ? 'You' : 'Assistant'}
       </div>

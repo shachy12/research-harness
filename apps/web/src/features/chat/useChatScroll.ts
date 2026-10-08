@@ -2,11 +2,6 @@ import { type Message, firstUnreadIndex } from '@harness/shared'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { useMarkRead } from '@/api/queries'
 
-/** How close to the end counts as "at the bottom" (px). */
-const BOTTOM_SLACK = 80
-
-const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLACK
-
 /**
  * Scrolling and "what have I read" for one node's chat. Use it in a component that exists once per
  * node (the chat is keyed by node id), because the opening position is decided only once.
@@ -15,11 +10,13 @@ const atBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.client
  *    first unread reply; one that is all read starts at the end.
  *  - Reading: a reply counts as read once its end has been on screen. The server only moves the
  *    read position forward.
- *  - Following: while a reply streams, the view follows it only if you were already at the bottom.
- *    Call `followNext()` after sending a message to jump to the bottom.
+ *  - No following: a streaming reply never moves the view, so you can read it as it is written.
+ *    Call `pinNext()` before sending a message: the view then brings your message to the top once
+ *    (blank space under the reply makes room until it fills a screen) and the reply flows in below
+ *    it. Scrolling yourself ends the pin.
  *
- * Attach `scrollRef` to the scrolling element and `endRef` to a marker at the end of the content.
- * `contentKey` is anything that changes when content grows (so the view follows it).
+ * Attach `scrollRef` to the scrolling element and `endRef` to an empty element at the end of the
+ * content (it becomes that spacer). `contentKey` is anything that changes when content grows.
  */
 export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
   nodeId: string
@@ -29,7 +26,11 @@ export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
-  const following = useRef(true)
+  // After sending: keep bringing your newest message up to the top. `setTop` is where we last
+  // scrolled to, so a scroll event elsewhere is the user's own and ends the pin.
+  const pinned = useRef(false)
+  const setTop = useRef<number | null>(null)
+  const sent = useRef(false) // a message was sent from this view (the spacer is only for that)
   const markRead = useMarkRead()
 
   // Opening position (once). Runs before paint, so the page never shows the wrong spot first.
@@ -46,16 +47,31 @@ export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
     } else {
       endRef.current?.scrollIntoView({ block: 'end' })
     }
-    following.current = atBottom(el)
   }, [])
 
   const onScroll = () => {
-    if (scrollRef.current) following.current = atBottom(scrollRef.current)
+    const el = scrollRef.current
+    if (el && pinned.current && setTop.current !== null && Math.abs(el.scrollTop - setTop.current) > 1) {
+      pinned.current = false
+    }
   }
 
-  // New content (a message, streamed text, a tool call): follow it only if the user is at the bottom.
+  // New content (your message, streamed text, a tool call): only a pinned message moves the view.
+  // Until the reply fills a screen, `endRef` grows into a blank spacer under it, so your message can
+  // go to the top at once and the view doesn't creep up as the reply comes in. The spacer shrinks as
+  // the reply grows (the content above the view never changes, so nothing you read moves).
   useLayoutEffect(() => {
-    if (following.current) endRef.current?.scrollIntoView({ block: 'end' })
+    const el = scrollRef.current
+    const end = endRef.current
+    if (!el || !end || !sent.current) return
+    const mine = el.querySelectorAll('[data-role="user"]')
+    const last = mine[mine.length - 1]
+    if (!last) return
+    const below = end.getBoundingClientRect().top - last.getBoundingClientRect().top
+    end.style.height = `${Math.max(0, el.clientHeight - below)}px`
+    if (!pinned.current) return
+    last.scrollIntoView({ block: 'start' })
+    setTop.current = el.scrollTop
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-run exactly when the content changes
   }, contentKey)
 
@@ -100,8 +116,10 @@ export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
     scrollRef,
     endRef,
     onScroll,
-    followNext: () => {
-      following.current = true
+    pinNext: () => {
+      sent.current = true
+      pinned.current = true
+      setTop.current = null
     },
   }
 }
