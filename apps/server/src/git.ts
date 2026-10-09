@@ -60,6 +60,23 @@ export async function git(cwd: string, args: string[], input?: string): Promise<
   return out.stdout;
 }
 
+/** Run git and return its raw output (file contents, which may be binary); throws if it fails. */
+export function gitBytes(cwd: string, args: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      'git',
+      [...BASE_ARGS, ...args],
+      { cwd, env: gitEnv(), encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(`git ${args[0]} failed: ${stderr.toString().trim() || err.message}`));
+        else resolve(stdout);
+      },
+    );
+    child.stdin?.on('error', () => {});
+    child.stdin?.end();
+  });
+}
+
 /** Run tasks one at a time per key (one repository): git locks its index and refs. */
 export class KeyedQueue {
   private readonly tails = new Map<string, Promise<unknown>>();

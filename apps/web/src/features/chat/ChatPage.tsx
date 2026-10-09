@@ -1,8 +1,8 @@
 import { type Attachment, type DagNode, type ForkProposal, type NodeDetail, type NodeSummary, formatElapsed, toolActivity } from '@harness/shared'
-import { PencilIcon, Trash2Icon } from 'lucide-react'
-import { Fragment, useEffect, useEffectEvent, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
-import { useGraph, useNodeDetail, useRetry, useSetDone } from '@/api/queries'
+import { CodeXmlIcon, PencilIcon, Trash2Icon } from 'lucide-react'
+import { Fragment, Suspense, lazy, useEffect, useEffectEvent, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { useGraph, useNodeDetail, useOpenInEditor, useRetry, useSetDone } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
 import { UsageBanner } from '@/components/UsageBanner'
 import { activityOf } from '@/lib/activity'
@@ -19,6 +19,7 @@ import { itemTitle, resolveSelection } from '@/lib/listItems'
 import { contextTokens, estimateTokens } from '@/lib/tokens'
 import { useDropZone } from '@/lib/useDropZone'
 import { useNow } from '@/lib/useNow'
+import { cn } from '@/lib/utils'
 import { AskApprovalBox } from './AskApprovalBox'
 import { AttachMenu } from './AttachMenu'
 import { PendingAttachments } from './AttachmentChip'
@@ -30,6 +31,9 @@ import { SelectionBar } from './SelectionBar'
 import { useChatScroll } from './useChatScroll'
 import { MessageView } from './MessageView'
 import { type StreamError, useChatStream } from './useChatStream'
+
+// The Files view (and the code viewer it brings) loads the first time it is opened.
+const FilesView = lazy(() => import('@/features/files/FilesView').then((m) => ({ default: m.FilesView })))
 
 /** One component instance per node, so streaming state never leaks between nodes. */
 export function ChatPage() {
@@ -51,18 +55,40 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   const [dialog, setDialog] = useState<DialogKind>(null)
   const selection = useListSelectionState()
   const hasSelection = selection.items.length > 0
+  const openInEditor = useOpenInEditor()
 
-  // Esc clears ticked list items first, then returns to the graph (dialogs handle their own Esc first).
+  // Chat or Files, and the file shown, live in the URL (?view=files&file=…): a reload or the back
+  // button keeps them. The chat stays mounted under the Files view, so its scroll position is kept.
+  const [params, setParams] = useSearchParams()
+  const showFiles = params.get('view') === 'files'
+  const file = params.get('file')
+  const setView = (files: boolean) =>
+    setParams((p) => {
+      const next = new URLSearchParams(p)
+      if (files) next.set('view', 'files')
+      else next.delete('view')
+      return next
+    })
+  const selectFile = (path: string) =>
+    setParams((p) => {
+      const next = new URLSearchParams(p)
+      next.set('file', path)
+      return next
+    }, { replace: true })
+
+  // Esc clears ticked list items first, then leaves the Files view, then returns to the graph
+  // (dialogs, and the viewer's search box, handle their own Esc first).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || dialog || e.defaultPrevented) return
-      if (hasSelection) selection.clear()
+      if (showFiles) setView(false)
+      else if (hasSelection) selection.clear()
       else navigate(graphUrl)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `selection` is rebuilt every render; only its clearing matters
-  }, [navigate, graphUrl, dialog, hasSelection])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `selection` and `setView` are rebuilt every render
+  }, [navigate, graphUrl, dialog, hasSelection, showFiles])
 
   if (detail.isError) {
     return (
@@ -91,11 +117,50 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
           ← Graph
         </Button>
         <Breadcrumb node={node} nodes={graph.data?.nodes ?? []} projectId={projectId} />
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <div className="flex overflow-hidden rounded-lg border text-sm" role="group" aria-label="View">
+            {([false, true] as const).map((files) => (
+              <button
+                key={String(files)}
+                type="button"
+                aria-pressed={showFiles === files}
+                className={cn('px-3 py-1', showFiles === files ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60')}
+                onClick={() => setView(files)}
+              >
+                {files ? 'Files' : 'Chat'}
+                {files && node.filesChanged ? <span className="font-normal text-muted-foreground"> · {node.filesChanged} changed</span> : null}
+              </button>
+            ))}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            title="Open this node's copy of the project in VS Code"
+            disabled={openInEditor.isPending}
+            onClick={() => openInEditor.mutate({ nodeId: node.id })}
+          >
+            <CodeXmlIcon /> Open in VS Code
+          </Button>
+        </div>
       </div>
 
-      <ListSelectionContext value={selection}>
-        <Conversation key={node.id} detail={detail.data} onDialog={setDialog} />
-      </ListSelectionContext>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <ListSelectionContext value={selection}>
+          <Conversation key={node.id} detail={detail.data} onDialog={setDialog} hidden={showFiles} />
+        </ListSelectionContext>
+        {showFiles && (
+          <div className="absolute inset-0 flex flex-col bg-background">
+            <Suspense fallback={<p className="p-6 text-sm text-muted-foreground">Loading…</p>}>
+              <FilesView
+                node={node}
+                version={`${node.filesChanged}-${detail.data.messages.length}`}
+                selected={file}
+                onSelect={selectFile}
+              />
+            </Suspense>
+          </div>
+        )}
+      </div>
 
       {dialog !== null && dialog !== 'rename' && dialog !== 'delete' && (
         <ForkDialog
@@ -128,7 +193,8 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   )
 }
 
-function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: DialogKind) => void }) {
+/** `hidden`: the Files view covers it (kept mounted, so its scroll position and stream stay). */
+function Conversation({ detail, onDialog, hidden }: { detail: NodeDetail; onDialog: (d: DialogKind) => void; hidden: boolean }) {
   const { node, messages, inherited, forks, merge } = detail
   /** The branches forked off after the first `count` messages (shown at that point in the chat). */
   const forkMarker = (count: number) => {
@@ -156,6 +222,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
     messages,
     readUpto: node.readUpto,
     contentKey: [messages.length, stream.replyText, stream.userText, stream.toolCalls.length],
+    hidden,
   })
   const send = (text: string, attachments: Attachment[] = []) => {
     pinNext() // your message goes to the top; the reply then grows below it without moving the view
@@ -205,7 +272,7 @@ function Conversation({ detail, onDialog }: { detail: NodeDetail; onDialog: (d: 
   const limitReached = detail.usage?.status === 'reached'
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col" {...drop.props}>
+    <div className={cn('relative flex min-h-0 flex-1 flex-col', hidden && 'invisible')} {...drop.props}>
       {drop.dragging && (
         <div className="pointer-events-none absolute inset-2 z-10 grid place-items-center rounded-xl border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-primary">
           Drop files or folders to attach them to your next message

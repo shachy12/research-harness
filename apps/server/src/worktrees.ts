@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { type DagNode, type FileChange, type FolderGit, MANAGED_DIR, type MergePreview, type NodeChanges, type Project } from '@harness/shared';
+import { type DagNode, type FileChange, type FolderGit, MANAGED_DIR, type MergePreview, type NodeChanges, type NodeFiles, type Project } from '@harness/shared';
 import type { GraphReader } from './dag/graph.ts';
-import { HARNESS_COMMIT_ARGS, KeyedQueue, git, runGit } from './git.ts';
+import { HARNESS_COMMIT_ARGS, KeyedQueue, git, gitBytes, runGit } from './git.ts';
 import type { Workspaces } from './workspace.ts';
 
 /** Prefix of Harness's branches: the managed folder's name without its dot (git refuses `.harness/…`). */
@@ -10,6 +10,10 @@ export const BRANCH_PREFIX = MANAGED_DIR.replace(/^\.+/, '') || 'harness';
 
 /** The largest diff sent to the page; bigger ones are cut (the file list stays complete). */
 const MAX_DIFF_CHARS = 400_000;
+
+/** The most files the Files view lists. */
+const MAX_LISTED_FILES = 10_000;
+
 
 /** Where a project's files live in git. */
 interface RepoInfo {
@@ -131,6 +135,10 @@ export class Worktrees {
         return result(true, [], [], head || commit.slice(0, 10));
       }
 
+      // The merged nodes' copies may hold changes the user made there (in VS Code) since their last reply.
+      if (node.parentIds.length > 1) {
+        for (const id of node.parentIds) await this.commitCopy(this.worktreeOf(project, id), 'Saved before a merge');
+      }
       // Named like the merged results in the prompt (by the title they were created with).
       const starts = node.parentIds.map((id) => ({ title: graph.node(id).promptTitle, ref: this.startOf(graph, id) }));
       const first = starts.find((s) => s.ref)?.ref ?? (await this.userCommit(repo.top));
@@ -184,6 +192,80 @@ export class Worktrees {
     });
   }
 
+  /**
+   * The files of the node's copy, for the Files view. Before its first reply a node has no copy:
+   * then its branch (a forked node has one already), or the files it will start from.
+   */
+  files(project: Project, graph: GraphReader, node: DagNode): Promise<NodeFiles> {
+    const folder = this.workspaces.prepare(project); // a new project's folder may not exist yet
+    return this.queue.run(folder, async () => {
+      const source = await this.sourceOf(project, graph, node);
+      if (!source) return { source: 'start', folder: null, files: [], inRepo: '', truncated: false };
+      let files: string[];
+      if (source.dir !== null) {
+        const listed = await git(source.dir, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+        // Tracked files deleted in the copy are still in git's index: list only what is there.
+        files = [...new Set(listed.split('\0').filter(Boolean))].filter((f) => existsSync(path.join(source.dir!, f)));
+      } else {
+        files = (await git(folder, ['ls-tree', '-r', '-z', '--name-only', source.ref])).split('\0').filter(Boolean);
+      }
+      files.sort(comparePaths);
+      return {
+        source: source.kind,
+        folder: source.dir === null ? null : path.resolve(source.dir),
+        files: files.slice(0, MAX_LISTED_FILES),
+        inRepo: source.repo.rel.split(path.sep).join('/'),
+        truncated: files.length > MAX_LISTED_FILES,
+      };
+    });
+  }
+
+  /**
+   * One file of the node's copy (as the Files view lists it): its size, and its bytes if it is no
+   * larger than `maxBytes`. Null if there is no such file.
+   */
+  readFile(project: Project, graph: GraphReader, node: DagNode, file: string, maxBytes: number): Promise<{ size: number; bytes: Buffer | null } | null> {
+    const folder = this.workspaces.prepare(project);
+    const rel = safeRelativePath(file);
+    if (!rel) return Promise.resolve(null);
+    return this.queue.run(folder, async () => {
+      const source = await this.sourceOf(project, graph, node);
+      if (!source) return null;
+      if (source.dir !== null) {
+        const full = path.join(source.dir, rel);
+        if (!existsSync(full)) return null;
+        // A link must not lead outside the copy.
+        const real = realpathSync(full);
+        const inside = path.relative(realpathSync(source.dir), real);
+        if (inside.startsWith('..') || path.isAbsolute(inside)) return null;
+        const stat = statSync(real);
+        if (!stat.isFile()) return null;
+        return { size: stat.size, bytes: stat.size <= maxBytes ? readFileSync(real) : null };
+      }
+      const object = `${source.ref}:./${rel}`;
+      const type = await runGit(folder, ['cat-file', '-t', object]);
+      if (type.code !== 0 || type.stdout.trim() !== 'blob') return null;
+      const size = Number((await git(folder, ['cat-file', '-s', object])).trim());
+      return { size, bytes: size <= maxBytes ? await gitBytes(folder, ['cat-file', 'blob', object]) : null };
+    });
+  }
+
+  /** Where the node's files are read from: its copy's project folder, or else a commit (see `files`). */
+  private async sourceOf(project: Project, graph: GraphReader, node: DagNode): Promise<
+    | { kind: 'copy'; repo: RepoInfo; dir: string; ref: null }
+    | { kind: 'branch' | 'start'; repo: RepoInfo; dir: null; ref: string }
+    | null
+  > {
+    const repo = await this.findRepo(this.workspaces.folderOf(project));
+    if (!repo) return null;
+    const worktree = this.worktreeOf(project, node.id);
+    if (existsSync(path.join(worktree, '.git'))) return { kind: 'copy', repo, dir: path.join(worktree, repo.rel), ref: null };
+    const branch = Worktrees.branchOf(node.id);
+    if (await this.branchExists(repo.top, branch)) return { kind: 'branch', repo, dir: null, ref: `refs/heads/${branch}` };
+    const start = node.filesFromProject ? null : this.startOf(graph, node.id);
+    return { kind: 'start', repo, dir: null, ref: start ? `refs/heads/${start}` : await this.userCommit(repo.top) };
+  }
+
   private async commitCopy(worktree: string, message: string): Promise<boolean> {
     if (!existsSync(path.join(worktree, '.git'))) return false;
     await git(worktree, ['add', '-A']);
@@ -192,16 +274,24 @@ export class Worktrees {
     return true;
   }
 
-  /** Commit and remove a node's worktree (it was finished); its branch keeps the files. */
-  retire(project: Project, nodeId: string, message: string): Promise<void> {
-    const folder = this.workspaces.folderOf(project);
+  /**
+   * Node folders are never removed (their files stay viewable). Earlier versions removed them when
+   * a node was finished (before 2026-10-06) or deleted (before 2026-10-09): bring such a folder
+   * back from the node's branch. Returns whether the node has its folder now.
+   */
+  restore(project: Project, nodeId: string): Promise<boolean> {
+    const folder = this.workspaces.prepare(project);
     const worktree = this.worktreeOf(project, nodeId);
-    return this.commit(project, nodeId, message).then(() =>
-      this.queue.run(folder, async () => {
-        if (!existsSync(worktree)) return;
-        const repo = await this.findRepo(folder);
-        if (repo) await git(repo.top, ['worktree', 'remove', '--force', worktree]);
-      }));
+    return this.queue.run(folder, async () => {
+      if (existsSync(path.join(worktree, '.git'))) return true;
+      const repo = await this.findRepo(folder);
+      const branch = Worktrees.branchOf(nodeId);
+      if (!repo || !(await this.branchExists(repo.top, branch))) return false;
+      mkdirSync(path.dirname(worktree), { recursive: true });
+      await git(repo.top, ['worktree', 'prune']);
+      await git(repo.top, ['worktree', 'add', worktree, branch]);
+      return true;
+    });
   }
 
   /**
@@ -372,6 +462,31 @@ export class Worktrees {
     if (rel && (await runGit(top, ['check-ignore', '--quiet', '--', rel])).code === 0) return null;
     return { top, rel };
   }
+}
+
+/** Folders before files, then by name (case-insensitive), level by level: the order of a file tree. */
+export function comparePaths(a: string, b: string): number {
+  const pa = a.split('/');
+  const pb = b.split('/');
+  for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+    if (pa[i] === pb[i]) continue;
+    const aDir = i < pa.length - 1;
+    const bDir = i < pb.length - 1;
+    if (aDir !== bDir) return aDir ? -1 : 1;
+    return pa[i].localeCompare(pb[i], undefined, { sensitivity: 'base', numeric: true }) || (pa[i] < pb[i] ? -1 : 1);
+  }
+  return pa.length - pb.length;
+}
+
+/**
+ * A path the page asked for, made safe to join to a copy's folder: relative, '/'-separated, no
+ * `..`, nothing inside `.git`. Null if it isn't one.
+ */
+export function safeRelativePath(file: string): string | null {
+  if (file.includes('\0') || path.isAbsolute(file) || /^[a-zA-Z]:/.test(file)) return null;
+  const parts = file.replaceAll('\\', '/').split('/').filter((p) => p !== '' && p !== '.');
+  if (parts.length === 0 || parts.some((p) => p === '..' || p.toLowerCase() === '.git')) return null;
+  return parts.join('/');
 }
 
 /** Combine `git diff --numstat -z` and `--name-status -z` into one entry per file. */

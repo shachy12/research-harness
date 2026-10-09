@@ -3,6 +3,7 @@ import { CheckIcon, ChevronRightIcon, FilePenIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useApplyChanges, useNodeChanges } from '@/api/queries'
 import { Button } from '@/components/ui/button'
+import { splitDiff } from '@/lib/diff'
 import { cn } from '@/lib/utils'
 
 const STATUS_LETTER: Record<FileChange['status'], string> = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' }
@@ -114,13 +115,14 @@ export function ChangesPanel({ node, version, working }: {
   )
 }
 
-function DiffView({ text }: { text: string | undefined }) {
+/** One file's diff. `fill`: take the space it is given (the Files view) instead of a short box. */
+export function DiffView({ text, fill = false }: { text: string | undefined; fill?: boolean }) {
   if (!text) return <p className="border-t px-2.5 py-2 text-xs text-muted-foreground">No text diff to show.</p>
   // Skip git's header lines (diff --git, index, ---/+++); start at the first hunk.
   const lines = text.split('\n')
   const start = lines.findIndex((l) => l.startsWith('@@'))
   return (
-    <pre className="max-h-96 overflow-auto border-t py-1 font-mono text-[11px] leading-relaxed">
+    <pre className={cn('overflow-auto py-1 font-mono leading-relaxed', fill ? 'h-full text-xs' : 'max-h-96 border-t text-[11px]')}>
       {(start === -1 ? lines : lines.slice(start)).map((line, i) => (
         <div
           key={i}
@@ -136,14 +138,4 @@ function DiffView({ text }: { text: string | undefined }) {
       ))}
     </pre>
   )
-}
-
-/** Split a unified diff into one piece per file, keyed by its new path. */
-function splitDiff(diff: string): Map<string, string> {
-  const files = new Map<string, string>()
-  for (const chunk of diff.split(/^(?=diff --git )/m)) {
-    const header = /^diff --git a\/.+? b\/(.+)$/m.exec(chunk)
-    if (header) files.set(header[1], chunk)
-  }
-  return files
 }
