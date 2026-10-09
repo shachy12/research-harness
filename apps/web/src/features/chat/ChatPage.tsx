@@ -58,10 +58,13 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   const openInEditor = useOpenInEditor()
 
   // Chat or Files, and the file shown, live in the URL (?view=files&file=…): a reload or the back
-  // button keeps them. The chat stays mounted under the Files view, so its scroll position is kept.
+  // button keeps them. Once opened, both views stay mounted and the hidden one is only made
+  // invisible, so switching back finds each as it was (scroll positions, open folders, the file).
   const [params, setParams] = useSearchParams()
   const showFiles = params.get('view') === 'files'
   const file = params.get('file')
+  const [filesOpened, setFilesOpened] = useState(showFiles)
+  if (showFiles && !filesOpened) setFilesOpened(true)
   const setView = (files: boolean) =>
     setParams((p) => {
       const next = new URLSearchParams(p)
@@ -148,13 +151,13 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
         <ListSelectionContext value={selection}>
           <Conversation key={node.id} detail={detail.data} onDialog={setDialog} hidden={showFiles} />
         </ListSelectionContext>
-        {showFiles && (
-          <div className="absolute inset-0 flex flex-col bg-background">
+        {filesOpened && (
+          <div className={cn('absolute inset-0 flex flex-col bg-background', !showFiles && 'invisible')}>
             <Suspense fallback={<p className="p-6 text-sm text-muted-foreground">Loading…</p>}>
               <FilesView
                 node={node}
                 version={`${node.filesChanged}-${detail.data.messages.length}`}
-                selected={file}
+                linkedFile={file}
                 onSelect={selectFile}
               />
             </Suspense>
