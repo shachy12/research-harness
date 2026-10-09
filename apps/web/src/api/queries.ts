@@ -1,6 +1,7 @@
 import type {
   CreateProjectBody,
   DagNode,
+  FileContent,
   FolderGit,
   ForkBody,
   GraphResponse,
@@ -10,6 +11,7 @@ import type {
   ModelsResponse,
   NodeChanges,
   NodeDetail,
+  NodeFiles,
   Project,
   ProjectSummary,
 } from '@harness/shared'
@@ -24,6 +26,7 @@ export const keys = {
   node: (nodeId: string) => ['node', nodeId] as const,
   models: ['models'] as const,
   changes: (nodeId: string) => ['changes', nodeId] as const,
+  files: (nodeId: string) => ['files', nodeId] as const,
 }
 
 /**
@@ -136,6 +139,7 @@ export function useRefreshAll() {
     queryClient.invalidateQueries({ queryKey: ['graph'] }),
     queryClient.invalidateQueries({ queryKey: ['node'] }),
     queryClient.invalidateQueries({ queryKey: ['changes'] }),
+    queryClient.invalidateQueries({ queryKey: ['files'] }),
   ])
 }
 
@@ -171,6 +175,39 @@ export function useNodeChanges(nodeId: string, enabled: boolean, version: string
     queryFn: ({ signal }) => api.get<NodeChanges | null>(`/nodes/${nodeId}/changes`, signal),
     enabled,
     staleTime: 0,
+  })
+}
+
+/**
+ * The files of a node's copy (Files view). `version` changes after each reply. Loaded again when
+ * the window gets the focus back (`staleTime: 0`), e.g. after editing in VS Code.
+ */
+export function useNodeFiles(nodeId: string, version: string, enabled = true) {
+  return useQuery({
+    queryKey: [...keys.files(nodeId), version],
+    queryFn: ({ signal }) => api.get<NodeFiles>(`/nodes/${nodeId}/files`, signal),
+    enabled,
+    staleTime: 0,
+    placeholderData: (previous) => previous, // keep the tree while a new version loads
+  })
+}
+
+/** One file of a node's copy, for the viewer (null path: none chosen). */
+export function useFileContent(nodeId: string, path: string | null, version: string) {
+  return useQuery({
+    queryKey: [...keys.files(nodeId), 'content', path, version],
+    queryFn: ({ signal }) => api.get<FileContent>(`/nodes/${nodeId}/files/content?path=${encodeURIComponent(path!)}`, signal),
+    enabled: path !== null,
+    staleTime: 0,
+  })
+}
+
+/** Open the node's copy in VS Code (with one of its files). Failures show as a toast. */
+export function useOpenInEditor() {
+  return useMutation({
+    mutationFn: ({ nodeId, path }: { nodeId: string; path?: string }) =>
+      api.post<{ ok: true }>(`/nodes/${nodeId}/open-in-editor`, path ? { path } : {}),
+    onError: (err) => toast.error(err.message),
   })
 }
 

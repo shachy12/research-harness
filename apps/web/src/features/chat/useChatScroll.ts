@@ -17,12 +17,14 @@ import { useMarkRead } from '@/api/queries'
  *
  * Attach `scrollRef` to the scrolling element and `endRef` to an empty element at the end of the
  * content (it becomes that spacer). `contentKey` is anything that changes when content grows.
+ * `hidden`: the chat is kept but not shown (the Files view is open), so nothing counts as read.
  */
-export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
+export function useChatScroll({ nodeId, messages, readUpto, contentKey, hidden = false }: {
   nodeId: string
   messages: Message[]
   readUpto: string | null
   contentKey: readonly unknown[]
+  hidden?: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -79,13 +81,16 @@ export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
   const readIndex = useRef(readUpto === null ? -1 : messages.findIndex((m) => m.id === readUpto))
   const latest = useRef(messages)
   latest.current = messages
+  const hiddenNow = useRef(hidden)
+  hiddenNow.current = hidden
+  const flushRead = useRef(() => {})
   const messageKey = messages.map((m) => m.id).join()
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     const visible = new Set<string>()
     const flush = () => {
-      if (document.hidden) return // not looking at it
+      if (document.hidden || hiddenNow.current) return // not looking at it
       const ids = latest.current.map((m) => m.id)
       const newest = Math.max(-1, ...[...visible].map((id) => ids.indexOf(id)))
       if (newest <= readIndex.current) return
@@ -103,6 +108,7 @@ export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
       },
       { root: el },
     )
+    flushRead.current = flush
     el.querySelectorAll('[data-read-marker]').forEach((m) => observer.observe(m))
     document.addEventListener('visibilitychange', flush)
     return () => {
@@ -111,6 +117,11 @@ export function useChatScroll({ nodeId, messages, readUpto, contentKey }: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- markRead.mutate is stable enough; rebuild when the messages change
   }, [nodeId, messageKey])
+
+  // Shown again: what is on screen now counts as read.
+  useEffect(() => {
+    if (!hidden) flushRead.current()
+  }, [hidden])
 
   return {
     scrollRef,

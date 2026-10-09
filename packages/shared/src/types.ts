@@ -366,6 +366,39 @@ export interface NodeChanges {
   applied: boolean;
 }
 
+/**
+ * GET /api/nodes/:id/files: the files of the node's copy of the project, for the Files view
+ * (read-only; the user edits them in VS Code).
+ */
+export interface NodeFiles {
+  /**
+   * 'copy': the node's own copy (its worktree). Before its first reply a node has none yet:
+   * 'branch' is its git branch (made when it was forked), 'start' the files it will start from
+   * (the nearest ancestor's branch, or the project's checked-out commit).
+   */
+  source: 'copy' | 'branch' | 'start';
+  /** The folder VS Code opens: the project folder inside the node's copy (null: no copy yet). */
+  folder: string | null;
+  /** Paths relative to the project folder, with '/' separators, sorted. */
+  files: string[];
+  /**
+   * The project folder's path inside its git repository ('' when it is the repository's top).
+   * `NodeChanges` paths are relative to the repository, so they start with it.
+   */
+  inRepo: string;
+  /** The list stopped at its limit. */
+  truncated: boolean;
+}
+
+/** GET /api/nodes/:id/files/content?path=: one file of the node's copy. */
+export interface FileContent {
+  path: string;
+  size: number;
+  /** 'image': shown from `/files/raw`; 'binary' and 'too-large' have no text. */
+  kind: 'text' | 'image' | 'binary' | 'too-large';
+  text: string | null;
+}
+
 /** POST /api/projects/:id/merge/preview: what merging the selected branches does to their files. */
 export interface MergePreview {
   /** Branches with an editable copy and the files each changed (from where they split). */

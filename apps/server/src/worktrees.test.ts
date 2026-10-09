@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
 import { Workspaces } from './workspace.ts';
-import { BRANCH_PREFIX, Worktrees, parseNumstat } from './worktrees.ts';
+import { BRANCH_PREFIX, Worktrees, comparePaths, parseNumstat, safeRelativePath } from './worktrees.ts';
 
 const gitIn = (cwd: string, ...args: string[]) =>
   execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], { cwd, encoding: 'utf8' });
@@ -112,8 +112,8 @@ describe('Worktrees', () => {
     await work(root(), (dir) => writeFileSync(path.join(dir, 'a.txt'), 'from root\n'));
     const r = root();
     const [b1, b2] = [child(r, 'B1'), child(r, 'B2')];
-    await worktrees.retire(project, r.id, 'final');
-    expect(existsSync(worktrees.worktreeOf(project, r.id))).toBe(false); // removed; the branch stays
+    // The parent's folder is gone (an earlier version removed folders): its branch still holds the files.
+    gitIn(folder, 'worktree', 'remove', '--force', worktrees.worktreeOf(project, r.id));
 
     const c1 = await work(b1, (dir) => writeFileSync(path.join(dir, 'b1.txt'), 'one\n'));
     const c2 = await work(b2, () => {});
@@ -184,6 +184,88 @@ describe('Worktrees', () => {
 
   it('has no changes for a node without a branch', async () => {
     expect(await worktrees.changes(project, root().id)).toBeNull();
+  });
+
+  it('lists and reads the files of a node’s copy, uncommitted and new ones included', async () => {
+    await work(root(), (dir) => {
+      mkdirSync(path.join(dir, 'sections'));
+      writeFileSync(path.join(dir, 'sections', 'intro.tex'), 'intro\n');
+    });
+    const dir = path.join(worktrees.worktreeOf(project, root().id));
+    writeFileSync(path.join(dir, 'Notes.md'), 'not committed\n');
+    writeFileSync(path.join(dir, '.gitignore'), 'build/\n');
+    mkdirSync(path.join(dir, 'build'));
+    writeFileSync(path.join(dir, 'build', 'out.pdf'), 'ignored');
+
+    const files = await worktrees.files(project, repo.snapshot('p'), root());
+    expect(files).toMatchObject({ source: 'copy', folder: path.resolve(dir), truncated: false });
+    expect(files.files).toEqual(['sections/intro.tex', '.gitignore', 'main.tex', 'Notes.md']);
+
+    const read = (file: string, max = 1000) => worktrees.readFile(project, repo.snapshot('p'), root(), file, max);
+    expect((await read('Notes.md'))?.bytes?.toString()).toBe('not committed\n');
+    expect(await read('sections/intro.tex', 2)).toEqual({ size: 6, bytes: null });
+    expect(await read('../main.tex')).toBeNull();
+    expect(await read('.git/config')).toBeNull();
+    expect(await read(path.join(folder, 'main.tex'))).toBeNull();
+    expect(await read('missing.txt')).toBeNull();
+  });
+
+  it('before its first reply, shows a branch’s files from git: its branch, or where it starts', async () => {
+    await work(root(), (dir) => writeFileSync(path.join(dir, 'a.txt'), 'from root\n'));
+    const r = root();
+    const forked = child(r, 'Forked');
+    await worktrees.fork(project, r.id, [forked.id], 'forked');
+    const later = child(r, 'Later');
+
+    const forkedFiles = await worktrees.files(project, repo.snapshot('p'), forked);
+    expect(forkedFiles).toMatchObject({ source: 'branch', folder: null, files: ['a.txt', 'main.tex'] });
+    expect(await worktrees.files(project, repo.snapshot('p'), later)).toMatchObject({ source: 'start', files: ['a.txt', 'main.tex'] });
+    const read = await worktrees.readFile(project, repo.snapshot('p'), forked, 'a.txt', 1000);
+    expect(read?.bytes?.toString()).toBe('from root\n');
+    expect(await worktrees.readFile(project, repo.snapshot('p'), forked, 'nope.txt', 1000)).toBeNull();
+    // A branch that starts from the project's files: the project's checked-out commit.
+    const own = repo.createNode({ projectId: 'p', title: 'Own', parentIds: [r.id], filesFromProject: true });
+    expect((await worktrees.files(project, repo.snapshot('p'), own)).files).toEqual(['main.tex']);
+  });
+
+  it('brings back a folder an earlier version removed, from the node’s branch', async () => {
+    await work(root(), (dir) => writeFileSync(path.join(dir, 'kept.txt'), 'kept\n'));
+    const dir = worktrees.worktreeOf(project, root().id);
+    gitIn(folder, 'worktree', 'remove', '--force', dir);
+    expect(existsSync(dir)).toBe(false);
+
+    expect(await worktrees.restore(project, root().id)).toBe(true);
+    expect(readFileSync(path.join(dir, 'kept.txt'), 'utf8')).toBe('kept\n');
+    expect(await worktrees.restore(project, root().id)).toBe(true); // already there: nothing to do
+    expect(await worktrees.restore(project, child(root(), 'Never ran').id)).toBe(false); // no branch, no folder
+  });
+
+  it('keeps edits made in a merged node’s copy when merging', async () => {
+    const r = root();
+    const [a, b] = [child(r, 'A'), child(r, 'B')];
+    const copyA = await work(a, (dir) => writeFileSync(path.join(dir, 'a.txt'), 'a\n'));
+    await work(b, () => {});
+    writeFileSync(path.join(copyA.editDir, 'by-hand.txt'), 'edited in VS Code\n'); // after A's last reply
+    const m = repo.createNode({ projectId: 'p', title: 'M', parentIds: [a.id, b.id] });
+    const copy = await worktrees.ensure(project, repo.snapshot('p'), m);
+    expect(readFileSync(path.join(copy.editDir, 'by-hand.txt'), 'utf8')).toBe('edited in VS Code\n');
+  });
+});
+
+describe('comparePaths', () => {
+  it('sorts like a file tree: folders first, then names, ignoring case', () => {
+    const files = ['b.txt', 'A/z.txt', 'a.txt', 'B/c/d.txt', 'B/a.txt', 'file10', 'file2'];
+    expect(files.sort(comparePaths)).toEqual(['A/z.txt', 'B/c/d.txt', 'B/a.txt', 'a.txt', 'b.txt', 'file2', 'file10']);
+  });
+});
+
+describe('safeRelativePath', () => {
+  it('accepts paths inside the folder and refuses the rest', () => {
+    expect(safeRelativePath('sections/intro.tex')).toBe('sections/intro.tex');
+    expect(safeRelativePath('./a//b\\c.txt')).toBe('a/b/c.txt');
+    for (const bad of ['', '.', '../x', 'a/../../x', '/etc/passwd', 'C:/x', 'c:x', '.git/config', 'sub/.GIT/x', 'a\0b']) {
+      expect(safeRelativePath(bad)).toBeNull();
+    }
   });
 });
 

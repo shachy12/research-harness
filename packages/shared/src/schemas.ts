@@ -121,6 +121,11 @@ export const doneSchema = z.object({
   done: z.boolean(),
 });
 
+/** Open the node's copy in VS Code, optionally with one of its files (relative to the project folder). */
+export const openInEditorSchema = z.object({
+  path: z.string().min(1).max(1000).optional(),
+});
+
 /** Allow or deny the ask_node questions a reply is waiting on. */
 export const askDecisionSchema = z.object({
   allow: z.boolean(),

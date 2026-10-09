@@ -8,6 +8,7 @@ import { nodeRoutes } from './routes/nodes.ts';
 import { projectRoutes } from './routes/projects.ts';
 import { RunManager } from './runs.ts';
 import { systemRoutes } from './routes/system.ts';
+import { type OpenInEditor, openInEditor } from './system/editor.ts';
 import { pickFolder } from './system/folder-picker.ts';
 import { HarnessTools, harnessMcpRoutes } from './tools/harness.ts';
 import type { Workspaces } from './workspace.ts';
@@ -21,6 +22,8 @@ export interface AppDeps {
   backup?: (label: string) => string;
   /** Show the OS folder dialog (tests pass a fake). */
   pickFolder?: typeof pickFolder;
+  /** Open a node's copy in VS Code (tests pass a fake). */
+  openInEditor?: OpenInEditor;
   /**
    * Where this server can be reached from the same machine, e.g. http://127.0.0.1:8787. The model's
    * CLI connects to the harness MCP server there; without it, nodes get no harness tools.
@@ -36,6 +39,7 @@ export interface RouteDeps extends AppDeps {
   runs: RunManager;
   worktrees: Worktrees;
   pickFolder: typeof pickFolder;
+  openInEditor: OpenInEditor;
   /** Throws a 400 unless the provider offers this model and the model takes this effort (null: default). */
   checkModel: (model: string | null, effort: Effort | null) => Promise<void>;
   /** The provider's model list and defaults, or a 502 the UI can show. */
@@ -85,6 +89,7 @@ export function createApp(deps: AppDeps) {
     worktrees,
     runs,
     pickFolder: deps.pickFolder ?? pickFolder,
+    openInEditor: deps.openInEditor ?? openInEditor,
     checkModel: modelChecker(deps.llm),
     loadModels: () => loadModels(deps.llm),
   };

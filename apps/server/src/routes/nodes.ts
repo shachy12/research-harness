@@ -4,17 +4,21 @@ import {
   type ChatStreamEvent,
   type DagNode,
   type Effort,
+  type FileContent,
   type NodeChanges,
   type NodeDetail,
+  type NodeFiles,
   askDecisionSchema,
   doneSchema,
   forkSchema,
   markReadSchema,
   modelSettingsSchema,
+  openInEditorSchema,
   renameNodeSchema,
   sendMessageSchema,
   titleFromPrompt,
 } from '@harness/shared';
+import path from 'node:path';
 import { type Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { RouteDeps } from '../app.ts';
@@ -22,6 +26,8 @@ import { inheritedItems } from '../dag/context.ts';
 import { classifyError } from '../llm/errors.ts';
 import { cleanTitle } from '../llm/title.ts';
 import type { RunManager } from '../runs.ts';
+import { EditorNotFoundError } from '../system/editor.ts';
+import { safeRelativePath } from '../worktrees.ts';
 import { conflict, HttpError, notFound } from './errors.ts';
 
 /**
@@ -69,11 +75,23 @@ function watchRun(c: Context, runs: RunManager, nodeId: string, first?: ChatStre
   });
 }
 
-export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel }: RouteDeps) {
+export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel, openInEditor }: RouteDeps) {
   const requireNode = (id: string) => {
     const node = repo.getNode(id);
     if (!node) throw notFound('Node');
     return node;
+  };
+
+  /**
+   * The node's files for the Files view. A node that ran before gets its folder back first if an
+   * earlier version removed it (nodes finished or deleted back then), so it can be opened again.
+   */
+  const filesOf = (node: DagNode) => {
+    const project = repo.getProject(node.projectId)!;
+    return gitOr500('files', node.id, async () => {
+      if (node.gitBranch) await worktrees.restore(project, node.id);
+      return worktrees.files(project, repo.snapshot(node.projectId), node);
+    });
   };
 
   return new Hono()
@@ -174,7 +192,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
 
     // Delete a node: it is hidden with its messages kept (`restore` undoes it). Its children become
     // roots (they keep their own conversations and sessions; the graph no longer links them). Its
-    // git branch stays; its worktree is committed and removed (made again if it is restored).
+    // git branch and its folder (worktree) stay; the folder is committed, so nothing in it is lost.
     .delete('/:nodeId', (c) => {
       const node = requireNode(c.req.param('nodeId'));
       const graph = repo.snapshot(node.projectId);
@@ -185,8 +203,8 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       const orphans = repo.deleteNode(node.id);
       if (node.gitBranch) {
         worktrees
-          .retire(repo.getProject(node.projectId)!, node.id, `${node.title}: state when deleted`)
-          .catch((err: unknown) => console.error(`[git] retire ${node.id}:`, err));
+          .commit(repo.getProject(node.projectId)!, node.id, `${node.title}: state when deleted`)
+          .catch((err: unknown) => console.error(`[git] commit ${node.id}:`, err));
       }
       return c.json({ ok: true, orphans });
     })
@@ -269,6 +287,60 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       }
     })
 
+    // The files of the node's copy, for the Files view (read-only: the user edits in VS Code).
+    .get('/:nodeId/files', async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      return c.json<NodeFiles>(await filesOf(node));
+    })
+
+    // One file of the node's copy: text (up to a size), or what kind of file it is.
+    .get('/:nodeId/files/content', async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      const file = c.req.query('path') ?? '';
+      const project = repo.getProject(node.projectId)!;
+      const read = await gitOr500('read', node.id, () => worktrees.readFile(project, repo.snapshot(node.projectId), node, file, MAX_TEXT_BYTES));
+      if (!read) throw notFound('File');
+      const base = { path: file, size: read.size, text: null };
+      if (imageType(file)) return c.json<FileContent>({ ...base, kind: 'image' });
+      if (!read.bytes) return c.json<FileContent>({ ...base, kind: 'too-large' });
+      if (read.bytes.subarray(0, 8000).includes(0)) return c.json<FileContent>({ ...base, kind: 'binary' });
+      return c.json<FileContent>({ ...base, kind: 'text', text: new TextDecoder().decode(read.bytes) });
+    })
+
+    // An image of the node's copy, for the Files view's preview. Never run as a page (an SVG could hold scripts).
+    .get('/:nodeId/files/raw', async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      const file = c.req.query('path') ?? '';
+      const type = imageType(file);
+      if (!type) throw new HttpError(400, 'Only images can be previewed.');
+      const project = repo.getProject(node.projectId)!;
+      const read = await gitOr500('read', node.id, () => worktrees.readFile(project, repo.snapshot(node.projectId), node, file, MAX_IMAGE_BYTES));
+      if (!read) throw notFound('File');
+      if (!read.bytes) throw new HttpError(413, 'This image is too large to preview.');
+      return c.body(new Uint8Array(read.bytes), 200, {
+        'Content-Type': type,
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'no-store',
+      });
+    })
+
+    // Open the node's copy in VS Code (and one of its files). It must exist: it is made at the first reply.
+    .post('/:nodeId/open-in-editor', zValidator('json', openInEditorSchema), async (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      const files = await filesOf(node);
+      if (!files.folder) throw conflict("This node has no copy of the files yet: it gets one with its first reply.");
+      const { path: file } = c.req.valid('json');
+      const rel = file === undefined ? null : safeRelativePath(file);
+      if (file !== undefined && !rel) throw new HttpError(400, 'Not a file of this node.');
+      try {
+        await openInEditor(files.folder, rel ? path.join(files.folder, rel) : undefined);
+      } catch (err) {
+        throw new HttpError(err instanceof EditorNotFoundError ? 404 : 500, err instanceof Error ? err.message : 'Could not start VS Code.');
+      }
+      return c.json({ ok: true });
+    })
+
     // Merge the node's branch into the project's current branch. Conflicts leave the project as it was.
     .post('/:nodeId/apply', async (c) => {
       const node = requireNode(c.req.param('nodeId'));
@@ -281,6 +353,30 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel 
       repo.setGitInfo(node.id, node.gitBranch, await worktrees.countChanges(project, node.id));
       return c.json({ ok: true });
     });
+}
+
+/** The largest text file the Files view shows, and the largest image it previews. */
+const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+const IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon', svg: 'image/svg+xml',
+};
+
+/** The media type of an image file the Files view previews (by extension), or null. */
+function imageType(file: string): string | null {
+  return IMAGE_TYPES[file.split('.').pop()?.toLowerCase() ?? ''] ?? null;
+}
+
+/** Run a git step for a route; a failure becomes a 500 with git's message (and is logged). */
+async function gitOr500<T>(what: string, nodeId: string, step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (err) {
+    console.error(`[git] ${what} ${nodeId}:`, err);
+    throw new HttpError(500, err instanceof Error ? err.message : `Could not read the files`);
+  }
 }
 
 /** Where branches were forked off a node, grouped by fork point (merge nodes are not forks). */

@@ -1,9 +1,10 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
-  Attachment, BranchResult, ChatStreamEvent, DagNode, FolderGit, GraphResponse, MergePreview, ModelsResponse, NodeChanges,
-  NodeDetail, Project, ProjectSummary,
+  Attachment, BranchResult, ChatStreamEvent, DagNode, FileContent, FolderGit, GraphResponse, MergePreview, ModelsResponse, NodeChanges,
+  NodeDetail, NodeFiles, Project, ProjectSummary,
 } from '@harness/shared';
 import { MANAGED_DIR } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -12,6 +13,7 @@ import type { ChatRequest } from './dag/prompt.ts';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
 import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent } from './llm/index.ts';
+import { EditorNotFoundError } from './system/editor.ts';
 import { callHarnessTool } from './tools/harness.ts';
 import { Workspaces } from './workspace.ts';
 
@@ -1165,6 +1167,77 @@ describe('API', () => {
       expect((await call('POST', '/projects', { name: 'Paper', folder })).status).toBe(201);
       expect((await call<FolderGit>('POST', '/projects/check-folder', { folder })).data)
         .toEqual({ repository: true, branch: check.data.branch, uncommitted: false });
+    });
+
+    it('shows a node’s files read-only and opens its copy in the editor', async () => {
+      llm.canEdit = true;
+      const opened: [string, string | undefined][] = [];
+      app = createApp({ repo, llm, workspaces, openInEditor: async (folder, file) => void opened.push([folder, file]) });
+
+      // Before the first reply there is no copy yet: the files it will start from, and nothing to open.
+      const before = (await call<NodeFiles>('GET', `/nodes/${rootId}/files`)).data;
+      expect(before).toMatchObject({ source: 'start', folder: null });
+      expect((await call('POST', `/nodes/${rootId}/open-in-editor`, {})).status).toBe(409);
+
+      await chat(rootId, 'Start [write notes.md]');
+      await idle(rootId);
+      const copy = llm.contexts.at(-1)!.edit!.dir;
+      writeFileSync(path.join(copy, 'pic.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+      writeFileSync(path.join(copy, 'data.bin'), Buffer.from([1, 0, 2]));
+      const files = (await call<NodeFiles>('GET', `/nodes/${rootId}/files`)).data;
+      expect(files).toMatchObject({ source: 'copy', folder: path.resolve(copy) });
+      expect(files.files).toEqual(expect.arrayContaining(['notes.md', 'pic.svg', 'data.bin']));
+
+      const content = (file: string) => call<FileContent>('GET', `/nodes/${rootId}/files/content?path=${encodeURIComponent(file)}`);
+      expect((await content('notes.md')).data).toMatchObject({ kind: 'text', text: expect.stringContaining('notes.md from') });
+      expect((await content('data.bin')).data).toMatchObject({ kind: 'binary', text: null, size: 3 });
+      expect((await content('pic.svg')).data).toMatchObject({ kind: 'image', text: null });
+      expect((await content('../outside.txt')).status).toBe(404);
+
+      const raw = await app.request(`/api/nodes/${rootId}/files/raw?path=pic.svg`);
+      expect(raw.headers.get('content-type')).toBe('image/svg+xml');
+      expect(raw.headers.get('content-security-policy')).toContain('sandbox');
+      expect((await app.request(`/api/nodes/${rootId}/files/raw?path=notes.md`)).status).toBe(400);
+
+      expect((await call('POST', `/nodes/${rootId}/open-in-editor`, {})).status).toBe(200);
+      expect((await call('POST', `/nodes/${rootId}/open-in-editor`, { path: 'notes.md' })).status).toBe(200);
+      expect((await call('POST', `/nodes/${rootId}/open-in-editor`, { path: '../x' })).status).toBe(400);
+      expect(opened).toEqual([[path.resolve(copy), undefined], [path.resolve(copy), path.join(path.resolve(copy), 'notes.md')]]);
+    });
+
+    it('never removes a node’s folder, and brings back one an earlier version removed', async () => {
+      llm.canEdit = true;
+      await chat(rootId, 'Start [write notes.md]');
+      await idle(rootId);
+      const copy = llm.contexts.at(-1)!.edit!.dir;
+      const [kid] = await fork(rootId, ['Go on [write kid.md]']);
+      await idle(kid.id);
+      const kidCopy = llm.contexts.at(-1)!.edit!.dir;
+
+      // Deleting keeps the folder (and saves what is in it).
+      writeFileSync(path.join(kidCopy, 'unsaved.md'), 'typed in VS Code\n');
+      expect((await call('DELETE', `/nodes/${kid.id}`)).status).toBe(200);
+      await new Promise((r) => setTimeout(r, 500)); // the commit runs in the background
+      expect(readFileSync(path.join(kidCopy, 'unsaved.md'), 'utf8')).toBe('typed in VS Code\n');
+      expect((await call('POST', `/nodes/${kid.id}/restore`)).status).toBe(200);
+      expect((await call<NodeFiles>('GET', `/nodes/${kid.id}/files`)).data.files).toEqual(expect.arrayContaining(['kid.md', 'unsaved.md']));
+
+      // A folder removed by an earlier version comes back from the branch when the files are opened.
+      execFileSync('git', ['worktree', 'remove', '--force', copy], { cwd: projectFolder() });
+      expect(existsSync(copy)).toBe(false);
+      const files = (await call<NodeFiles>('GET', `/nodes/${rootId}/files`)).data;
+      expect(files).toMatchObject({ source: 'copy', folder: path.resolve(copy) });
+      expect(files.files).toContain('notes.md');
+    });
+
+    it('says so when VS Code is not installed', async () => {
+      llm.canEdit = true;
+      app = createApp({ repo, llm, workspaces, openInEditor: async () => { throw new EditorNotFoundError(); } });
+      await chat(rootId, 'Start [write notes.md]');
+      await idle(rootId);
+      const res = await call<{ error: string }>('POST', `/nodes/${rootId}/open-in-editor`, {});
+      expect(res.status).toBe(404);
+      expect(res.data.error).toContain('HARNESS_EDITOR_PATH');
     });
 
     it('runs read-only with a provider that can’t edit', async () => {
