@@ -1,37 +1,44 @@
 import type { DagNode, FileChange } from '@harness/shared'
 import { ChevronRightIcon, ExternalLinkIcon, FileCodeIcon, FileTextIcon, FolderIcon, FolderOpenIcon, ImageIcon, LockIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useFileContent, useNodeChanges, useNodeFiles, useOpenInEditor } from '@/api/queries'
+import { Markdown } from '@/features/chat/Markdown'
 import { DiffView } from '@/features/editing/ChangesPanel'
 import { splitDiff } from '@/lib/diff'
 import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { CodeViewer } from './CodeViewer'
 import { type TreeFolder, buildTree, parentFolders, projectPath } from './fileTree'
+import { type ViewerMode, useFilesViewState } from './viewState'
 
 const STATUS_LETTER: Record<FileChange['status'], string> = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' }
 
 /** Trees this small open with every folder expanded. */
 const EXPAND_ALL_BELOW = 150
 
+const MARKDOWN_FILE = /\.(md|markdown|mdown|mkd)$/i
+const MODE_LABEL: Record<ViewerMode, string> = { preview: 'Preview', file: 'File', changes: 'Changes' }
+
 /** A file's change compared with the project's branch (what Apply would bring), keyed by project path. */
 type ChangeInfo = FileChange & { repoPath: string }
 
 /**
  * The Files view of a node: its copy of the project as a tree, and a read-only viewer with colours
- * per file type, or the file's changes. Editing happens in VS Code ("Open in VS Code").
+ * per file type, a Markdown file's preview, or the file's changes. Editing happens in VS Code
+ * ("Open in VS Code"). How it was left (file, folders, filter, mode) is remembered per node.
  */
-export function FilesView({ node, version, selected, onSelect }: {
+export function FilesView({ node, version, linkedFile, onSelect }: {
   node: DagNode
   /** Changes after each reply, so the files are loaded again. */
   version: string
-  selected: string | null
+  /** The file named in the page's address (a link or a reload); else the one remembered. */
+  linkedFile: string | null
   onSelect: (path: string) => void
 }) {
   const files = useNodeFiles(node.id, version)
   const changes = useNodeChanges(node.id, node.gitBranch !== null, version)
-  const [changedOnly, setChangedOnly] = useState(false)
-  const [mode, setMode] = useState<{ path: string | null; diff: boolean }>({ path: null, diff: false })
+  const [view, setView] = useFilesViewState(node.id)
+  const { changedOnly } = view
   const open = useOpenInEditor()
 
   const inRepo = files.data?.inRepo ?? ''
@@ -51,9 +58,32 @@ export function FilesView({ node, version, selected, onSelect }: {
   const listedKey = listed.join('\n') // rebuild the tree only when the list changes
   const tree = useMemo(() => buildTree(listedKey ? listedKey.split('\n') : []), [listedKey])
 
+  // The remembered file may be gone since (deleted, or the node's files changed): then none.
+  const wanted = linkedFile ?? view.file
+  const exists = wanted !== null && (!files.data || files.data.files.includes(wanted) || deleted.includes(wanted))
+  const selected = exists ? wanted : null
+  const select = (path: string) => {
+    setView({ file: path })
+    onSelect(path)
+  }
+
   const change = selected ? changed.get(selected) : undefined
-  // A deleted file has only its change to show; any other changed file opens on its contents.
-  const showDiff = change !== undefined && (change.status === 'deleted' || (mode.path === selected && mode.diff))
+  // What this file can show; the mode last picked is used when it can (a deleted file has only its changes).
+  const modes: ViewerMode[] = []
+  if (selected && MARKDOWN_FILE.test(selected) && change?.status !== 'deleted') modes.push('preview')
+  if (change?.status !== 'deleted') modes.push('file')
+  if (change) modes.push('changes')
+  const mode = modes.includes(view.mode) ? view.mode : modes.includes('file') ? 'file' : modes[0]
+
+  const defaultOpen = (path: string) => changedOnly || listed.length < EXPAND_ALL_BELOW
+    || [...changed.keys(), ...(selected ? [selected] : [])].some((p) => parentFolders(p).includes(path))
+  const treeProps: TreeProps = {
+    changed,
+    selected,
+    onSelect: select,
+    isOpen: (path) => view.folders[path] ?? defaultOpen(path),
+    toggle: (path) => setView({ folders: { ...view.folders, [path]: !(view.folders[path] ?? defaultOpen(path)) } }),
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -67,7 +97,7 @@ export function FilesView({ node, version, selected, onSelect }: {
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(12rem,18rem)_minmax(0,1fr)]">
         <nav aria-label="Files" className="flex min-h-0 flex-col border-r">
           <label className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-            <input type="checkbox" checked={changedOnly} onChange={(e) => setChangedOnly(e.target.checked)} />
+            <input type="checkbox" checked={changedOnly} onChange={(e) => setView({ changedOnly: e.target.checked })} />
             Changed files only{changed.size > 0 && ` (${changed.size})`}
           </label>
           <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-3 text-[13px]">
@@ -76,18 +106,7 @@ export function FilesView({ node, version, selected, onSelect }: {
             {files.data && listed.length === 0 && (
               <p className="px-2 text-xs text-muted-foreground">{changedOnly ? 'No changed files.' : 'No files.'}</p>
             )}
-            {files.data && (
-              <FolderItems
-                key={changedOnly ? 'changed' : 'all'}
-                folder={tree}
-                depth={0}
-                changed={changed}
-                selected={selected}
-                onSelect={onSelect}
-                initiallyOpen={(path) => changedOnly || listed.length < EXPAND_ALL_BELOW
-                  || [...changed.keys(), ...(selected ? [selected] : [])].some((p) => parentFolders(p).includes(path))}
-              />
-            )}
+            {files.data && <FolderItems folder={tree} depth={0} tree={treeProps} />}
             {files.data?.truncated && <p className="px-2 pt-2 text-xs text-muted-foreground">Only the first 10,000 files are listed.</p>}
           </div>
         </nav>
@@ -101,17 +120,17 @@ export function FilesView({ node, version, selected, onSelect }: {
                 <span className="min-w-0 truncate font-mono text-xs" title={selected}>{selected}</span>
                 {change && <ChangeCounts change={change} />}
                 <span className="ml-auto" />
-                {change && change.status !== 'deleted' && (
+                {modes.length > 1 && (
                   <div className="flex overflow-hidden rounded-md border text-xs" role="group" aria-label="Show">
-                    {(['File', 'Changes'] as const).map((label) => (
+                    {modes.map((m) => (
                       <button
-                        key={label}
+                        key={m}
                         type="button"
-                        aria-pressed={(label === 'Changes') === showDiff}
-                        className={cn('px-2.5 py-1', (label === 'Changes') === showDiff ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60')}
-                        onClick={() => setMode({ path: selected, diff: label === 'Changes' })}
+                        aria-pressed={m === mode}
+                        className={cn('px-2.5 py-1', m === mode ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60')}
+                        onClick={() => setView({ mode: m })}
                       >
-                        {label}
+                        {MODE_LABEL[m]}
                       </button>
                     ))}
                   </div>
@@ -129,10 +148,10 @@ export function FilesView({ node, version, selected, onSelect }: {
                 )}
               </div>
               <div className="min-h-0 flex-1 overflow-hidden">
-                {showDiff ? (
+                {mode === 'changes' && change ? (
                   <DiffView text={diffs.get(change.repoPath)} fill />
                 ) : (
-                  <FileBody nodeId={node.id} path={selected} version={version} />
+                  <FileBody nodeId={node.id} path={selected} version={version} preview={mode === 'preview'} />
                 )}
               </div>
             </>
@@ -161,12 +180,22 @@ function ChangeCounts({ change }: { change: FileChange }) {
   )
 }
 
-/** The selected file: its text with colours, an image, or why it can't be shown. */
-function FileBody({ nodeId, path, version }: { nodeId: string; path: string; version: string }) {
+/** The selected file: its text with colours, its rendered Markdown, an image, or why it can't be shown. */
+function FileBody({ nodeId, path, version, preview }: { nodeId: string; path: string; version: string; preview: boolean }) {
   const content = useFileContent(nodeId, path, version)
   if (content.isPending) return <p className="p-4 text-sm text-muted-foreground">Loading…</p>
   if (content.isError) return <p className="p-4 text-sm text-destructive">Could not open this file: {content.error.message}</p>
   const file = content.data
+  if (file.kind === 'text' && preview) {
+    // Rendered like a reply (math included). Images with relative paths aren't shown.
+    return (
+      <div className="h-full overflow-auto">
+        <div className="mx-auto max-w-3xl px-6 py-5">
+          <Markdown text={file.text ?? ''} />
+        </div>
+      </div>
+    )
+  }
   if (file.kind === 'text') return <CodeViewer path={path} text={file.text ?? ''} />
   if (file.kind === 'image') {
     return (
@@ -187,19 +216,22 @@ function FileBody({ nodeId, path, version }: { nodeId: string; path: string; ver
   )
 }
 
-function FolderItems({ folder, depth, changed, selected, onSelect, initiallyOpen }: {
-  folder: TreeFolder
-  depth: number
+/** What every row of the tree needs: the changes, the open file, and which folders are open. */
+interface TreeProps {
   changed: Map<string, ChangeInfo>
   selected: string | null
   onSelect: (path: string) => void
-  initiallyOpen: (path: string) => boolean
-}) {
+  isOpen: (folder: string) => boolean
+  toggle: (folder: string) => void
+}
+
+function FolderItems({ folder, depth, tree }: { folder: TreeFolder; depth: number; tree: TreeProps }) {
+  const { changed, selected, onSelect } = tree
   const indent = { paddingLeft: `${depth * 14 + 6}px` }
   return (
     <ul>
       {folder.folders.map((f) => (
-        <FolderRow key={f.path} folder={f} depth={depth} changed={changed} selected={selected} onSelect={onSelect} initiallyOpen={initiallyOpen} />
+        <FolderRow key={f.path} folder={f} depth={depth} tree={tree} />
       ))}
       {folder.files.map((f) => {
         const change = changed.get(f.path)
@@ -239,15 +271,8 @@ function FolderItems({ folder, depth, changed, selected, onSelect, initiallyOpen
   )
 }
 
-function FolderRow({ folder, depth, ...rest }: {
-  folder: TreeFolder
-  depth: number
-  changed: Map<string, ChangeInfo>
-  selected: string | null
-  onSelect: (path: string) => void
-  initiallyOpen: (path: string) => boolean
-}) {
-  const [open, setOpen] = useState(() => rest.initiallyOpen(folder.path))
+function FolderRow({ folder, depth, tree }: { folder: TreeFolder; depth: number; tree: TreeProps }) {
+  const open = tree.isOpen(folder.path)
   const Icon = open ? FolderOpenIcon : FolderIcon
   return (
     <li>
@@ -256,13 +281,13 @@ function FolderRow({ folder, depth, ...rest }: {
         style={{ paddingLeft: `${depth * 14 + 6}px` }}
         aria-expanded={open}
         className="flex w-full items-center gap-1.5 rounded-md py-[3px] pr-2 text-left hover:bg-muted"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => tree.toggle(folder.path)}
       >
         <ChevronRightIcon className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')} aria-hidden="true" />
         <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <span className="min-w-0 truncate">{folder.name}</span>
       </button>
-      {open && <FolderItems folder={folder} depth={depth + 1} {...rest} />}
+      {open && <FolderItems folder={folder} depth={depth + 1} tree={tree} />}
     </li>
   )
 }
