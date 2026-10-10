@@ -22,6 +22,7 @@ import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
 import { AskApprovalBox } from './AskApprovalBox'
 import { AttachMenu } from './AttachMenu'
+import { ChatSearch } from './ChatSearch'
 import { PendingAttachments } from './AttachmentChip'
 import { InheritedContext } from './InheritedContext'
 import { useAttachments } from './useAttachments'
@@ -281,6 +282,7 @@ function Conversation({ detail, onDialog, hidden }: { detail: NodeDetail; onDial
           Drop files or folders to attach them to your next message
         </div>
       )}
+      <ChatSearch scrollRef={scrollRef} active={!hidden} />
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5">
           <div className="flex flex-wrap items-center gap-2">

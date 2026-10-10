@@ -15,12 +15,13 @@ import { useGraph, useNewRoot, useRefreshAll } from '@/api/queries'
 import { api } from '@/api/client'
 import { UsageBanner } from '@/components/UsageBanner'
 import { Button } from '@/components/ui/button'
-import { PlusIcon, RotateCcwIcon, Trash2Icon } from 'lucide-react'
+import { FoldVerticalIcon, PlusIcon, RotateCcwIcon, Trash2Icon, UnfoldVerticalIcon } from 'lucide-react'
 import { MergeDialog } from '@/features/merge/MergeDialog'
 import { useMergeSelection } from '@/features/merge/selection'
 import { RenameDialog } from '@/features/rename/RenameDialog'
+import { applyFolds, type FoldedGraph, useFoldedNodes } from './folds'
 import { layoutGraph } from './layout'
-import { type CardNode, NodeCard } from './NodeCard'
+import { type CardData, type CardNode, NodeCard } from './NodeCard'
 import { DeleteNodeDialog } from './DeleteNodeDialog'
 import { DeletedNodesDialog } from './DeletedNodesDialog'
 import { ResetDialog } from './ResetDialog'
@@ -64,11 +65,16 @@ function GraphView({ projectId }: { projectId: string }) {
     if (graph.data) selection.keepOnly(mergeableIds)
   }, [graph.data, mergeableIds, selection])
 
+  const folds = useFoldedNodes()
+  const shown = useMemo(() => applyFolds(summaries, folds.ids), [summaries, folds.ids])
+  // Folds of this project that are stored, including ones open by themselves for now.
+  const storedFolds = folds.ids.filter((id) => summaries.some((n) => n.id === id))
+
   const usage = graph.data?.usage ?? null
   const limitReached = usage?.status === 'reached'
   const { nodes, edges } = useMemo(
-    () => toFlow(summaries, selection.ids, shake, limitReached, setRenaming, setDeleting),
-    [summaries, selection.ids, shake, limitReached],
+    () => toFlow(shown, selection.ids, shake, limitReached, { onRename: setRenaming, onDelete: setDeleting, onFold: folds.fold, onUnfold: folds.unfold }),
+    [shown, selection.ids, shake, limitReached, folds.fold, folds.unfold],
   )
   // Nodes whose last message got no reply (failed, stopped, or hit the limit), and merges that
   // stopped before their results were written (Retry starts them again).
@@ -171,6 +177,22 @@ function GraphView({ projectId }: { projectId: string }) {
           <Button variant="outline" size="sm" className="bg-card" onClick={() => setResetOpen(true)}>
             <RotateCcwIcon /> Start over
           </Button>
+          {shown.foldAll.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="bg-card"
+              title="Fold every node whose branches are all done (nothing running or unread)"
+              onClick={() => folds.fold(shown.foldAll)}
+            >
+              <FoldVerticalIcon /> Fold done
+            </Button>
+          )}
+          {shown.folded.size > 0 && (
+            <Button variant="outline" size="sm" className="bg-card" onClick={() => folds.unfold(storedFolds)}>
+              <UnfoldVerticalIcon /> Unfold all
+            </Button>
+          )}
           {deleted.length > 0 && (
             <Button variant="outline" size="sm" className="bg-card" onClick={() => setDeletedOpen(true)}>
               <Trash2Icon /> Deleted ({deleted.length})
@@ -240,15 +262,14 @@ function RetryAll({ count, busy, onClick }: { count: number; busy: boolean; onCl
 }
 
 function toFlow(
-  summaries: NodeSummary[],
+  shown: FoldedGraph,
   selected: string[],
   shake: { id: string; key: number } | null,
   limitReached: boolean,
-  onRename: (node: NodeSummary) => void,
-  onDelete: (node: NodeSummary) => void,
+  actions: Pick<CardData, 'onRename' | 'onDelete' | 'onFold' | 'onUnfold'>,
 ) {
-  const positions = layoutGraph(summaries)
-  const nodes: CardNode[] = summaries.map((summary) => ({
+  const positions = layoutGraph(shown.visible.map(({ summary, parentIds }) => ({ id: summary.id, parentIds })))
+  const nodes: CardNode[] = shown.visible.map(({ summary }) => ({
     id: summary.id,
     type: 'card',
     position: positions.get(summary.id)!,
@@ -257,13 +278,15 @@ function toFlow(
       mergeSelected: selected.includes(summary.id),
       shakeKey: shake?.id === summary.id ? shake.key : 0,
       limitReached,
-      onRename,
-      onDelete,
+      folded: shown.folded.get(summary.id) ?? 0,
+      foldable: shown.foldable.get(summary.id) ?? 0,
+      ...actions,
     },
   }))
 
-  const edges: Edge[] = summaries.flatMap((child) =>
-    child.parentIds.map((parentId) => {
+  // A parent hidden in a fold is replaced by the folded card (`parentIds` from applyFolds).
+  const edges: Edge[] = shown.visible.flatMap(({ summary: child, parentIds }) =>
+    parentIds.map((parentId) => {
       const isMerge = child.parentIds.length > 1
       const color = isMerge ? 'var(--status-merge)' : 'var(--edge)'
       return {

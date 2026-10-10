@@ -196,3 +196,14 @@
     @apply font-sans;
     }
 }
+
+/* Find in chat (ChatSearch.tsx): every match, and the one it is on. Dark text on yellow and
+   orange, readable in both themes. */
+::highlight(chat-search) {
+  background-color: oklch(0.9 0.15 95);
+  color: oklch(0.2 0 0);
+}
+::highlight(chat-search-current) {
+  background-color: oklch(0.75 0.17 55);
+  color: oklch(0.15 0 0);
+}

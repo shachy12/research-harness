@@ -14,7 +14,7 @@ const TOP = '__top__'
  * deep node it was merged into (e.g. a node whose parent was deleted): the strongly weighted edges
  * from the top node keep each root one row below it.
  */
-export function layoutGraph(nodes: DagNode[]): Map<string, { x: number; y: number }> {
+export function layoutGraph(nodes: Pick<DagNode, 'id' | 'parentIds'>[]): Map<string, { x: number; y: number }> {
   const g = new dagre.graphlib.Graph()
   g.setGraph({ rankdir: 'TB', nodesep: 32, ranksep: 72 })
   g.setDefaultEdgeLabel(() => ({}))
