@@ -20,14 +20,15 @@ import { MergeDialog } from '@/features/merge/MergeDialog'
 import { useMergeSelection } from '@/features/merge/selection'
 import { RenameDialog } from '@/features/rename/RenameDialog'
 import { applyFolds, type FoldedGraph, useFoldedNodes } from './folds'
-import { layoutGraph } from './layout'
+import { STUB_HEIGHT, STUB_WIDTH, layoutGraph } from './layout'
 import { type CardData, type CardNode, NodeCard } from './NodeCard'
+import { StubCard, type StubNode } from './StubCard'
 import { DeleteNodeDialog } from './DeleteNodeDialog'
 import { DeletedNodesDialog } from './DeletedNodesDialog'
 import { ResetDialog } from './ResetDialog'
 import { forgetView, rememberView, rememberedView } from './viewMemory'
 
-const nodeTypes = { card: NodeCard }
+const nodeTypes = { card: NodeCard, stub: StubCard }
 
 export function GraphPage() {
   const projectId = useParams().projectId!
@@ -66,15 +67,23 @@ function GraphView({ projectId }: { projectId: string }) {
   }, [graph.data, mergeableIds, selection])
 
   const folds = useFoldedNodes()
-  const shown = useMemo(() => applyFolds(summaries, folds.ids), [summaries, folds.ids])
+  const shown = useMemo(() => applyFolds(summaries, folds.ids, folds.branchIds), [summaries, folds.ids, folds.branchIds])
   // Folds of this project that are stored, including ones open by themselves for now.
-  const storedFolds = folds.ids.filter((id) => summaries.some((n) => n.id === id))
+  const inProject = (id: string) => summaries.some((n) => n.id === id)
+  const storedFolds = folds.ids.filter(inProject)
+  const storedBranchFolds = folds.branchIds.filter(inProject)
 
   const usage = graph.data?.usage ?? null
   const limitReached = usage?.status === 'reached'
   const { nodes, edges } = useMemo(
-    () => toFlow(shown, selection.ids, shake, limitReached, { onRename: setRenaming, onDelete: setDeleting, onFold: folds.fold, onUnfold: folds.unfold }),
-    [shown, selection.ids, shake, limitReached, folds.fold, folds.unfold],
+    () => toFlow(shown, selection.ids, shake, limitReached, {
+      onRename: setRenaming,
+      onDelete: setDeleting,
+      onFold: folds.fold,
+      onUnfold: folds.unfold,
+      onFoldBranches: folds.foldBranches,
+    }),
+    [shown, selection.ids, shake, limitReached, folds.fold, folds.unfold, folds.foldBranches],
   )
   // Nodes whose last message got no reply (failed, stopped, or hit the limit), and merges that
   // stopped before their results were written (Retry starts them again).
@@ -122,9 +131,14 @@ function GraphView({ projectId }: { projectId: string }) {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
-        onNodeClick={(_, node) => navigate(`/projects/${projectId}/nodes/${node.id}`)}
+        onNodeClick={(_, node) => {
+          // A stub shows the done branches it stands for again.
+          if (node.type === 'stub') folds.unfoldBranches([(node as StubNode).data.stub.parentId])
+          else navigate(`/projects/${projectId}/nodes/${node.id}`)
+        }}
         onNodeContextMenu={(event, node) => {
           event.preventDefault()
+          if (node.type === 'stub') return
           if (mergeableIds.has(node.id)) {
             setHint(null)
             selection.toggle(node.id)
@@ -177,19 +191,30 @@ function GraphView({ projectId }: { projectId: string }) {
           <Button variant="outline" size="sm" className="bg-card" onClick={() => setResetOpen(true)}>
             <RotateCcwIcon /> Start over
           </Button>
-          {shown.foldAll.length > 0 && (
+          {shown.foldAll.length + shown.foldAllBranches.length > 0 && (
             <Button
               variant="outline"
               size="sm"
               className="bg-card"
-              title="Fold every node whose branches are all done (nothing running or unread)"
-              onClick={() => folds.fold(shown.foldAll)}
+              title="Fold every done branch (nothing running or unread), also under nodes that go on"
+              onClick={() => {
+                folds.fold(shown.foldAll)
+                folds.foldBranches(shown.foldAllBranches)
+              }}
             >
               <FoldVerticalIcon /> Fold done
             </Button>
           )}
-          {shown.folded.size > 0 && (
-            <Button variant="outline" size="sm" className="bg-card" onClick={() => folds.unfold(storedFolds)}>
+          {(shown.folded.size > 0 || shown.stubs.length > 0) && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="bg-card"
+              onClick={() => {
+                folds.unfold(storedFolds)
+                folds.unfoldBranches(storedBranchFolds)
+              }}
+            >
               <UnfoldVerticalIcon /> Unfold all
             </Button>
           )}
@@ -266,10 +291,13 @@ function toFlow(
   selected: string[],
   shake: { id: string; key: number } | null,
   limitReached: boolean,
-  actions: Pick<CardData, 'onRename' | 'onDelete' | 'onFold' | 'onUnfold'>,
+  actions: Pick<CardData, 'onRename' | 'onDelete' | 'onFold' | 'onUnfold' | 'onFoldBranches'>,
 ) {
-  const positions = layoutGraph(shown.visible.map(({ summary, parentIds }) => ({ id: summary.id, parentIds })))
-  const nodes: CardNode[] = shown.visible.map(({ summary }) => ({
+  const positions = layoutGraph([
+    ...shown.visible.map(({ summary, parentIds }) => ({ id: summary.id, parentIds })),
+    ...shown.stubs.map((s) => ({ id: s.id, parentIds: [s.parentId], width: STUB_WIDTH, height: STUB_HEIGHT })),
+  ])
+  const cards: CardNode[] = shown.visible.map(({ summary }) => ({
     id: summary.id,
     type: 'card',
     position: positions.get(summary.id)!,
@@ -280,12 +308,22 @@ function toFlow(
       limitReached,
       folded: shown.folded.get(summary.id) ?? 0,
       foldable: shown.foldable.get(summary.id) ?? 0,
+      branchFoldable: shown.branchFoldable.get(summary.id) ?? 0,
       ...actions,
     },
   }))
+  const stubs: StubNode[] = shown.stubs.map((stub) => ({ id: stub.id, type: 'stub', position: positions.get(stub.id)!, data: { stub } }))
+  const nodes: (CardNode | StubNode)[] = [...cards, ...stubs]
 
-  // A parent hidden in a fold is replaced by the folded card (`parentIds` from applyFolds).
-  const edges: Edge[] = shown.visible.flatMap(({ summary: child, parentIds }) =>
+  // A parent hidden in a fold is replaced by the folded card or stub (`parentIds` from applyFolds).
+  const stubEdges: Edge[] = shown.stubs.map((stub) => ({
+    id: `${stub.parentId}->${stub.id}`,
+    source: stub.parentId,
+    target: stub.id,
+    style: { stroke: 'var(--edge)', strokeWidth: 1.8, strokeDasharray: '4 4' },
+    markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--edge)', width: 14, height: 14 },
+  }))
+  const cardEdges: Edge[] = shown.visible.flatMap(({ summary: child, parentIds }) =>
     parentIds.map((parentId) => {
       const isMerge = child.parentIds.length > 1
       const color = isMerge ? 'var(--status-merge)' : 'var(--edge)'
@@ -303,5 +341,5 @@ function toFlow(
       }
     }),
   )
-  return { nodes, edges }
+  return { nodes, edges: [...stubEdges, ...cardEdges] }
 }
