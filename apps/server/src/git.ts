@@ -19,20 +19,23 @@ const BASE_ARGS = ['-c', 'core.longpaths=true'];
  */
 export const HARNESS_COMMIT_ARGS = ['-c', 'user.name=Harness', '-c', 'user.email=harness@localhost', '-c', 'commit.gpgsign=false'];
 
-/** Our environment without git variables that would point git at another repository. */
-function gitEnv(): NodeJS.ProcessEnv {
+/**
+ * Our environment without git variables that would point git at another repository, plus the
+ * caller's own (e.g. a temporary `GIT_INDEX_FILE`).
+ */
+function gitEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete env[key];
-  return env;
+  return { ...env, ...extra };
 }
 
 /** Run git in `cwd`; never throws for a non-zero exit (the caller decides), only if git is missing. */
-export function runGit(cwd: string, args: string[], input?: string): Promise<GitOutput> {
+export function runGit(cwd: string, args: string[], input?: string, env?: Record<string, string>): Promise<GitOutput> {
   return new Promise((resolve, reject) => {
     const child = execFile(
       'git',
       [...BASE_ARGS, ...args],
-      { cwd, env: gitEnv(), maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+      { cwd, env: gitEnv(env), maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
         if (err && typeof err.code !== 'number') {
           reject((err as NodeJS.ErrnoException).code === 'ENOENT'
@@ -51,8 +54,8 @@ export function runGit(cwd: string, args: string[], input?: string): Promise<Git
 }
 
 /** Run git and return its output; throws with git's own message if it fails. */
-export async function git(cwd: string, args: string[], input?: string): Promise<string> {
-  const out = await runGit(cwd, args, input);
+export async function git(cwd: string, args: string[], input?: string, env?: Record<string, string>): Promise<string> {
+  const out = await runGit(cwd, args, input, env);
   if (out.code !== 0) {
     const detail = (out.stderr || out.stdout).trim().split('\n').slice(-3).join(' ');
     throw new Error(`git ${args.find((a) => !a.startsWith('-') && !a.includes('=')) ?? ''} failed: ${detail}`);

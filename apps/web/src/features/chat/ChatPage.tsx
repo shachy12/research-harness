@@ -2,7 +2,7 @@ import { type Attachment, type DagNode, type ForkProposal, type NodeDetail, type
 import { CodeXmlIcon, PencilIcon, Trash2Icon } from 'lucide-react'
 import { Fragment, Suspense, lazy, useEffect, useEffectEvent, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { useGraph, useNodeDetail, useOpenInEditor, useRetry, useSetDone } from '@/api/queries'
+import { useGraph, useNodeChanges, useNodeDetail, useOpenInEditor, useReloadFiles, useRetry, useSetDone } from '@/api/queries'
 import { MergeChip, StatusChip } from '@/components/StatusChip'
 import { UsageBanner } from '@/components/UsageBanner'
 import { activityOf } from '@/lib/activity'
@@ -57,6 +57,9 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   const selection = useListSelectionState()
   const hasSelection = selection.items.length > 0
   const openInEditor = useOpenInEditor()
+  const reloadFiles = useReloadFiles()
+  // A reply is running (reported by the conversation, which streams it): the Files view then reloads now and then.
+  const [working, setWorking] = useState(false)
 
   // Chat or Files, and the file shown, live in the URL (?view=files&file=…): a reload or the back
   // button keeps them. Once opened, both views stay mounted and the hidden one is only made
@@ -114,6 +117,8 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
   const { node } = detail.data
   // Everything the node's next prompt contains: what it inherits plus its own messages.
   const historyTokens = contextTokens(detail.data.inherited) + detail.data.messages.reduce((s, m) => s + estimateTokens(m.content), 0)
+  // Changes after each reply, so the files and changes are loaded again.
+  const filesVersion = `${node.filesChanged}-${detail.data.messages.length}`
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b px-4 py-2">
@@ -129,10 +134,14 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
                 type="button"
                 aria-pressed={showFiles === files}
                 className={cn('px-3 py-1', showFiles === files ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60')}
-                onClick={() => setView(files)}
+                onClick={() => {
+                  // The copy may have changed since the Files view last loaded (a reply editing, or by hand).
+                  if (files) void reloadFiles(node.id)
+                  setView(files)
+                }}
               >
                 {files ? 'Files' : 'Chat'}
-                {files && node.filesChanged ? <span className="font-normal text-muted-foreground"> · {node.filesChanged} changed</span> : null}
+                {files && <FilesChangedCount node={node} version={filesVersion} />}
               </button>
             ))}
           </div>
@@ -150,14 +159,15 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
 
       <div className="relative flex min-h-0 flex-1 flex-col">
         <ListSelectionContext value={selection}>
-          <Conversation key={node.id} detail={detail.data} onDialog={setDialog} hidden={showFiles} />
+          <Conversation key={node.id} detail={detail.data} onDialog={setDialog} hidden={showFiles} onWorking={setWorking} />
         </ListSelectionContext>
         {filesOpened && (
           <div className={cn('absolute inset-0 flex flex-col bg-background', !showFiles && 'invisible')}>
             <Suspense fallback={<p className="p-6 text-sm text-muted-foreground">Loading…</p>}>
               <FilesView
                 node={node}
-                version={`${node.filesChanged}-${detail.data.messages.length}`}
+                version={filesVersion}
+                live={showFiles && working}
                 linkedFile={file}
                 onSelect={selectFile}
               />
@@ -198,7 +208,23 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
 }
 
 /** `hidden`: the Files view covers it (kept mounted, so its scroll position and stream stay). */
-function Conversation({ detail, onDialog, hidden }: { detail: NodeDetail; onDialog: (d: DialogKind) => void; hidden: boolean }) {
+/**
+ * How many files the node changes, on the Files button. The live count once the changes are loaded
+ * (the chat's changes panel and the Files view load them, also during a reply); before that the
+ * count saved after the last reply.
+ */
+function FilesChangedCount({ node, version }: { node: DagNode; version: string }) {
+  const changes = useNodeChanges(node.id, true, version) // the server says null while there's no branch
+  const count = changes.data?.files.length ?? node.filesChanged
+  return count ? <span className="font-normal text-muted-foreground"> · {count} changed</span> : null
+}
+
+function Conversation({ detail, onDialog, hidden, onWorking }: {
+  detail: NodeDetail
+  onDialog: (d: DialogKind) => void
+  hidden: boolean
+  onWorking: (working: boolean) => void
+}) {
   const { node, messages, inherited, forks, merge } = detail
   /** The branches forked off after the first `count` messages (shown at that point in the chat). */
   const forkMarker = (count: number) => {
@@ -237,6 +263,7 @@ function Conversation({ detail, onDialog, hidden }: { detail: NodeDetail; onDial
 
   // Progress while working: what the model is doing right now, and for how long.
   const working = stream.active || detail.running
+  useEffect(() => onWorking(working), [onWorking, working])
   const now = useNow(working || merge?.running === true)
   const startedAt = stream.startedAt ?? detail.run?.startedAt ?? merge?.startedAt
   const elapsed = (working || merge?.running) && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined

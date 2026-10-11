@@ -165,41 +165,60 @@ export function useCheckFolder(folder: string) {
   })
 }
 
+/** How often the Files view reloads while the node's reply is editing its files. */
+const LIVE_FILES_MS = 3000
+
 /**
- * What applying a node's file changes would bring into the project. `version` (its file count and
- * message count) changes after each reply, which loads it again.
+ * What applying a node's file changes would bring into the project (edits not committed yet
+ * included). `version` (its file count and message count) changes after each reply, which loads it
+ * again; `live` reloads it every few seconds meanwhile.
  */
-export function useNodeChanges(nodeId: string, enabled: boolean, version: string) {
+export function useNodeChanges(nodeId: string, enabled: boolean, version: string, live = false) {
   return useQuery({
     queryKey: [...keys.changes(nodeId), version],
     queryFn: ({ signal }) => api.get<NodeChanges | null>(`/nodes/${nodeId}/changes`, signal),
     enabled,
     staleTime: 0,
+    refetchInterval: live ? LIVE_FILES_MS : false,
   })
 }
 
 /**
  * The files of a node's copy (Files view). `version` changes after each reply. Loaded again when
- * the window gets the focus back (`staleTime: 0`), e.g. after editing in VS Code.
+ * the window gets the focus back (`staleTime: 0`), e.g. after editing in VS Code, and every few
+ * seconds while `live`.
  */
-export function useNodeFiles(nodeId: string, version: string, enabled = true) {
+export function useNodeFiles(nodeId: string, version: string, live = false) {
   return useQuery({
     queryKey: [...keys.files(nodeId), version],
     queryFn: ({ signal }) => api.get<NodeFiles>(`/nodes/${nodeId}/files`, signal),
-    enabled,
     staleTime: 0,
+    refetchInterval: live ? LIVE_FILES_MS : false,
     placeholderData: (previous) => previous, // keep the tree while a new version loads
   })
 }
 
 /** One file of a node's copy, for the viewer (null path: none chosen). */
-export function useFileContent(nodeId: string, path: string | null, version: string) {
+export function useFileContent(nodeId: string, path: string | null, version: string, live = false) {
   return useQuery({
     queryKey: [...keys.files(nodeId), 'content', path, version],
     queryFn: ({ signal }) => api.get<FileContent>(`/nodes/${nodeId}/files/content?path=${encodeURIComponent(path!)}`, signal),
     enabled: path !== null,
     staleTime: 0,
+    refetchInterval: live ? LIVE_FILES_MS : false,
   })
+}
+
+/**
+ * Load a node's files and changes again now (switching to the Files view): its copy may have
+ * changed since, by a reply still running or by hand.
+ */
+export function useReloadFiles() {
+  const queryClient = useQueryClient()
+  return (nodeId: string) => Promise.all([
+    queryClient.invalidateQueries({ queryKey: keys.files(nodeId) }),
+    queryClient.invalidateQueries({ queryKey: keys.changes(nodeId) }),
+  ])
 }
 
 /** Open the node's copy in VS Code (with one of its files). Failures show as a toast. */

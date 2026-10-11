@@ -20,10 +20,13 @@ export type CardData = {
   folded: number
   /** How many nodes folding this card would hide (0: it can't be folded now). */
   foldable: number
+  /** How many done branches it can fold into a stub (0: none, or it can fold whole instead). */
+  branchFoldable: number
   onRename: (node: NodeSummary) => void
   onDelete: (node: NodeSummary) => void
   onFold: (ids: string[]) => void
   onUnfold: (ids: string[]) => void
+  onFoldBranches: (ids: string[]) => void
 }
 export type CardNode = Node<CardData, 'card'>
 
@@ -31,7 +34,7 @@ export type CardNode = Node<CardData, 'card'>
 const hiddenHandle = '!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent'
 
 export function NodeCard({ data }: NodeProps<CardNode>) {
-  const { summary: n, mergeSelected, shakeKey, limitReached, folded, foldable, onRename, onDelete, onFold, onUnfold } = data
+  const { summary: n, mergeSelected, shakeKey, limitReached, folded, foldable, branchFoldable, onRename, onDelete, onFold, onUnfold, onFoldBranches } = data
   const merging = n.merge?.running === true
   const now = useNow(n.running || merging)
   const startedAt = n.run?.startedAt ?? n.merge?.startedAt
@@ -116,6 +119,20 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
               onClick={(e) => {
                 e.stopPropagation() // don't open the chat
                 onFold([n.id])
+              }}
+            >
+              <FoldVerticalIcon className="size-3.5" />
+            </button>
+          )}
+          {branchFoldable > 0 && (
+            <button
+              type="button"
+              aria-label={`Fold the ${branchFoldable} done ${branchFoldable === 1 ? 'branch' : 'branches'} of "${n.title}"`}
+              title={`Fold its ${branchFoldable} done ${branchFoldable === 1 ? 'branch' : 'branches'} (the others stay)`}
+              className="nodrag shrink-0 rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100"
+              onClick={(e) => {
+                e.stopPropagation() // don't open the chat
+                onFoldBranches([n.id])
               }}
             >
               <FoldVerticalIcon className="size-3.5" />
