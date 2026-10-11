@@ -27,16 +27,19 @@ type ChangeInfo = FileChange & { repoPath: string }
  * per file type, a Markdown file's preview, or the file's changes. Editing happens in VS Code
  * ("Open in VS Code"). How it was left (file, folders, filter, mode) is remembered per node.
  */
-export function FilesView({ node, version, linkedFile, onSelect }: {
+export function FilesView({ node, version, live, linkedFile, onSelect }: {
   node: DagNode
   /** Changes after each reply, so the files are loaded again. */
   version: string
+  /** Reload every few seconds (shown while the node's reply is running: it may be editing). */
+  live: boolean
   /** The file named in the page's address (a link or a reload); else the one remembered. */
   linkedFile: string | null
   onSelect: (path: string) => void
 }) {
-  const files = useNodeFiles(node.id, version)
-  const changes = useNodeChanges(node.id, node.gitBranch !== null, version)
+  const files = useNodeFiles(node.id, version, live)
+  // Asked even before the page knows the node's branch: its first reply makes one while it runs.
+  const changes = useNodeChanges(node.id, true, version, live)
   const [view, setView] = useFilesViewState(node.id)
   const { changedOnly } = view
   const open = useOpenInEditor()
@@ -151,7 +154,7 @@ export function FilesView({ node, version, linkedFile, onSelect }: {
                 {mode === 'changes' && change ? (
                   <DiffView text={diffs.get(change.repoPath)} fill />
                 ) : (
-                  <FileBody nodeId={node.id} path={selected} version={version} preview={mode === 'preview'} />
+                  <FileBody nodeId={node.id} path={selected} version={version} live={live} preview={mode === 'preview'} />
                 )}
               </div>
             </>
@@ -181,8 +184,14 @@ function ChangeCounts({ change }: { change: FileChange }) {
 }
 
 /** The selected file: its text with colours, its rendered Markdown, an image, or why it can't be shown. */
-function FileBody({ nodeId, path, version, preview }: { nodeId: string; path: string; version: string; preview: boolean }) {
-  const content = useFileContent(nodeId, path, version)
+function FileBody({ nodeId, path, version, live, preview }: {
+  nodeId: string
+  path: string
+  version: string
+  live: boolean
+  preview: boolean
+}) {
+  const content = useFileContent(nodeId, path, version, live)
   if (content.isPending) return <p className="p-4 text-sm text-muted-foreground">Loading…</p>
   if (content.isError) return <p className="p-4 text-sm text-destructive">Could not open this file: {content.error.message}</p>
   const file = content.data

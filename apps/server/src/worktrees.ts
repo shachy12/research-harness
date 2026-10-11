@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { type DagNode, type FileChange, type FolderGit, MANAGED_DIR, type MergePreview, type NodeChanges, type NodeFiles, type Project } from '@harness/shared';
 import type { GraphReader } from './dag/graph.ts';
@@ -266,6 +267,30 @@ export class Worktrees {
     return { kind: 'start', repo, dir: null, ref: start ? `refs/heads/${start}` : await this.userCommit(repo.top) };
   }
 
+  /**
+   * The node's copy as it is on disk, as a commit on top of its branch (not on any branch, so git
+   * cleans it up later); the branch itself when nothing is uncommitted. Built with a temporary
+   * index, so the copy's own index, HEAD and branch stay untouched: the model may be using git
+   * there meanwhile.
+   */
+  private async onDisk(worktree: string, branch: string): Promise<string> {
+    if (!existsSync(path.join(worktree, '.git'))) return branch;
+    const dir = mkdtempSync(path.join(tmpdir(), 'harness-index-'));
+    try {
+      const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
+      // Start from a copy of the copy's index: its file times let `git add` skip unchanged files.
+      const index = path.resolve(worktree, (await git(worktree, ['rev-parse', '--git-path', 'index'])).trim());
+      if (existsSync(index)) copyFileSync(index, env.GIT_INDEX_FILE);
+      else await git(worktree, ['read-tree', branch], undefined, env);
+      await git(worktree, ['add', '-A'], undefined, env);
+      const tree = (await git(worktree, ['write-tree'], undefined, env)).trim();
+      if (tree === (await git(worktree, ['rev-parse', `${branch}^{tree}`])).trim()) return branch;
+      return (await git(worktree, [...HARNESS_COMMIT_ARGS, 'commit-tree', tree, '-p', branch, '-m', 'Uncommitted changes'])).trim();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   private async commitCopy(worktree: string, message: string): Promise<boolean> {
     if (!existsSync(path.join(worktree, '.git'))) return false;
     await git(worktree, ['add', '-A']);
@@ -296,7 +321,8 @@ export class Worktrees {
 
   /**
    * What applying the node's branch would bring into the user's current branch: changed files, the
-   * diff, and conflicts. `null` when the node has no branch.
+   * diff, and conflicts. `null` when the node has no branch. Edits in its copy that aren't committed
+   * yet count too (a reply still running, or the user's edits in VS Code): Apply commits them first.
    */
   changes(project: Project, nodeId: string): Promise<NodeChanges | null> {
     const folder = this.workspaces.folderOf(project);
@@ -306,22 +332,23 @@ export class Worktrees {
       if (!repo || !(await this.branchExists(repo.top, branch))) return null;
       const target = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim() || null;
       const base = await this.userCommit(repo.top);
-      const range = `${base}...${branch}`;
+      const head = await this.onDisk(this.worktreeOf(project, nodeId), branch);
+      const range = `${base}...${head}`;
       const files = parseNumstat(
         await git(repo.top, ['diff', '--numstat', '-z', '-M', range]),
         await git(repo.top, ['diff', '--name-status', '-z', '-M', range]),
       );
       const full = await git(repo.top, ['diff', '-M', range]);
-      const applied = (await runGit(repo.top, ['merge-base', '--is-ancestor', branch, base])).code === 0;
-      const conflicts = applied ? [] : await this.conflictsWith(repo.top, base, branch);
+      const applied = (await runGit(repo.top, ['merge-base', '--is-ancestor', head, base])).code === 0;
+      const conflicts = applied ? [] : await this.conflictsWith(repo.top, base, head);
       // Changed files that still hold merge conflict markers (a merge the model hasn't resolved yet).
       const changed = files.filter((f) => f.status !== 'deleted').map((f) => f.path);
-      const markers = changed.length === 0 ? '' : (await runGit(repo.top, ['grep', '-l', '-E', '^(<<<<<<<|>>>>>>>) ', branch, '--', ...changed])).stdout;
+      const markers = changed.length === 0 ? '' : (await runGit(repo.top, ['grep', '-l', '-E', '^(<<<<<<<|>>>>>>>) ', head, '--', ...changed])).stdout;
       return {
         branch,
         target,
         files,
-        unresolved: markers.split('\n').filter(Boolean).map((l) => l.slice(branch.length + 1)),
+        unresolved: markers.split('\n').filter(Boolean).map((l) => l.slice(head.length + 1)),
         diff: full.slice(0, MAX_DIFF_CHARS),
         truncated: full.length > MAX_DIFF_CHARS,
         conflicts,

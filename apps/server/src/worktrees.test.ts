@@ -108,6 +108,30 @@ describe('Worktrees', () => {
     expect((await worktrees.ensure(project, repo.snapshot('p'), root())).created).toBe(false);
   });
 
+  it('shows edits not committed yet as changes, without touching the copy’s git state', async () => {
+    const copy = await work(root(), (dir) => writeFileSync(path.join(dir, 'a.txt'), 'committed\n'));
+    const head = gitIn(copy.worktree, 'rev-parse', 'HEAD');
+    // A reply still running (or the user in VS Code): one file edited, one new, one staged by the model.
+    writeFileSync(path.join(copy.editDir, 'main.tex'), 'line one\nline TWO\nline three\n');
+    writeFileSync(path.join(copy.editDir, 'new.md'), 'new\n');
+    writeFileSync(path.join(copy.editDir, 'staged.txt'), 'staged\n');
+    gitIn(copy.worktree, 'add', 'staged.txt');
+    const status = gitIn(copy.worktree, 'status', '--porcelain');
+
+    const changes = (await worktrees.changes(project, root().id))!;
+    expect(changes.files.map((f) => [f.path, f.status])).toEqual([
+      ['a.txt', 'added'], ['main.tex', 'modified'], ['new.md', 'added'], ['staged.txt', 'added'],
+    ]);
+    expect(changes.diff).toContain('+line TWO');
+    expect(changes.applied).toBe(false);
+    expect(gitIn(copy.worktree, 'rev-parse', 'HEAD')).toBe(head);
+    expect(gitIn(copy.worktree, 'status', '--porcelain')).toBe(status);
+    expect(gitIn(folder, 'rev-parse', copy.branch)).toBe(head);
+
+    await worktrees.commit(project, root().id, 'reply');
+    expect((await worktrees.changes(project, root().id))!.files).toHaveLength(4);
+  });
+
   it('starts a branch from its parent’s files and keeps siblings apart', async () => {
     await work(root(), (dir) => writeFileSync(path.join(dir, 'a.txt'), 'from root\n'));
     const r = root();

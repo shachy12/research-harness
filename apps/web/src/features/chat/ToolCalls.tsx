@@ -54,11 +54,12 @@ function ToolCallRow({ call }: { call: ToolCall }) {
         )}
       </summary>
       <div className="flex flex-col gap-1 border-t px-2.5 py-2">
+        {/* The whole call (the line above is cut to fit), also while it runs. */}
+        {call.input && (
+          <p className="font-mono whitespace-pre-wrap break-all text-foreground/80">{call.name === 'shell' ? `$ ${call.input}` : call.input}</p>
+        )}
         {call.error && <p className="text-destructive">Error: {call.error.replaceAll('_', ' ')}</p>}
         {call.status === 'running' && <p className="text-muted-foreground">Waiting for results…</p>}
-        {(call.status === 'done' || call.output) && call.results.length === 0 && (
-          <p className="font-mono break-all text-muted-foreground">{call.name === 'shell' ? `$ ${call.input}` : call.input}</p>
-        )}
         {call.output && call.name === 'ask_node' ? (
           // The asked node's answer.
           <div className="max-h-96 overflow-auto rounded bg-background/60 p-2 text-sm">
