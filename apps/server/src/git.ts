@@ -13,11 +13,26 @@ export interface GitOutput {
 const BASE_ARGS = ['-c', 'core.longpaths=true'];
 
 /**
- * Settings for the commits Harness makes itself on its own branches: authored by "Harness" (the
- * model wrote the change, and it works without a configured git identity), never GPG-signed
- * (that would wait for a passphrase).
+ * The identity for commits in `cwd`: the user's own `user.name` / `user.email` (global or the
+ * repository's config) where set, "Harness" / `harness@localhost` for whatever is missing, so a
+ * commit never fails for want of an identity.
  */
-export const HARNESS_COMMIT_ARGS = ['-c', 'user.name=Harness', '-c', 'user.email=harness@localhost', '-c', 'commit.gpgsign=false'];
+export async function identityArgs(cwd: string): Promise<string[]> {
+  const out = await runGit(cwd, ['config', '--get-regexp', '^user\\.(name|email)$']);
+  const set = new Set(out.stdout.split('\n').map((line) => line.split(' ', 1)[0].toLowerCase()));
+  return [
+    ...(set.has('user.name') ? [] : ['-c', 'user.name=Harness']),
+    ...(set.has('user.email') ? [] : ['-c', 'user.email=harness@localhost']),
+  ];
+}
+
+/**
+ * Settings for the commits Harness makes itself on its own branches: the user's identity (see
+ * `identityArgs`), never GPG-signed (that would wait for a passphrase).
+ */
+export async function commitArgs(cwd: string): Promise<string[]> {
+  return [...(await identityArgs(cwd)), '-c', 'commit.gpgsign=false'];
+}
 
 /**
  * Our environment without git variables that would point git at another repository, plus the
