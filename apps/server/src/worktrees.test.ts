@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MANAGED_DIR, type DagNode, type Project } from '@harness/shared';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
 import { Workspaces } from './workspace.ts';
@@ -63,6 +63,31 @@ describe('Worktrees', () => {
     expect(gitIn(folder, 'symbolic-ref', '--short', 'HEAD').trim()).toBe(before.branch);
     expect(await worktrees.setUp(project)).toBe(false);
     expect(await worktrees.inspect(folder)).toEqual({ repository: true, branch: before.branch, uncommitted: false });
+  });
+
+  it("commits as the user's git identity when set, else as Harness for what is missing", async () => {
+    const config = path.join(mkdtempSync(path.join(tmpdir(), 'harness-wt-config-')), '.gitconfig');
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config);
+    try {
+      const author = (node: DagNode) => gitIn(folder, 'log', '-1', '--format=%an <%ae>', Worktrees.branchOf(node.id)).trim();
+      writeFileSync(config, '[user]\n\tname = Ada Lovelace\n\temail = ada@example.com\n');
+      const a = child(root(), 'A');
+      await work(a, (dir) => writeFileSync(path.join(dir, 'a.txt'), 'a\n'));
+      expect(author(a)).toBe('Ada Lovelace <ada@example.com>');
+
+      writeFileSync(config, '[user]\n\tname = Ada Lovelace\n');
+      const b = child(root(), 'B');
+      await work(b, (dir) => writeFileSync(path.join(dir, 'b.txt'), 'b\n'));
+      expect(author(b)).toBe('Ada Lovelace <harness@localhost>');
+
+      writeFileSync(config, '');
+      const c = child(root(), 'C');
+      await work(c, (dir) => writeFileSync(path.join(dir, 'c.txt'), 'c\n'));
+      expect(author(c)).toBe('Harness <harness@localhost>');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('makes its own repository when the folder is ignored by an enclosing one', async () => {

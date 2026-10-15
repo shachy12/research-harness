@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { type DagNode, type FileChange, type FolderGit, MANAGED_DIR, type MergePreview, type NodeChanges, type NodeFiles, type Project } from '@harness/shared';
 import type { GraphReader } from './dag/graph.ts';
-import { HARNESS_COMMIT_ARGS, KeyedQueue, git, gitBytes, runGit } from './git.ts';
+import { KeyedQueue, commitArgs, git, gitBytes, identityArgs, runGit } from './git.ts';
 import type { Workspaces } from './workspace.ts';
 
 /** Prefix of Harness's branches: the managed folder's name without its dot (git refuses `.harness/…`). */
@@ -155,13 +155,13 @@ export class Worktrees {
         for (const { title, ref } of starts) {
           if (ref) merged.push({ title, files: await this.changedFiles(repo.top, base, ref) });
           if (!ref || ref === first) continue;
-          const out = await runGit(worktree, [...HARNESS_COMMIT_ARGS, 'merge', '--no-ff', '--no-edit', '--no-verify', '-m', `Merge "${title}"`, ref]);
+          const out = await runGit(worktree, [...(await commitArgs(worktree)), 'merge', '--no-ff', '--no-edit', '--no-verify', '-m', `Merge "${title}"`, ref]);
           if (out.code === 0) continue;
           const unmerged = (await git(worktree, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
           if (unmerged.length === 0) throw new Error(`Could not merge the files of "${title}": ${out.stderr.trim()}`);
           unmerged.forEach((f) => conflicts.add(f));
           await git(worktree, ['add', '-A']);
-          await git(worktree, [...HARNESS_COMMIT_ARGS, 'commit', '--no-edit', '--no-verify', '-m', `Merge "${title}" (conflicts left in ${unmerged.join(', ')})`]);
+          await git(worktree, [...(await commitArgs(worktree)), 'commit', '--no-edit', '--no-verify', '-m', `Merge "${title}" (conflicts left in ${unmerged.join(', ')})`]);
         }
       }
       return result(true, merged, [...conflicts]);
@@ -285,7 +285,7 @@ export class Worktrees {
       await git(worktree, ['add', '-A'], undefined, env);
       const tree = (await git(worktree, ['write-tree'], undefined, env)).trim();
       if (tree === (await git(worktree, ['rev-parse', `${branch}^{tree}`])).trim()) return branch;
-      return (await git(worktree, [...HARNESS_COMMIT_ARGS, 'commit-tree', tree, '-p', branch, '-m', 'Uncommitted changes'])).trim();
+      return (await git(worktree, [...(await commitArgs(worktree)), 'commit-tree', tree, '-p', branch, '-m', 'Uncommitted changes'])).trim();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -295,7 +295,7 @@ export class Worktrees {
     if (!existsSync(path.join(worktree, '.git'))) return false;
     await git(worktree, ['add', '-A']);
     if ((await runGit(worktree, ['diff', '--cached', '--quiet'])).code === 0) return false;
-    await git(worktree, [...HARNESS_COMMIT_ARGS, 'commit', '--no-verify', '-m', message]);
+    await git(worktree, [...(await commitArgs(worktree)), 'commit', '--no-verify', '-m', message]);
     return true;
   }
 
@@ -375,10 +375,8 @@ export class Worktrees {
       if (!(await this.branchExists(repo.top, branch))) return { ok: false, error: 'This node has no file changes.', conflicts: [] };
       const target = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
       if (!target) return { ok: false, error: 'The project folder is not on a branch (detached HEAD). Check out a branch first.', conflicts: [] };
-      // The user's own identity if git has one, else Harness's.
-      const hasIdentity = (await runGit(repo.top, ['config', 'user.email'])).code === 0;
-      const identity = hasIdentity ? [] : HARNESS_COMMIT_ARGS;
-      const out = await runGit(repo.top, [...identity, 'merge', '--no-ff', '--no-edit', '-m', `Apply Harness branch "${title}" (${branch})`, branch]);
+      // The user's own identity and signing settings (their branch, their commit).
+      const out = await runGit(repo.top, [...(await identityArgs(repo.top)), 'merge', '--no-ff', '--no-edit', '-m', `Apply Harness branch "${title}" (${branch})`, branch]);
       if (out.code === 0) return { ok: true };
       const conflicts = (await git(repo.top, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
       if (conflicts.length > 0) {
@@ -416,7 +414,7 @@ export class Worktrees {
         if (out.code !== 0 && out.code !== 1) throw new Error(`git merge-tree failed: ${out.stderr.trim()}`);
         const [tree, ...files] = out.stdout.split('\n').filter(Boolean);
         files.forEach((f) => conflicts.add(f));
-        current = (await git(repo.top, [...HARNESS_COMMIT_ARGS, 'commit-tree', tree, '-p', current, '-p', ref, '-m', 'merge preview'])).trim();
+        current = (await git(repo.top, [...(await commitArgs(repo.top)), 'commit-tree', tree, '-p', current, '-p', ref, '-m', 'merge preview'])).trim();
       }
       return { branches, conflicts: [...conflicts] };
     });
@@ -458,7 +456,7 @@ export class Worktrees {
     const head = await runGit(top, ['rev-parse', '--verify', '--quiet', 'HEAD']);
     if (head.code === 0) return head.stdout.trim();
     const emptyTree = (await git(top, ['mktree'], '')).trim();
-    return (await git(top, [...HARNESS_COMMIT_ARGS, 'commit-tree', emptyTree, '-m', 'Empty start'])).trim();
+    return (await git(top, [...(await commitArgs(top)), 'commit-tree', emptyTree, '-m', 'Empty start'])).trim();
   }
 
   private async requireRepo(folder: string): Promise<RepoInfo> {
@@ -471,7 +469,7 @@ export class Worktrees {
   private async initRepo(folder: string): Promise<RepoInfo> {
     await git(folder, ['init', '-b', await this.initialBranch(folder)]);
     await git(folder, ['add', '-A']);
-    await git(folder, [...HARNESS_COMMIT_ARGS, 'commit', '--allow-empty', '--no-verify', '-m', 'Start of the Harness project']);
+    await git(folder, [...(await commitArgs(folder)), 'commit', '--allow-empty', '--no-verify', '-m', 'Start of the Harness project']);
     return { top: path.resolve(folder), rel: '' };
   }
 
