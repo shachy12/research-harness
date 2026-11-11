@@ -301,6 +301,101 @@ describe('Worktrees', () => {
   });
 });
 
+describe('Worktrees with a target branch', () => {
+  beforeEach(() => setup());
+
+  /** A root working against `branch` (created from main), as POST /roots makes it. */
+  async function rootOn(branch: string) {
+    await worktrees.createBranch(project, branch, 'main');
+    return repo.createNode({ projectId: 'p', title: `On ${branch}`, parentIds: [], targetBranch: branch });
+  }
+  const tip = (branch: string) => gitIn(folder, 'rev-parse', branch).trim();
+
+  it('lists the repository’s own branches, not Harness’s, with the checked-out one', async () => {
+    await work(root(), () => {}); // makes a harness/… branch
+    gitIn(folder, 'branch', 'draft');
+    const { current, branches } = await worktrees.branches(project);
+    expect(current).toBe('main');
+    expect(branches.sort()).toEqual(['draft', 'main']);
+  });
+
+  it('creates a new branch from another one, keeps an existing one, and refuses bad names', async () => {
+    gitIn(folder, 'checkout', '-b', 'other');
+    writeFileSync(path.join(folder, 'other.txt'), 'other\n');
+    gitIn(folder, 'add', '-A');
+    gitIn(folder, 'commit', '-m', 'other');
+    gitIn(folder, 'checkout', 'main');
+    expect(await worktrees.createBranch(project, 'from-other', 'other')).toBe('from-other');
+    expect(tip('from-other')).toBe(tip('other'));
+    expect(await worktrees.createBranch(project, 'from-head', null)).toBe('from-head');
+    expect(tip('from-head')).toBe(tip('main'));
+    expect(await worktrees.createBranch(project, 'other', 'main')).toBe('other'); // exists: used as it is
+    expect(tip('other')).not.toBe(tip('main'));
+    await expect(worktrees.createBranch(project, 'bad name', null)).rejects.toThrow('not a valid git branch name');
+    await expect(worktrees.createBranch(project, '-x', null)).rejects.toThrow('not a valid git branch name');
+    await expect(worktrees.createBranch(project, `${BRANCH_PREFIX}/abc`, null)).rejects.toThrow('belong to Harness');
+    await expect(worktrees.createBranch(project, 'new', 'missing')).rejects.toThrow('no branch "missing"');
+  });
+
+  it('starts a root from its branch’s tip at its first run, with what was applied there since', async () => {
+    const a = await rootOn('feature');
+    // The first root's work is applied to "feature" after `b` was created but before it runs.
+    const b = repo.createNode({ projectId: 'p', title: 'B', parentIds: [], targetBranch: 'feature' });
+    await work(a, (dir) => writeFileSync(path.join(dir, 'from-a.txt'), 'a\n'));
+    expect(await worktrees.apply(project, a.id, 'A', 'feature')).toEqual({ ok: true });
+    const copy = await worktrees.ensure(project, repo.snapshot('p'), b);
+    expect(readFileSync(path.join(copy.editDir, 'from-a.txt'), 'utf8')).toBe('a\n');
+    expect(existsSync(path.join(folder, 'from-a.txt'))).toBe(false); // main (checked out) didn't get it
+  });
+
+  it('compares with and applies to its branch without touching the project folder', async () => {
+    const r = await rootOn('feature');
+    writeFileSync(path.join(folder, 'main.tex'), 'uncommitted in the project folder\n'); // left alone
+    await work(r, (dir) => writeFileSync(path.join(dir, 'notes.md'), 'notes\n'));
+    const changes = (await worktrees.changes(project, r.id, 'feature'))!;
+    expect(changes.target).toBe('feature');
+    expect(changes.files.map((f) => f.path)).toEqual(['notes.md']);
+
+    const before = tip('main');
+    expect(await worktrees.apply(project, r.id, 'Root', 'feature')).toEqual({ ok: true });
+    expect(gitIn(folder, 'show', 'feature:notes.md')).toBe('notes\n');
+    expect(gitIn(folder, 'log', '-1', '--format=%s', 'feature').trim()).toContain('Apply Harness branch "Root"');
+    expect(tip('main')).toBe(before);
+    expect(readFileSync(path.join(folder, 'main.tex'), 'utf8')).toBe('uncommitted in the project folder\n');
+    expect((await worktrees.changes(project, r.id, 'feature'))!.applied).toBe(true);
+    expect(await worktrees.apply(project, r.id, 'Root', 'feature')).toEqual({ ok: true }); // nothing new: no-op
+  });
+
+  it('refuses to apply over conflicting changes on its branch, changing nothing', async () => {
+    const r = await rootOn('feature');
+    await work(r, (dir) => writeFileSync(path.join(dir, 'main.tex'), 'from the node\n'));
+    // Someone else changed the same lines on "feature" meanwhile.
+    gitIn(folder, 'checkout', 'feature');
+    writeFileSync(path.join(folder, 'main.tex'), 'on feature\n');
+    gitIn(folder, 'commit', '-am', 'feature change');
+    gitIn(folder, 'checkout', 'main');
+    const before = tip('feature');
+    const result = await worktrees.apply(project, r.id, 'Root', 'feature');
+    expect(result).toMatchObject({ ok: false, conflicts: ['main.tex'] });
+    expect(tip('feature')).toBe(before);
+  });
+
+  it('merges in the folder where its branch is checked out', async () => {
+    const r = await rootOn('feature');
+    await work(r, (dir) => writeFileSync(path.join(dir, 'notes.md'), 'notes\n'));
+    gitIn(folder, 'checkout', 'feature');
+    expect(await worktrees.apply(project, r.id, 'Root', 'feature')).toEqual({ ok: true });
+    expect(readFileSync(path.join(folder, 'notes.md'), 'utf8')).toBe('notes\n'); // the checkout got it
+    expect(gitIn(folder, 'status', '--porcelain', '--untracked-files=no').trim()).toBe('');
+  });
+
+  it('says so when its branch was deleted', async () => {
+    const r = await rootOn('gone');
+    gitIn(folder, 'branch', '-D', 'gone');
+    await expect(worktrees.ensure(project, repo.snapshot('p'), r)).rejects.toThrow('"gone" no longer exists');
+  });
+});
+
 describe('comparePaths', () => {
   it('sorts like a file tree: folders first, then names, ignoring case', () => {
     const files = ['b.txt', 'A/z.txt', 'a.txt', 'B/c/d.txt', 'B/a.txt', 'file10', 'file2'];

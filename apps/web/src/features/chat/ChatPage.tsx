@@ -3,7 +3,7 @@ import { CodeXmlIcon, PencilIcon, Trash2Icon } from 'lucide-react'
 import { Fragment, Suspense, lazy, useEffect, useEffectEvent, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useGraph, useNodeChanges, useNodeDetail, useOpenInEditor, useReloadFiles, useRetry, useSetDone } from '@/api/queries'
-import { MergeChip, StatusChip } from '@/components/StatusChip'
+import { CompactChip, MergeChip, StatusChip } from '@/components/StatusChip'
 import { UsageBanner } from '@/components/UsageBanner'
 import { activityOf } from '@/lib/activity'
 import { Button } from '@/components/ui/button'
@@ -225,7 +225,7 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
   hidden: boolean
   onWorking: (working: boolean) => void
 }) {
-  const { node, messages, inherited, forks, merge } = detail
+  const { node, messages, inherited, forks, merge, compacting } = detail
   /** The branches forked off after the first `count` messages (shown at that point in the chat). */
   const forkMarker = (count: number) => {
     const fork = forks.find((f) => f.at === count)
@@ -240,8 +240,9 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
   const files = useAttachments(node.projectId, keepFiles)
   const retry = useRetry()
   const setDone = useSetDone()
-  // A merge node takes messages once its results are written and its first message was sent.
-  const canWrite = merge === null
+  // A merge node takes messages once its results are written and its first message was sent; a
+  // compact branch once its compact is written (its first message is answered then).
+  const canWrite = merge === null && compacting === null
   // Drop files and folders anywhere on the chat to attach them to the next message.
   const drop = useDropZone(files.addPicked, canWrite)
 
@@ -264,9 +265,10 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
   // Progress while working: what the model is doing right now, and for how long.
   const working = stream.active || detail.running
   useEffect(() => onWorking(working), [onWorking, working])
-  const now = useNow(working || merge?.running === true)
-  const startedAt = stream.startedAt ?? detail.run?.startedAt ?? merge?.startedAt
-  const elapsed = (working || merge?.running) && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
+  const pending = merge ?? compacting
+  const now = useNow(working || pending?.running === true)
+  const startedAt = stream.startedAt ?? detail.run?.startedAt ?? pending?.startedAt
+  const elapsed = (working || pending?.running) && startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
   const runningTool = stream.toolCalls.findLast((c) => c.status === 'running')
   const currentActivity = stream.approval
     ? 'Waiting for your approval'
@@ -338,10 +340,11 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
             </h1>
             <StatusChip
               status={node.status}
-              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached, forks.some((f) => f.at === messages.length), merge)}
+              activity={activityOf(node.status, working, messages.at(-1)?.role ?? null, limitReached, forks.some((f) => f.at === messages.length), merge, compacting)}
               elapsed={elapsed}
             />
             {node.parentIds.length > 1 && <MergeChip />}
+            {node.compact && <CompactChip />}
           </div>
 
           <UsageBanner usage={detail.usage} />
@@ -388,6 +391,14 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
             </p>
           )}
           {showStreamed && stream.approval && <AskApprovalBox nodeId={node.id} approval={stream.approval} />}
+          {compacting && (
+            <CompactProgress
+              compacting={compacting}
+              retrying={retry.isPending}
+              retryError={retry.error?.message}
+              onRetry={() => retry.mutate(node.id)}
+            />
+          )}
           {unanswered ? (
             <NoReply
               error={stream.error}
@@ -459,7 +470,9 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
             </form>
           ) : (
             <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-              You can write here once the merge has written its results and started.
+              {merge
+                ? 'You can write here once the merge has written its results and started.'
+                : 'You can write here once its compact is written and it has answered your first message.'}
             </p>
           )}
           <div className="flex flex-wrap gap-2">
@@ -550,6 +563,37 @@ function MergeProgress({ merge, prompt, retrying, retryError, onRetry }: {
         {prompt ? ':' : '.'}
       </p>
       {prompt && <p className="rounded-md bg-background/70 px-3 py-2 whitespace-pre-wrap">{prompt}</p>}
+    </div>
+  )
+}
+
+/** A compact branch waiting for the compact of its parent, or stopped before it was written. */
+function CompactProgress({ compacting, retrying, retryError, onRetry }: {
+  compacting: NonNullable<NodeDetail['compacting']>
+  retrying: boolean
+  retryError?: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-merge/40 bg-merge-soft px-4 py-3 text-sm">
+      {compacting.running ? (
+        <p className="flex items-center gap-2 font-medium text-merge">
+          <span className="size-2 shrink-0 animate-pulse rounded-full bg-merge" aria-hidden="true" />
+          {compacting.activity}…
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3 text-destructive">
+          <span className="min-w-0 flex-1">{compacting.error}</span>
+          <Button size="sm" variant="outline" className="bg-background text-foreground" disabled={retrying} onClick={onRetry}>
+            {retrying ? 'Retrying…' : 'Retry the compact'}
+          </Button>
+          {retryError && <span className="basis-full">{retryError}</span>}
+        </div>
+      )}
+      <p className="text-muted-foreground">
+        This branch starts from a compact of its parent's conversation instead of all of it. The compact is
+        written first (once for every compact branch of the same fork); then the message above is answered.
+      </p>
     </div>
   )
 }

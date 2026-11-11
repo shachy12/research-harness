@@ -86,7 +86,9 @@ export const modelSettingsSchema = z.object({
  * Each branch's prompt is its first message (sent with its attachments). Its title is `title` when
  * given (a branch made from a list item is named after the item), else the prompt, shortened.
  * `model` / `effort` left out means the parent's. `filesFromProject`: the branches' copies of the
- * files start from the project folder's checked-out branch instead of the parent's copy.
+ * files start from the project's branch (the parent's `targetBranch`, else the checked-out one)
+ * instead of the parent's copy. `compact`: the branch starts from a compact of the parent's
+ * conversation instead of all of it (branches asking for one share a single compact).
  */
 export const forkSchema = z.object({
   filesFromProject: z.boolean().default(false),
@@ -97,6 +99,7 @@ export const forkSchema = z.object({
       attachments: z.array(attachmentSchema).max(20).default([]),
       model: modelField.optional(),
       effort: effortField.optional(),
+      compact: z.boolean().default(false),
     }))
     .min(1)
     .max(12),
@@ -114,6 +117,16 @@ export const mergeSchema = z.object({
   prompt: z.string().trim().min(1, 'Write the first message'),
   model: modelField.optional(),
   effort: effortField.optional(),
+});
+
+/**
+ * Another root in a project (POST /projects/:id/roots). `branch`: the git branch it works against
+ * (`DagNode.targetBranch`); an existing branch is used as it is, a new name is created from `from`
+ * (a branch; left out: the project folder's current commit). Left out: the checked-out branch.
+ */
+export const newRootSchema = z.object({
+  branch: z.string().trim().min(1).max(200).optional(),
+  from: z.string().trim().min(1).max(200).optional(),
 });
 
 /** Mark a node done (a green marker), or not. A new message clears it too. */
@@ -155,3 +168,4 @@ export type RenameNodeBody = z.infer<typeof renameNodeSchema>;
 export type ForkBody = z.infer<typeof forkSchema>;
 export type MergeBody = z.infer<typeof mergeSchema>;
 export type ModelSettingsBody = z.infer<typeof modelSettingsSchema>;
+export type NewRootBody = z.infer<typeof newRootSchema>;

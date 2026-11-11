@@ -13,6 +13,7 @@ interface NodeRow {
   fork_point: number | null; fork_session: string | null;
   result_upto: number | null; merge_results: string | null; merge_prompt: string | null; files_from_project: number;
   deleted_at: string | null; deleted_links: string | null;
+  target_branch: string | null; compact: number; compact_text: string | null;
 }
 
 /** How a child of a deleted node was attached before it became a root (restoring puts it back). */
@@ -41,6 +42,9 @@ const toNode = (r: NodeRow): DagNode => ({
   mergeResults: r.merge_results ? (JSON.parse(r.merge_results) as MergedResult[]) : null,
   mergePrompt: r.merge_prompt,
   filesFromProject: r.files_from_project === 1,
+  targetBranch: r.target_branch,
+  compact: r.compact === 1,
+  compactText: r.compact_text,
   sessionId: r.session_id,
   readUpto: r.read_upto,
   model: r.model,
@@ -171,15 +175,19 @@ export class Repository {
     /** A merge node's first message, sent once its results are drafted. */
     mergePrompt?: string | null;
     filesFromProject?: boolean;
+    /** The git branch it works against (null: the checked-out one). */
+    targetBranch?: string | null;
+    /** A branch starting from a compact of its parent (written later, `setCompactText`). */
+    compact?: boolean;
   }): DagNode {
     const id = randomUUID();
     this.db
       .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, model, effort,
-                  fork_point, fork_session, merge_prompt, files_from_project, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?, ?, ?)`)
+                  fork_point, fork_session, merge_prompt, files_from_project, target_branch, compact, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds),
         input.model ?? null, input.effort ?? null, input.forkPoint ?? null, input.forkSession ?? null,
-        input.mergePrompt ?? null, input.filesFromProject ? 1 : 0, now());
+        input.mergePrompt ?? null, input.filesFromProject ? 1 : 0, input.targetBranch ?? null, input.compact ? 1 : 0, now());
     return this.getNode(id)!;
   }
 
@@ -284,6 +292,23 @@ export class Repository {
   /** The results a merge node received (set once, when its drafts are done). */
   setMergeResults(id: string, results: MergedResult[]): void {
     this.db.prepare('UPDATE nodes SET merge_results = ? WHERE id = ?').run(JSON.stringify(results), id);
+  }
+
+  /** The compact a compact branch starts from (set once, when it is written). */
+  setCompactText(id: string, text: string): void {
+    this.db.prepare('UPDATE nodes SET compact_text = ? WHERE id = ?').run(text, id);
+  }
+
+  /** A compact of the node's first `upto` messages written earlier, if any. */
+  getCompact(nodeId: string, upto: number): string | null {
+    const row = this.db.prepare('SELECT text FROM compacts WHERE node_id = ? AND upto = ?').get(nodeId, upto) as { text: string } | undefined;
+    return row?.text ?? null;
+  }
+
+  saveCompact(nodeId: string, upto: number, text: string): void {
+    this.db
+      .prepare('INSERT INTO compacts (node_id, upto, text, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (node_id, upto) DO UPDATE SET text = excluded.text')
+      .run(nodeId, upto, text, now());
   }
 
   // ---- messages ----

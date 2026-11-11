@@ -37,11 +37,13 @@ interface Branch {
   uploading: boolean
   /** Starts as the parent's model and effort. */
   settings: ModelSettings
+  /** Starts from a compact of the parent's conversation instead of all of it (off by default). */
+  compact: boolean
 }
 
 let nextId = 0
 const newBranch = (settings: ModelSettings, item: ForkItem | null = null): Branch =>
-  ({ id: nextId++, item, edited: null, title: null, attachments: [], uploading: false, settings })
+  ({ id: nextId++, item, edited: null, title: null, attachments: [], uploading: false, settings, compact: false })
 
 /** The branches to start with: one per picked item, one per proposed branch, or one empty one. */
 function initialBranches(settings: ModelSettings, items?: ForkItem[], proposal?: ForkProposal): Branch[] {
@@ -98,6 +100,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
           prompt: promptOf(b).trim(),
           title: b.item?.title ?? b.title ?? undefined,
           attachments: b.attachments,
+          compact: b.compact,
           // Left out, the server gives the branch its parent's setting.
           ...(b.settings.model !== node.model || b.settings.effort !== node.effort ? b.settings : {}),
         })),
@@ -117,7 +120,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
               : proposal?.branches.length
                 ? 'The branches the model proposed. Edit their first messages, add or remove branches, and attach files a branch should read.'
                 : "Write the first message for each new branch, and attach files a branch should read."}
-            {` Each branch starts with this node's full context (~${inheritedTokens.toLocaleString()} tokens) and begins working as soon as you create it.`}
+            {` Each branch starts with this node's full context (~${inheritedTokens.toLocaleString()} tokens), or with a compact of it if you switch that on, and begins working as soon as you create it.`}
             {existingBranches > 0
               ? ` This node already has ${existingBranches} ${existingBranches === 1 ? 'branch; new ones are added next to it.' : 'branches; new ones are added next to them.'}`
               : node.status === 'open' && ' This node stays open: you can keep talking to it, and its branches keep only what it has now.'}
@@ -187,10 +190,10 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
                 onChange={(e) => setFilesFromProject(e.target.checked)}
               />
               <span>
-                Start the files from the project folder&apos;s branch
+                {node.targetBranch ? <>Start the files from <code className="font-mono">{node.targetBranch}</code></> : <>Start the files from the project folder&apos;s branch</>}
                 <span className="block text-xs text-muted-foreground">
                   {filesFromProject
-                    ? "The branches keep this node's conversation, but their copies of the files start from the branch checked out in the project folder. File changes made in this node and its ancestors are not in them."
+                    ? `The branches keep this node's conversation, but their copies of the files start from ${node.targetBranch ? `the latest commit of ${node.targetBranch}` : 'the branch checked out in the project folder'}. File changes made in this node and its ancestors are not in them.`
                     : "Off: the branches' copies of the files start from this node's copy, with the changes made in this conversation."}
                 </span>
               </span>
@@ -291,17 +294,37 @@ function BranchField({ index, projectId, branch, prompt, catalog, parentSettings
           Title: {branch.item?.title ?? branch.title ?? titleFromPrompt(prompt)}
         </span>
       )}
-      {catalog && (
-        <ModelFields
-          compact
-          value={branch.settings}
-          catalog={catalog}
-          onChange={(settings) => onChange({ settings })}
-          idPrefix={id}
-        />
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        {catalog && (
+          <ModelFields
+            compact
+            value={branch.settings}
+            catalog={catalog}
+            onChange={(settings) => onChange({ settings })}
+            idPrefix={id}
+          />
+        )}
+        <label
+          className="flex items-center gap-1.5 text-sm"
+          title="The branch starts from a summary of this node's conversation instead of all of it. It can still ask this node for details. Compact branches of one fork share a single compact."
+        >
+          <input
+            type="checkbox"
+            className="size-4 accent-primary"
+            checked={branch.compact}
+            onChange={(e) => onChange({ compact: e.target.checked })}
+          />
+          Start from a compact
+        </label>
+      </div>
+      {branch.compact && (
+        <span className="text-xs text-muted-foreground">
+          A compact of this node&apos;s conversation is written first (with this node&apos;s model, reading its cache), then this branch
+          starts from it in a fresh, small context.
+        </span>
       )}
       {/* Only where a branch with its parent's setting would read the cache (see forkKeepsCache). */}
-      {catalog?.forkKeepsCache && changesCache(parentSettings, branch.settings, catalog) && (
+      {catalog?.forkKeepsCache && !branch.compact && changesCache(parentSettings, branch.settings, catalog) && (
         <span role="status" className="text-xs text-merge">
           A different model or effort than its parent: its first reply reads the ~{formatTokens(contextTokens)} tokens of context without the prompt cache.
         </span>

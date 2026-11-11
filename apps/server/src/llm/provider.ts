@@ -83,6 +83,12 @@ export interface LLMProvider {
   /** Write a branch's result report from its full context; must not change the node's conversation. */
   draftResult(ctx: ReplyContext, signal: AbortSignal): Promise<BranchResult>;
   /**
+   * Write a compact of the node's conversation (`ctx.message` is the instruction) for a branch that
+   * starts from it. Like askNode, it must not change the node's conversation, and should run the
+   * way the node's replies do, so it reads the node's prompt cache.
+   */
+  compact(ctx: ReplyContext, signal: AbortSignal): Promise<string>;
+  /**
    * A short title (3–7 words) for a conversation, from its first message and the start of the
    * reply. Runs on a small, cheap model and leaves the node's conversation untouched.
    */

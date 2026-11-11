@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { type DagNode, type FileChange, type FolderGit, MANAGED_DIR, type MergePreview, type NodeChanges, type NodeFiles, type Project } from '@harness/shared';
+import { type DagNode, type FileChange, type FolderGit, type GitBranches, MANAGED_DIR, type MergePreview, type NodeChanges, type NodeFiles, type Project } from '@harness/shared';
 import type { GraphReader } from './dag/graph.ts';
 import { KeyedQueue, commitArgs, git, gitBytes, identityArgs, runGit } from './git.ts';
 import type { Workspaces } from './workspace.ts';
@@ -37,8 +37,9 @@ export interface NodeWorktree {
   merged: { title: string; files: string[] }[];
   conflicts: string[];
   /**
-   * A branch whose copy started from the project's checked-out branch instead of its parent's
-   * files (`DagNode.filesFromProject`): that branch's name (or the commit, on a detached HEAD).
+   * A branch whose copy started from the project's branch (its target branch, else the checked-out
+   * one) instead of its parent's files (`DagNode.filesFromProject`): that branch's name (or the
+   * commit, on a detached HEAD).
    */
   fromProject: string | null;
 }
@@ -127,13 +128,14 @@ export class Worktrees {
         return result(false);
       }
 
-      // A branch asked to start from the project's files: the user's current commit.
+      // A branch asked to start from the project's files: the tip of its target branch (else the
+      // user's current commit) as it is now.
       if (node.filesFromProject && node.parentIds.length === 1) {
-        const head = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
-        const commit = await this.userCommit(repo.top);
+        const name = await this.targetName(repo.top, node.targetBranch);
+        const commit = await this.targetCommit(repo.top, node.targetBranch);
         await git(repo.top, ['worktree', 'prune']);
         await git(repo.top, ['worktree', 'add', '-b', branch, worktree, commit]);
-        return result(true, [], [], head || commit.slice(0, 10));
+        return result(true, [], [], name || commit.slice(0, 10));
       }
 
       // The merged nodes' copies may hold changes the user made there (in VS Code) since their last reply.
@@ -142,7 +144,9 @@ export class Worktrees {
       }
       // Named like the merged results in the prompt (by the title they were created with).
       const starts = node.parentIds.map((id) => ({ title: graph.node(id).promptTitle, ref: this.startOf(graph, id) }));
-      const first = starts.find((s) => s.ref)?.ref ?? (await this.userCommit(repo.top));
+      // A root (or a line with no branch yet) starts from its target branch's tip as it is now, so
+      // whatever was applied to that branch before is in it.
+      const first = starts.find((s) => s.ref)?.ref ?? (await this.targetCommit(repo.top, node.targetBranch));
       await git(repo.top, ['worktree', 'prune']); // forget worktrees whose folders were deleted by hand
       await git(repo.top, ['worktree', 'add', '-b', branch, worktree, first]);
 
@@ -264,7 +268,7 @@ export class Worktrees {
     const branch = Worktrees.branchOf(node.id);
     if (await this.branchExists(repo.top, branch)) return { kind: 'branch', repo, dir: null, ref: `refs/heads/${branch}` };
     const start = node.filesFromProject ? null : this.startOf(graph, node.id);
-    return { kind: 'start', repo, dir: null, ref: start ? `refs/heads/${start}` : await this.userCommit(repo.top) };
+    return { kind: 'start', repo, dir: null, ref: start ? `refs/heads/${start}` : await this.targetCommit(repo.top, node.targetBranch) };
   }
 
   /**
@@ -320,18 +324,19 @@ export class Worktrees {
   }
 
   /**
-   * What applying the node's branch would bring into the user's current branch: changed files, the
-   * diff, and conflicts. `null` when the node has no branch. Edits in its copy that aren't committed
-   * yet count too (a reply still running, or the user's edits in VS Code): Apply commits them first.
+   * What applying the node's branch would bring into its target branch (`targetBranch`, else the
+   * user's current branch): changed files, the diff, and conflicts. `null` when the node has no
+   * branch. Edits in its copy that aren't committed yet count too (a reply still running, or the
+   * user's edits in VS Code): Apply commits them first.
    */
-  changes(project: Project, nodeId: string): Promise<NodeChanges | null> {
+  changes(project: Project, nodeId: string, targetBranch: string | null = null): Promise<NodeChanges | null> {
     const folder = this.workspaces.folderOf(project);
     const branch = Worktrees.branchOf(nodeId);
     return this.queue.run(folder, async () => {
       const repo = await this.findRepo(folder);
       if (!repo || !(await this.branchExists(repo.top, branch))) return null;
-      const target = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim() || null;
-      const base = await this.userCommit(repo.top);
+      const target = await this.targetName(repo.top, targetBranch);
+      const base = await this.targetCommit(repo.top, targetBranch);
       const head = await this.onDisk(this.worktreeOf(project, nodeId), branch);
       const range = `${base}...${head}`;
       const files = parseNumstat(
@@ -357,34 +362,117 @@ export class Worktrees {
     });
   }
 
-  /** How many files the node's branch changes compared with the user's branch (null: no branch). */
-  async countChanges(project: Project, nodeId: string): Promise<number | null> {
-    const changes = await this.changes(project, nodeId);
+  /** How many files the node's branch changes compared with its target branch (null: no branch). */
+  async countChanges(project: Project, nodeId: string, targetBranch: string | null = null): Promise<number | null> {
+    const changes = await this.changes(project, nodeId, targetBranch);
     return changes ? changes.files.length : null;
   }
 
   /**
-   * Merge the node's branch into the user's current branch, in the project folder. Refuses on a
-   * detached HEAD; on conflicts it aborts, so the user's folder is left as it was.
+   * Merge the node's branch into its target branch (`targetBranch`, else the project folder's
+   * current branch). Where that branch is checked out (the project folder, or another worktree of
+   * the user's) the merge runs there; on conflicts it aborts, so the folder is left as it was. A
+   * branch that isn't checked out anywhere gets the merge commit directly (`git merge-tree`), so
+   * no folder changes. Refuses on a detached HEAD.
    */
-  apply(project: Project, nodeId: string, title: string): Promise<{ ok: true } | { ok: false; error: string; conflicts: string[] }> {
+  apply(project: Project, nodeId: string, title: string, targetBranch: string | null = null): Promise<ApplyOutcome> {
     const folder = this.workspaces.folderOf(project);
     const branch = Worktrees.branchOf(nodeId);
     return this.queue.run(folder, async () => {
       const repo = await this.requireRepo(folder);
       if (!(await this.branchExists(repo.top, branch))) return { ok: false, error: 'This node has no file changes.', conflicts: [] };
-      const target = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
-      if (!target) return { ok: false, error: 'The project folder is not on a branch (detached HEAD). Check out a branch first.', conflicts: [] };
-      // The user's own identity and signing settings (their branch, their commit).
-      const out = await runGit(repo.top, [...(await identityArgs(repo.top)), 'merge', '--no-ff', '--no-edit', '-m', `Apply Harness branch "${title}" (${branch})`, branch]);
-      if (out.code === 0) return { ok: true };
-      const conflicts = (await git(repo.top, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
-      if (conflicts.length > 0) {
-        await runGit(repo.top, ['merge', '--abort']);
-        return { ok: false, error: `Applying would conflict with your changes in ${conflicts.join(', ')}. Nothing was changed.`, conflicts };
+      const message = `Apply Harness branch "${title}" (${branch})`;
+      if (targetBranch === null) {
+        const head = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+        if (!head) return { ok: false, error: 'The project folder is not on a branch (detached HEAD). Check out a branch first.', conflicts: [] };
+        return this.mergeIn(repo.top, branch, message);
       }
-      const detail = (out.stderr || out.stdout).trim().split('\n').filter(Boolean).slice(0, 6).join('\n');
-      return { ok: false, error: `Git could not apply the changes:\n${detail}`, conflicts: [] };
+      if (!(await this.branchExists(repo.top, targetBranch))) {
+        return { ok: false, error: `The branch "${targetBranch}" no longer exists in the project's repository.`, conflicts: [] };
+      }
+      const checkedOut = await this.checkedOutAt(repo.top, targetBranch);
+      if (checkedOut) return this.mergeIn(checkedOut, branch, message);
+
+      // Not checked out anywhere: build the merge commit without a folder and move the branch to it.
+      const ref = `refs/heads/${targetBranch}`;
+      const old = (await git(repo.top, ['rev-parse', ref])).trim();
+      if ((await runGit(repo.top, ['merge-base', '--is-ancestor', branch, old])).code === 0) return { ok: true };
+      const out = await runGit(repo.top, ['merge-tree', '--write-tree', '--name-only', '--no-messages', old, branch]);
+      const [tree, ...files] = out.stdout.split('\n').filter(Boolean);
+      if (out.code === 1) {
+        return { ok: false, error: `Applying would conflict with "${targetBranch}" in ${files.join(', ')}. Nothing was changed.`, conflicts: files };
+      }
+      if (out.code !== 0) return { ok: false, error: `Git could not apply the changes:\n${out.stderr.trim()}`, conflicts: [] };
+      // The user's own identity (their branch, their commit).
+      const commit = (await git(repo.top, [...(await identityArgs(repo.top)), 'commit-tree', tree, '-p', old, '-p', branch, '-m', message])).trim();
+      await git(repo.top, ['update-ref', '-m', message, ref, commit, old]);
+      return { ok: true };
+    });
+  }
+
+  /** `git merge` of a Harness branch in a checked-out folder; on conflicts it aborts and reports them. */
+  private async mergeIn(cwd: string, branch: string, message: string): Promise<ApplyOutcome> {
+    // The user's own identity and signing settings (their branch, their commit).
+    const out = await runGit(cwd, [...(await identityArgs(cwd)), 'merge', '--no-ff', '--no-edit', '-m', message, branch]);
+    if (out.code === 0) return { ok: true };
+    const conflicts = (await git(cwd, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
+    if (conflicts.length > 0) {
+      await runGit(cwd, ['merge', '--abort']);
+      return { ok: false, error: `Applying would conflict with your changes in ${conflicts.join(', ')}. Nothing was changed.`, conflicts };
+    }
+    const detail = (out.stderr || out.stdout).trim().split('\n').filter(Boolean).slice(0, 6).join('\n');
+    return { ok: false, error: `Git could not apply the changes:\n${detail}`, conflicts: [] };
+  }
+
+  /** The folder (a worktree of the repository) where the branch is checked out, if any. */
+  private async checkedOutAt(top: string, branch: string): Promise<string | null> {
+    const list = await git(top, ['worktree', 'list', '--porcelain']);
+    for (const block of list.split(/\r?\n\s*\r?\n/)) {
+      const lines = block.split(/\r?\n/);
+      const at = lines.find((l) => l.startsWith('worktree '))?.slice('worktree '.length);
+      if (at && lines.includes(`branch refs/heads/${branch}`)) return path.resolve(at);
+    }
+    return null;
+  }
+
+  /**
+   * The repository's own branches a root can work against (Harness's `harness/…` branches left
+   * out), most recently committed first, and the one the project folder has checked out.
+   */
+  branches(project: Project): Promise<GitBranches> {
+    const folder = this.workspaces.prepare(project);
+    return this.queue.run(folder, async () => {
+      const repo = await this.findRepo(folder);
+      if (!repo) return { current: null, branches: [] };
+      const current = (await runGit(repo.top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim() || null;
+      const all = await git(repo.top, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads/']);
+      const branches = all.split('\n').map((b) => b.trim()).filter((b) => b && !isHarnessBranch(b));
+      return { current, branches };
+    });
+  }
+
+  /**
+   * Make sure the branch exists for a new root: an existing branch is used as it is; a new one is
+   * created at `from` (a branch), else at the project folder's current commit. Returns its name.
+   */
+  createBranch(project: Project, name: string, from: string | null): Promise<string> {
+    const folder = this.workspaces.prepare(project);
+    return this.queue.run(folder, async () => {
+      const repo = (await this.findRepo(folder)) ?? (await this.initRepo(folder));
+      if (isHarnessBranch(name)) throw new BranchError(`Branches starting with "${BRANCH_PREFIX}/" belong to Harness's nodes. Pick another name.`);
+      if (name.startsWith('-') || name.includes('@{') || (await runGit(repo.top, ['check-ref-format', '--branch', name])).code !== 0) {
+        throw new BranchError(`"${name}" is not a valid git branch name.`);
+      }
+      if (await this.branchExists(repo.top, name)) return name;
+      let start: string;
+      if (from) {
+        if (!(await this.branchExists(repo.top, from))) throw new BranchError(`There is no branch "${from}" to start "${name}" from.`);
+        start = `refs/heads/${from}`;
+      } else {
+        start = await this.userCommit(repo.top);
+      }
+      await git(repo.top, ['branch', name, start]);
+      return name;
     });
   }
 
@@ -451,6 +539,19 @@ export class Worktrees {
     return (await runGit(top, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
   }
 
+  /** The branch a node works against: its `targetBranch`, else the checked-out one (null: detached HEAD). */
+  private async targetName(top: string, targetBranch: string | null): Promise<string | null> {
+    return targetBranch ?? ((await runGit(top, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim() || null);
+  }
+
+  /** The tip of the node's target branch now; without one, the user's current commit. */
+  private async targetCommit(top: string, targetBranch: string | null): Promise<string> {
+    if (targetBranch === null) return this.userCommit(top);
+    const out = await runGit(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${targetBranch}^{commit}`]);
+    if (out.code !== 0) throw new Error(`The branch "${targetBranch}" no longer exists in the project's repository.`);
+    return out.stdout.trim();
+  }
+
   /** The user's current commit, or for a repository without commits, an empty commit to start from. */
   private async userCommit(top: string): Promise<string> {
     const head = await runGit(top, ['rev-parse', '--verify', '--quiet', 'HEAD']);
@@ -487,6 +588,16 @@ export class Worktrees {
     if (rel && (await runGit(top, ['check-ignore', '--quiet', '--', rel])).code === 0) return null;
     return { top, rel };
   }
+}
+
+export type ApplyOutcome = { ok: true } | { ok: false; error: string; conflicts: string[] };
+
+/** A branch name the user can't use for a root (invalid, or one of Harness's own); shown as is. */
+export class BranchError extends Error {}
+
+/** One of Harness's own node branches (`harness/<id>`). */
+export function isHarnessBranch(name: string): boolean {
+  return name.startsWith(`${BRANCH_PREFIX}/`);
 }
 
 /** Folders before files, then by name (case-insensitive), level by level: the order of a file tree. */

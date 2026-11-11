@@ -36,7 +36,7 @@ export function foldContents(nodes: Link[], rootId: string): string[] {
 
 /** Done, and nothing on it waits for the user. */
 function settled(n: NodeSummary): boolean {
-  return n.status === 'finished' && !n.running && !n.merge && n.unread === 0
+  return n.status === 'finished' && !n.running && !n.merge && !n.compacting && n.unread === 0
 }
 
 /** Every node that can be folded now, with the nodes the fold would hide. */
@@ -45,7 +45,7 @@ export function foldableNodes(nodes: NodeSummary[]): Map<string, string[]> {
   const result = new Map<string, string[]>()
   for (const n of nodes) {
     // The folded card stays on screen, so only what it hides has to be read.
-    if (n.status !== 'finished' || n.running || n.merge) continue
+    if (n.status !== 'finished' || n.running || n.merge || n.compacting) continue
     const contents = foldContents(nodes, n.id)
     if (contents.length > 0 && contents.every((id) => settled(byId.get(id)!))) result.set(n.id, contents)
   }

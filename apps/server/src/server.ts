@@ -9,6 +9,7 @@ import { Repository } from './db/repository.ts';
 import { providerFromEnv } from './llm/index.ts';
 import { DEFAULT_ASK_LIMIT } from './runs.ts';
 import { staticFiles } from './static.ts';
+import { UpdateChecker } from './system/update-check.ts';
 import type { pickFolder as PickFolder } from './system/folder-picker.ts';
 import { Workspaces } from './workspace.ts';
 
@@ -25,6 +26,11 @@ export interface ServerOptions {
   webDir?: string;
   /** Show a folder dialog (default: the OS's own, through a helper process; Electron passes its own). */
   pickFolder?: typeof PickFolder;
+  /**
+   * The npm package's version (`npx research-harness`): then npm is asked for a newer one every 30
+   * minutes and the UI says when there is one. Omitted (dev, desktop app): no check.
+   */
+  version?: string;
 }
 
 export interface RunningServer {
@@ -59,6 +65,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   // The port may be chosen by the OS, and the model's CLI needs to know it for the harness MCP
   // server, so the URL is read from the server once it listens.
   const state = { url: '' };
+  // HARNESS_UPDATE_CHECK=0 turns the npm check off.
+  const updates = options.version && process.env.HARNESS_UPDATE_CHECK !== '0' ? new UpdateChecker(options.version) : undefined;
+  updates?.start();
   const api = createApp({
     repo,
     llm,
@@ -69,6 +78,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     },
     askLimit,
     pickFolder: options.pickFolder,
+    updates,
   });
   let app: Hono = api;
   if (options.webDir) {
@@ -94,6 +104,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     url: state.url,
     dbFile,
     close: async () => {
+      updates?.stop();
       llm.dispose?.();
       if ('closeAllConnections' in server) server.closeAllConnections(); // open event streams would keep it alive
       await new Promise<void>((resolve) => server.close(() => resolve()));

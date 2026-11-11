@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron';
 import { startServer, type RunningServer } from '../../server/src/server.ts';
+import packageJson from '../package.json' with { type: 'json' };
 import { DEFAULT_PORT, dataDir } from './config.ts';
 
 /**
@@ -59,7 +60,7 @@ async function main() {
 }
 
 async function listen(): Promise<RunningServer> {
-  const options = { dataDir: data, dbFile: process.env.HARNESS_DB, hostname: '127.0.0.1', webDir, pickFolder };
+  const options = { dataDir: data, dbFile: process.env.HARNESS_DB, hostname: '127.0.0.1', webDir, pickFolder, version: packageJson.version };
   const port = Number(process.env.HARNESS_SERVER_PORT ?? DEFAULT_PORT);
   try {
     return await startServer({ ...options, port });

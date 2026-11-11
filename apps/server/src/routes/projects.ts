@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { zValidator } from '@hono/zod-validator';
 import {
   type FolderGit,
+  type GitBranches,
   type GraphResponse,
   type MergePreview,
   type ProjectSummary,
@@ -16,10 +17,12 @@ import {
   defaultMergeTitle,
   mergeModelSettings,
   mergeSchema,
+  newRootSchema,
   unreadCount,
 } from '@harness/shared';
 import { Hono } from 'hono';
 import type { RouteDeps } from '../app.ts';
+import { BranchError } from '../worktrees.ts';
 import { HttpError, notFound } from './errors.ts';
 
 export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, loadModels, checkModel }: RouteDeps) {
@@ -167,6 +170,7 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
             : 0,
           forkedAtEnd: forkPoints.includes(messages.length),
           merge: runs.mergeState(node, messages.length),
+          compacting: runs.compactState(node),
         };
       });
       return c.json<GraphResponse>({ project, nodes, deleted: repo.listDeleted(project.id), usage: runs.usage() });
@@ -202,21 +206,42 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       const { mixedModels: _mixed, ...rule } = mergeModelSettings(parents, { model: catalog.defaultModel, effort: catalog.defaultEffort });
       const settings = { model: model === undefined ? rule.model : model, effort: effort === undefined ? rule.effort : effort };
       if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
+      // Its files start from the first merged node's, so it works against that node's branch too.
+      const common = { projectId, parentIds, mergePrompt: prompt, targetBranch: parents[0].targetBranch, ...settings };
       // A title the user wrote is final; the default one may be replaced by a model-written title.
       const node = title
-        ? repo.createNode({ projectId, title, parentIds, titleSource: 'user', mergePrompt: prompt, ...settings })
-        : repo.createNode({ projectId, title: defaultMergeTitle(parents.map((p) => p.title)), parentIds, mergePrompt: prompt, ...settings });
+        ? repo.createNode({ ...common, title, titleSource: 'user' })
+        : repo.createNode({ ...common, title: defaultMergeTitle(parents.map((p) => p.title)) });
       runs.startMerge(node.id);
       return c.json(node, 201);
     })
 
-    // Another root in the project: an empty node with no parents, sharing the project's folder but
-    // no context. It takes the first root's model and effort (the project's default, in effect).
-    .post('/:projectId/roots', (c) => {
+    // The git branches a new root can work against (Harness's own node branches left out).
+    .get('/:projectId/branches', async (c) => {
       const project = repo.getProject(c.req.param('projectId'));
       if (!project) throw notFound('Project');
+      return c.json<GitBranches>(await worktrees.branches(project));
+    })
+
+    // Another root in the project: an empty node with no parents, sharing the project's folder but
+    // no context. It takes the first root's model and effort (the project's default, in effect).
+    // `branch`: the git branch it and its descendants work against (created from `from` if new);
+    // its files start from that branch's tip at its first message.
+    .post('/:projectId/roots', zValidator('json', newRootSchema), async (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      const { branch, from } = c.req.valid('json');
+      let targetBranch: string | null = null;
+      if (branch) {
+        try {
+          targetBranch = await worktrees.createBranch(project, branch, from ?? null);
+        } catch (err) {
+          if (err instanceof BranchError) throw new HttpError(400, err.message);
+          throw err;
+        }
+      }
       const first = repo.listNodes(project.id).find((n) => n.parentIds.length === 0);
-      const root = repo.createNode({ projectId: project.id, title: 'New thread', parentIds: [], model: first?.model ?? null, effort: first?.effort ?? null });
+      const root = repo.createNode({ projectId: project.id, title: 'New thread', parentIds: [], model: first?.model ?? null, effort: first?.effort ?? null, targetBranch });
       return c.json(root, 201);
     })
 

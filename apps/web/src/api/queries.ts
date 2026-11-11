@@ -4,11 +4,13 @@ import type {
   FileContent,
   FolderGit,
   ForkBody,
+  GitBranches,
   GraphResponse,
   MergeBody,
   MergePreview,
   ModelSettingsBody,
   ModelsResponse,
+  NewRootBody,
   NodeChanges,
   NodeDetail,
   NodeFiles,
@@ -27,6 +29,7 @@ export const keys = {
   models: ['models'] as const,
   changes: (nodeId: string) => ['changes', nodeId] as const,
   files: (nodeId: string) => ['files', nodeId] as const,
+  branches: (projectId: string) => ['branches', projectId] as const,
 }
 
 /**
@@ -114,7 +117,7 @@ export function useGraph(projectId: string) {
     // Also while a model-written title is on its way, so it shows up without a reload, and while a
     // merge is writing its results.
     refetchInterval: (query) =>
-      (query.state.data?.nodes.some((n) => n.running || n.titlePending || n.merge?.running) ? 1500 : false),
+      (query.state.data?.nodes.some((n) => n.running || n.titlePending || n.merge?.running || n.compacting?.running) ? 1500 : false),
   })
 }
 
@@ -127,7 +130,7 @@ export function useNodeDetail(nodeId: string, enabled = true) {
     // staleTime would skip that): the opening scroll position depends on what has been read.
     refetchOnMount: 'always',
     // A merge writing its results starts its reply when they're done: keep checking so the chat sees it.
-    refetchInterval: (query) => (query.state.data?.titlePending || query.state.data?.merge?.running ? 1500 : false),
+    refetchInterval: (query) => (query.state.data?.titlePending || query.state.data?.merge?.running || query.state.data?.compacting?.running ? 1500 : false),
   })
 }
 
@@ -337,12 +340,25 @@ export function useRestoreNode() {
   })
 }
 
-/** Another root in the project: an empty node with no parents. */
+/** The project's git branches a new root can work against (fetched fresh each time the dialog opens). */
+export function useBranches(projectId: string) {
+  return useQuery({
+    queryKey: keys.branches(projectId),
+    queryFn: ({ signal }) => api.get<GitBranches>(`/projects/${projectId}/branches`, signal),
+    staleTime: 0,
+  })
+}
+
+/** Another root in the project: an empty node with no parents, working against `branch` if given. */
 export function useNewRoot(projectId: string) {
   const refresh = useRefreshAll()
+  const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post<DagNode>(`/projects/${projectId}/roots`),
-    onSuccess: refresh,
+    mutationFn: (body: NewRootBody) => api.post<DagNode>(`/projects/${projectId}/roots`, body),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: keys.branches(projectId) })
+      await refresh()
+    },
   })
 }
 

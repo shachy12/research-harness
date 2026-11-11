@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
-  Attachment, BranchResult, ChatStreamEvent, DagNode, FileContent, FolderGit, GraphResponse, MergePreview, ModelsResponse, NodeChanges,
+  Attachment, BranchResult, ChatStreamEvent, DagNode, FileContent, FolderGit, GitBranches, GraphResponse, MergePreview, ModelsResponse, NodeChanges,
   NodeDetail, NodeFiles, Project, ProjectSummary,
 } from '@harness/shared';
 import { MANAGED_DIR } from '@harness/shared';
@@ -87,6 +87,17 @@ class FakeProvider implements LLMProvider {
     return { findings: 'drafted', evidence: '', openQuestions: '', confidence: 'medium' };
   }
 
+  compacted: ReplyContext[] = [];
+  /** While set, compacts wait until `releaseCompact` is called (to test sharing one). */
+  compactGate: Promise<void> | null = null;
+
+  async compact(ctx: ReplyContext, signal: AbortSignal): Promise<string> {
+    this.compacted.push(ctx);
+    if (this.compactGate) await this.compactGate;
+    if (signal.aborted) throw new Error('aborted');
+    return `compact of ${ctx.nodeId} (${ctx.request.turns.length} turns)`;
+  }
+
   asked: ReplyContext[] = [];
 
   async askNode(ctx: ReplyContext) {
@@ -132,11 +143,11 @@ async function chat(nodeId: string, content: string): Promise<ChatStreamEvent[]>
 
 const detail = async (nodeId: string) => (await call<NodeDetail>('GET', `/nodes/${nodeId}`)).data;
 
-/** Wait until the node's background reply (and for a merge node, the drafting of its results) has finished. */
+/** Wait until the node's background reply (and the drafting of a merge's results or a branch's compact) has finished. */
 async function settle(nodeId: string) {
   const busy = async () => {
     const d = await detail(nodeId);
-    return d.running || d.merge?.running === true;
+    return d.running || d.merge?.running === true || d.compacting?.running === true;
   };
   for (let i = 0; i < 200 && (await busy()); i++) await new Promise((r) => setTimeout(r, 5));
 }
@@ -176,6 +187,11 @@ async function upload(name: string, text: string): Promise<{ status: number; dat
 describe('API', () => {
   it('reports health and the model label', async () => {
     expect((await call('GET', '/health')).data).toEqual({ ok: true, model: 'fake' });
+  });
+
+  it('reports no version to update from when not run as the npm package', async () => {
+    const { data } = await call('GET', '/version');
+    expect(data).toEqual({ current: null, latest: null, updateAvailable: false, checkedAt: null });
   });
 
   it('returns the project graph with the root node', async () => {
@@ -339,7 +355,7 @@ describe('API', () => {
     const d = await detail(merged.data.id);
     expect(d.merge).toBeNull();
     expect(d.node.mergeResults?.map((r) => [r.nodeId, r.upto, r.result.findings])).toEqual([[a.id, 2, 'drafted'], [b.id, 2, 'drafted']]);
-    expect(d.inherited.map((i) => (i.kind === 'result' ? `result:${i.nodeTitle}` : i.message.content))).toEqual([
+    expect(d.inherited.map((i) => (i.kind === 'result' ? `result:${i.nodeTitle}` : i.kind === 'message' ? i.message.content : 'compact'))).toEqual([
       'Scope it',
       'Hello there',
       'result:secret transcript of A',
@@ -406,7 +422,7 @@ describe('API', () => {
     const merged = (await call<DagNode>('POST', '/projects/default/merge', { parentIds: [rootId, a.id], prompt: 'Go' })).data;
     await settle(merged.id);
     const d = await detail(merged.id);
-    expect(d.inherited.map((i) => (i.kind === 'result' ? `result:${i.nodeTitle}` : i.message.content))).toEqual([
+    expect(d.inherited.map((i) => (i.kind === 'result' ? `result:${i.nodeTitle}` : i.kind === 'message' ? i.message.content : 'compact'))).toEqual([
       'Scope it',
       'Hello there',
       'result:Main thread',
@@ -515,6 +531,88 @@ describe('API', () => {
     await chat(second.id, 'A separate question');
     expect(llm.contexts.at(-1)!.session).toMatchObject({ mode: 'new', transcript: [] });
     expect(llm.requests.at(-1)!.turns.map((t) => t.content)).toEqual(['A separate question']);
+  });
+
+  describe('compact forks', () => {
+    it('writes one compact for all the compact branches of a fork, and starts them from it', async () => {
+      await chat(rootId, 'Scope it');
+      let release = () => {};
+      llm.compactGate = new Promise<void>((resolve) => { release = resolve; });
+      const { data: kids } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, {
+        branches: [{ prompt: 'A', compact: true }, { prompt: 'B', compact: true }, { prompt: 'C' }],
+      });
+      const [a, b, c] = kids;
+      expect(a).toMatchObject({ compact: true, compactText: null });
+      expect(c.compact).toBe(false);
+      // Both compact branches wait for the same compact; their first messages are already saved.
+      const waiting = await detail(a.id);
+      expect(waiting.compacting).toMatchObject({ running: true, activity: 'Writing the compact' });
+      expect(waiting.messages.map((m) => m.content)).toEqual(['A']);
+      const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+      expect(graph.nodes.find((n) => n.id === b.id)!.compacting?.running).toBe(true);
+      expect((await call('POST', `/nodes/${a.id}/messages`, { content: 'too early' })).status).toBe(409);
+      release();
+      for (const k of kids) await settle(k.id);
+
+      expect(llm.compacted).toHaveLength(1);
+      const ctx = llm.compacted[0];
+      expect(ctx.nodeId).toBe(rootId);
+      expect(ctx.request.turns.map((t) => t.content).slice(0, 2)).toEqual(['Scope it', 'Hello there']);
+      expect(ctx.message).toContain('Write that compact now');
+
+      for (const k of [a, b]) {
+        const d = await detail(k.id);
+        expect(d.compacting).toBeNull();
+        expect(d.node.compactText).toBe(`compact of ${rootId} (3 turns)`);
+        expect(d.inherited).toEqual([{ kind: 'compact', nodeId: rootId, nodeTitle: 'Main thread', text: d.node.compactText }]);
+        expect(d.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      }
+      // A compact branch starts a session of its own, with the compact in front of its message.
+      const first = llm.contexts.find((x) => x.nodeId === a.id)!;
+      expect(first.session).toMatchObject({ mode: 'new', sessionId: null, transcript: [] });
+      expect(first.session.preamble).toContain(`starts from a compact of the conversation "Main thread" (node ${rootId})`);
+      expect(first.session.preamble).toContain(`compact of ${rootId}`);
+      const aRequest = llm.contexts.find((x) => x.nodeId === a.id)!.request;
+      expect(aRequest.turns.map((t) => t.role)).toEqual(['user', 'user']); // the compact, then "A"; not the root's conversation
+      // The normal branch inherits everything, as before.
+      expect((await detail(c.id)).inherited.map((i) => i.kind)).toEqual(['message', 'message']);
+
+      // Another compact fork at the same point reuses it; after the root goes on, a new one is written.
+      const { data: [again] } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, { branches: [{ prompt: 'E', compact: true }] });
+      await settle(again.id);
+      expect(llm.compacted).toHaveLength(1);
+      expect((await detail(again.id)).node.compactText).toBe(`compact of ${rootId} (3 turns)`);
+      await chat(rootId, 'More');
+      const { data: [later] } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, { branches: [{ prompt: 'F', compact: true }] });
+      await settle(later.id);
+      expect(llm.compacted).toHaveLength(2);
+      expect((await detail(later.id)).node.compactText).toBe(`compact of ${rootId} (5 turns)`);
+
+      // Branches of a compact branch inherit the compact and its conversation.
+      const [grandchild] = await fork(a.id, ['Deeper']);
+      expect((await detail(grandchild.id)).inherited.map((i) => i.kind)).toEqual(['compact', 'message', 'message']);
+    });
+
+    it('a compact that fails stops with a reason, and Retry starts it again', async () => {
+      await chat(rootId, 'Scope it');
+      const failing = llm.compact.bind(llm);
+      llm.compact = async () => { throw new Error('boom'); };
+      const { data: [a] } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, { branches: [{ prompt: 'A', compact: true }] });
+      await settle(a.id);
+      expect((await detail(a.id)).compacting).toMatchObject({ running: false, error: expect.stringContaining('Could not write the compact') });
+      llm.compact = failing;
+      expect((await call('POST', `/nodes/${a.id}/retry`)).status).toBe(200);
+      await settle(a.id);
+      const d = await detail(a.id);
+      expect(d.compacting).toBeNull();
+      expect(d.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    });
+
+    it('refuses a compact of a node with no conversation', async () => {
+      const { status, data } = await call<{ error: string }>('POST', `/nodes/${rootId}/fork`, { branches: [{ prompt: 'A', compact: true }] });
+      expect(status).toBe(400);
+      expect(data.error).toContain('nothing to compact');
+    });
   });
 
   describe('harness MCP tools', () => {
@@ -1109,6 +1207,36 @@ describe('API', () => {
       expect((await call('POST', `/nodes/${rootId}/apply`)).status).toBe(200);
       expect(readFileSync(path.join(projectFolder(), 'notes.md'), 'utf8')).toContain('notes.md from');
       expect((await detail(rootId)).node.filesChanged).toBe(0);
+    });
+
+    it('adds a root on a git branch: it and its branches work against that branch', async () => {
+      llm.canEdit = true;
+      await chat(rootId, 'Start');
+      await idle(rootId); // the project folder is a repository now
+      const before = (await call<GitBranches>('GET', '/projects/default/branches')).data;
+      expect(before.current).toBeTruthy();
+      expect(before.branches).toEqual([before.current]); // the root's harness/… branch isn't listed
+
+      expect((await call('POST', '/projects/default/roots', { branch: 'bad name' })).status).toBe(400);
+      expect((await call('POST', '/projects/default/roots', { branch: 'x', from: 'missing' })).status).toBe(400);
+      const { status, data: second } = await call<DagNode>('POST', '/projects/default/roots', { branch: 'feature', from: before.current });
+      expect(status).toBe(201);
+      expect(second.targetBranch).toBe('feature');
+      expect((await call<GitBranches>('GET', '/projects/default/branches')).data.branches.sort()).toEqual([before.current!, 'feature'].sort());
+
+      await chat(second.id, 'Work [write f.md]');
+      await idle(second.id);
+      const { data: [kid] } = await call<DagNode[]>('POST', `/nodes/${second.id}/fork`, { branches: [{ prompt: 'More [write g.md]' }] });
+      await idle(kid.id);
+      expect(kid.targetBranch).toBe('feature');
+      const changes = (await call<NodeChanges>('GET', `/nodes/${kid.id}/changes`)).data;
+      expect(changes.target).toBe('feature');
+      expect(changes.files.map((f) => f.path).sort()).toEqual(['f.md', 'g.md']);
+      expect((await call('POST', `/nodes/${kid.id}/apply`)).status).toBe(200);
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: projectFolder(), encoding: 'utf8' });
+      expect(git('show', 'feature:g.md')).toContain('g.md from');
+      expect(existsSync(path.join(projectFolder(), 'g.md'))).toBe(false); // the checked-out branch is untouched
+      expect((await detail(kid.id)).node.filesChanged).toBe(0);
     });
 
     it('starts branches from the parent’s files and previews merges', async () => {

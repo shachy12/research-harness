@@ -250,6 +250,15 @@ export class ClaudeCodeProvider implements LLMProvider {
     return { answer: parsed.result ?? '', usage: parsed.usage ? toUsage(parsed.usage) : null };
   }
 
+  async compact(ctx: ReplyContext, signal: AbortSignal): Promise<string> {
+    // Run like an ask_node answer (a throwaway fork with the node's own model, effort and tool
+    // list), so it reads the node's cached conversation instead of paying for all of it again.
+    const { answer } = await this.askNode(ctx, signal);
+    const text = answer.trim();
+    if (!text) throw new Error('The model wrote an empty compact.');
+    return text;
+  }
+
   async suggestTitle({ prompt, reply, workDir }: { prompt: string; reply: string; workDir: string }, signal: AbortSignal): Promise<string> {
     // A small model, no tools, nothing saved: a fraction of a normal reply.
     const args = [

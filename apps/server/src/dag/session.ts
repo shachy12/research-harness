@@ -1,6 +1,6 @@
 import { type Segment, fullSegments, inheritedSegments, mergeBase } from './context.ts';
 import type { GraphReader } from './graph.ts';
-import { type ChatTurn, branchStartNote, resultsTurn, segmentTurns } from './prompt.ts';
+import { type ChatTurn, branchStartNote, compactTurn, resultsTurn, segmentTurns } from './prompt.ts';
 
 /**
  * How a session-based provider (Claude Code) should start this node's conversation.
@@ -43,6 +43,12 @@ export function planSession(graph: GraphReader, nodeId: string, { retry = false 
   if (earlier > 0) {
     const transcript = turnsOf(fullSegments(graph, nodeId));
     return { mode: 'new', sessionId: null, preamble: null, transcript: retry ? transcript.slice(0, -1) : transcript };
+  }
+
+  // A compact branch starts a session of its own: the compact (with the branch note) is all it gets.
+  if (node.compact) {
+    const compact = inheritedSegments(graph, nodeId).find((s) => s.kind === 'compact');
+    return { mode: 'new', sessionId: null, preamble: compact ? compactTurn(compact) : null, transcript: [] };
   }
 
   if (node.parentIds.length === 0) return { mode: 'new', sessionId: null, preamble: null, transcript: [] };
