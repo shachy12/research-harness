@@ -11,7 +11,8 @@ import {
   type UsageLimit,
   toolActivity,
 } from '@harness/shared';
-import { DRAFT_RESULT_INSTRUCTION, buildChatRequest, editNote, withAttachments } from './dag/prompt.ts';
+import { fullSegments } from './dag/context.ts';
+import { COMPACT_INSTRUCTION, DRAFT_RESULT_INSTRUCTION, SYSTEM_PROMPT, buildChatRequest, editNote, segmentTurns, withAttachments } from './dag/prompt.ts';
 import { type SessionPlan, planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
 import { type ProviderError, classifyError } from './llm/errors.ts';
@@ -97,6 +98,14 @@ export class RunManager {
   private readonly mergeErrors = new Map<string, string>();
   /** Result drafts running, by node, so two merges of the same node share one. */
   private readonly drafts = new Map<string, Promise<MergedResult>>();
+  /** Compact branches waiting for their compact, and why the last attempt failed (until retried). */
+  private readonly compactJobs = new Map<string, MergeJob>();
+  private readonly compactErrors = new Map<string, string>();
+  /**
+   * Compacts being written, by `<node id>:<message count>`: branches forked from the same point
+   * share one. `users`: branches still waiting for it (the last one to stop also stops it).
+   */
+  private readonly compactDrafts = new Map<string, { promise: Promise<string>; abort: AbortController; users: number }>();
   /** A node's endpoint on the harness MCP server (null: no MCP tools). */
   private readonly mcpUrl: (nodeId: string) => string | null;
   readonly askLimit: number;
@@ -116,9 +125,9 @@ export class RunManager {
     return this.runs.has(nodeId);
   }
 
-  /** A reply is running, or (a merge node) its results are being drafted. */
+  /** A reply is running, or its start is being prepared (a merge's results, a branch's compact). */
   isBusy(nodeId: string): boolean {
-    return this.runs.has(nodeId) || this.merges.has(nodeId);
+    return this.runs.has(nodeId) || this.merges.has(nodeId) || this.compactJobs.has(nodeId);
   }
 
   /**
@@ -243,6 +252,134 @@ export class RunManager {
     return draft;
   }
 
+  /**
+   * A compact branch waiting for its compact: being written, or stopped (the error says why; Retry
+   * starts it again). Null for other nodes and once it has its compact.
+   */
+  compactState(node: DagNode): MergeState | null {
+    const job = this.compactJobs.get(node.id);
+    if (job) return { running: true, startedAt: job.startedAt, activity: job.activity, error: null };
+    if (!node.compact || node.compactText !== null) return null;
+    return {
+      running: false,
+      startedAt: null,
+      activity: null,
+      error: this.compactErrors.get(node.id) ?? 'The compact stopped before it was written (was the app closed?).',
+    };
+  }
+
+  /**
+   * Get the compact a compact branch starts from (in the background), save it on the branch, then
+   * answer its first message (already saved). Branches forked from the same point share one
+   * compact, and one written before for that point is reused.
+   */
+  startCompact(nodeId: string): void {
+    const node = this.repo.getNode(nodeId);
+    if (!node) throw notFound('Node');
+    if (!node.compact || node.compactText !== null) throw conflict('This branch already has its compact.');
+    if (this.isBusy(nodeId)) throw conflict('Its compact is already being written.');
+    const job: MergeJob = { startedAt: new Date().toISOString(), activity: 'Writing the compact', abort: new AbortController() };
+    this.compactJobs.set(nodeId, job);
+    this.compactErrors.delete(nodeId);
+    void this.runCompact(node, job);
+  }
+
+  private async runCompact(node: DagNode, job: MergeJob): Promise<void> {
+    const signal = job.abort.signal;
+    try {
+      const parent = node.parentIds.length === 1 ? this.repo.getNode(node.parentIds[0]) : null;
+      if (!parent) throw new MergeError('The node it was forked from no longer exists, so there is nothing to compact.');
+      const text = await this.compactOf(node, parent, signal);
+      this.compactJobs.delete(node.id);
+      if (!this.repo.getNode(node.id)) return; // deleted meanwhile
+      this.repo.setCompactText(node.id, text);
+      const last = this.repo.listMessages(node.id).at(-1);
+      if (last?.role === 'user') this.answerLast(node.id);
+    } catch (err) {
+      const stopped = signal.aborted;
+      this.compactJobs.delete(node.id);
+      if (!this.repo.getNode(node.id)) return;
+      if (err instanceof MergeError) {
+        this.compactErrors.set(node.id, err.message);
+      } else if (stopped) {
+        this.compactErrors.set(node.id, 'The compact was stopped.');
+      } else {
+        console.error(`[compact] node ${node.id}:`, err);
+        const error = classifyError(err, this.limit?.resetsAt ?? null);
+        this.noteFailure(error);
+        this.compactErrors.set(node.id, `Could not write the compact: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * The compact of `parent` at the branch's fork point: one stored earlier, the one being written
+   * for another branch, or a new one. It runs on the parent's session at the fork point with the
+   * parent's own model and effort, so it reads the parent's prompt cache.
+   */
+  private compactOf(branch: DagNode, parent: DagNode, signal: AbortSignal): Promise<string> {
+    const graph = this.repo.snapshot(parent.projectId);
+    const upto = branch.forkPoint ?? graph.messages(parent.id).length;
+    const stored = this.repo.getCompact(parent.id, upto);
+    if (stored !== null) return Promise.resolve(stored);
+
+    const key = `${parent.id}:${upto}`;
+    let draft = this.compactDrafts.get(key);
+    if (!draft) {
+      const turns = fullSegments(graph, parent.id, upto).flatMap(segmentTurns);
+      if (!turns.some((t) => t.role === 'assistant')) {
+        return Promise.reject(new MergeError(`"${parent.title}" has no replies yet, so there is nothing to compact.`));
+      }
+      const ctx: ReplyContext = {
+        nodeId: parent.id,
+        workDir: this.workspaces.prepare(this.repo.getProject(parent.projectId)!),
+        request: { system: SYSTEM_PROMPT, turns: [...turns, { role: 'user', content: COMPACT_INSTRUCTION }] },
+        message: COMPACT_INSTRUCTION,
+        // The parent's session as it was at the fork (it goes on in a copy); without one, the transcript.
+        session: branch.forkSession
+          ? { mode: 'fork', sessionId: branch.forkSession, preamble: null, transcript: [] }
+          : { mode: 'new', sessionId: null, preamble: null, transcript: turns },
+        model: parent.model,
+        effort: parent.effort,
+        edit: null,
+        mcpUrl: this.mcpUrl(parent.id),
+      };
+      const abort = new AbortController();
+      const promise = this.llm
+        .compact(ctx, abort.signal)
+        .then((text) => {
+          this.repo.saveCompact(parent.id, upto, text);
+          return text;
+        })
+        .finally(() => this.compactDrafts.delete(key));
+      draft = { promise, abort, users: 0 };
+      this.compactDrafts.set(key, draft);
+    }
+    const shared = draft;
+    shared.users++;
+    return new Promise<string>((resolve, reject) => {
+      let waiting = true;
+      const done = () => {
+        if (!waiting) return false;
+        waiting = false;
+        shared.users--;
+        signal.removeEventListener('abort', onAbort);
+        return true;
+      };
+      // This branch stops waiting; the compact itself stops only once no branch waits for it.
+      const onAbort = () => {
+        if (!done()) return;
+        if (shared.users === 0) shared.abort.abort();
+        reject(new Error('The compact was stopped.'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      shared.promise.then(
+        (text) => done() && resolve(text),
+        (err: unknown) => done() && reject(err),
+      );
+    });
+  }
+
   /** When the node's reply started and what it is doing, or null if nothing is running. */
   status(nodeId: string): RunStatus | null {
     const run = this.runs.get(nodeId);
@@ -353,6 +490,12 @@ export class RunManager {
   retry(nodeId: string): void {
     const pending = this.repo.getNode(nodeId);
     if (pending?.mergePrompt != null && this.repo.listMessages(nodeId).length === 0) return this.startMerge(nodeId);
+    if (pending?.compact && pending.compactText === null && !this.isBusy(nodeId)) return this.startCompact(nodeId);
+    this.answerLast(nodeId);
+  }
+
+  /** Answer the node's last message, a saved user message that has no reply yet. */
+  private answerLast(nodeId: string): void {
     const node = this.requireWritable(nodeId);
     const graph = this.repo.snapshot(node.projectId);
     const last = graph.messages(nodeId).at(-1);
@@ -393,10 +536,11 @@ export class RunManager {
     return true;
   }
 
-  /** Stop a running reply (what arrived so far is kept), or a merge drafting its results. */
+  /** Stop a running reply (what arrived so far is kept), a merge drafting its results, or a compact. */
   stop(nodeId: string): void {
     this.runs.get(nodeId)?.abort.abort();
     this.merges.get(nodeId)?.abort.abort();
+    this.compactJobs.get(nodeId)?.abort.abort();
   }
 
   private requireWritable(nodeId: string): DagNode {
@@ -407,6 +551,8 @@ export class RunManager {
     if (node.mergePrompt !== null && node.mergeResults === null) {
       throw conflict('This merge has not finished writing its results. Retry it first.');
     }
+    if (this.compactJobs.has(nodeId)) throw conflict('This branch is still waiting for its compact; it starts on its own once it is written.');
+    if (node.compact && node.compactText === null) throw conflict('This branch has no compact yet. Retry it first.');
     return node;
   }
 
@@ -463,7 +609,7 @@ export class RunManager {
     try {
       const summary = userMessage.split('\n')[0].slice(0, 72);
       await this.worktrees.commit(project, nodeId, `${node.title}: ${summary}`);
-      this.repo.setGitInfo(nodeId, node.gitBranch, await this.worktrees.countChanges(project, nodeId));
+      this.repo.setGitInfo(nodeId, node.gitBranch, await this.worktrees.countChanges(project, nodeId, node.targetBranch));
     } catch (err) {
       console.error(`[git] node ${nodeId}:`, err);
     }

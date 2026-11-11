@@ -41,6 +41,20 @@ export function resultsTurn(seg: Extract<Segment, { kind: 'results' }>): string 
   ].join('\n\n');
 }
 
+/**
+ * Where a compact branch starts: the compact stands in for its parent's whole conversation, which
+ * the model can still ask (ask_node) for anything the compact leaves out.
+ */
+export function compactTurn(seg: Extract<Segment, { kind: 'compact' }>): string {
+  const from = seg.source ? `the conversation "${seg.source.promptTitle}" (node ${seg.source.id})` : 'the conversation it was forked from';
+  const ask = seg.source ? ' If you need details it leaves out (exact numbers, quotes, reasoning, sources), ask that node with the ask_node tool.' : '';
+  return [
+    `[A new branch starts here: "${seg.node.promptTitle}". Instead of the earlier conversation, it starts from a compact of ${from}: a summary written in its place. That conversation itself is not in your context.${ask}]`,
+    seg.text,
+    '[End of the compact. The branch explores the sub-question below using it as context. Stay focused on it; the findings will be summarized and merged back later.]',
+  ].join('\n\n');
+}
+
 /** Which conversations the merge left out, by node id, so the model can ask them (ask_node tool). */
 function skippedNote(nodes: { id: string; promptTitle: string }[]): string {
   const list = nodes.map((n) => `- "${n.promptTitle}" (node ${n.id})`).join('\n');
@@ -127,6 +141,8 @@ export function segmentTurns(seg: Segment): ChatTurn[] {
       return [{ role: 'user', content: branchStartNote(seg.node.promptTitle) }];
     case 'results':
       return [{ role: 'user', content: resultsTurn(seg) }];
+    case 'compact':
+      return [{ role: 'user', content: compactTurn(seg) }];
   }
 }
 
@@ -141,7 +157,16 @@ export function buildChatRequest(graph: GraphReader, nodeId: string, extraTurns:
   return { system: SYSTEM_PROMPT, turns: [...turns, ...extraTurns] };
 }
 
-export const DRAFT_RESULT_INSTRUCTION = `[This conversation is being merged with others into a new node. Write its result report: only this report goes into the merge, not the conversation.
+export const COMPACT_INSTRUCTION = `[A new branch is being forked from this conversation, and it will start from a compact of it instead of the whole conversation. Write that compact now: a self-contained summary that replaces this conversation for the new branch, which will see only what you write.
+Keep everything a continuation needs, as briefly as possible:
+- the goal of the work and the context the user gave
+- what was established: findings, decisions and conclusions, with the specific numbers, names and definitions
+- sources consulted (names and links)
+- files read, created or changed, with their paths and current state
+- open questions and the next steps that were planned
+Use only what this conversation established. Do not use any tools. Reply with the compact only, in Markdown, with no preamble.]`;
+
+export const DRAFT_RESULT_INSTRUCTION =`[This conversation is being merged with others into a new node. Write its result report: only this report goes into the merge, not the conversation.
 Use only what this conversation established.
 - findings: the key conclusions, self-contained and specific
 - evidence: the sources, data or reasoning that support them (keep source names and links)

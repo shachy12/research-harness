@@ -90,7 +90,7 @@ async function main() {
     return;
   }
 
-  const options = { dataDir: data, dbFile, hostname: '127.0.0.1', webDir };
+  const options = { dataDir: data, dbFile, hostname: '127.0.0.1', webDir, version: packageJson.version };
   let server: RunningServer;
   try {
     server = await startServer({ ...options, port });

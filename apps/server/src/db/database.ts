@@ -124,6 +124,23 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE nodes ADD COLUMN deleted_at TEXT;
   ALTER TABLE nodes ADD COLUMN deleted_links TEXT;
   `,
+  // 14: the git branch a node works against (Apply target, and where a root's files start). NULL:
+  // the project folder's checked-out branch, as every node did until now.
+  `ALTER TABLE nodes ADD COLUMN target_branch TEXT;`,
+  // 15: compact branches. `compact`: the branch starts from a summary of its parent's conversation;
+  // `compact_text`: that summary (NULL until written). `compacts` keeps every compact written, per
+  // node and how many of its messages it covers, so later compact forks at that point reuse it.
+  `
+  ALTER TABLE nodes ADD COLUMN compact INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE nodes ADD COLUMN compact_text TEXT;
+  CREATE TABLE compacts (
+    node_id    TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    upto       INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (node_id, upto)
+  );
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

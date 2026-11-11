@@ -7,7 +7,8 @@ export const resultText = (r: BranchResult) => [r.findings, r.evidence, r.openQu
 
 export const contextTokens = (items: ContextItem[]) =>
   items.reduce(
-    (sum, item) => sum + estimateTokens(item.kind === 'message' ? item.message.content : resultText(item.result)),
+    (sum, item) =>
+      sum + estimateTokens(item.kind === 'message' ? item.message.content : item.kind === 'compact' ? item.text : resultText(item.result)),
     0,
   )
 

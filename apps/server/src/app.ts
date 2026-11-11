@@ -1,4 +1,4 @@
-import type { Effort, ModelsResponse } from '@harness/shared';
+import type { Effort, ModelsResponse, VersionInfo } from '@harness/shared';
 import { Hono } from 'hono';
 import type { Repository } from './db/repository.ts';
 import type { LLMProvider, ModelCatalog } from './llm/index.ts';
@@ -10,6 +10,7 @@ import { RunManager } from './runs.ts';
 import { systemRoutes } from './routes/system.ts';
 import { type OpenInEditor, openInEditor } from './system/editor.ts';
 import { pickFolder } from './system/folder-picker.ts';
+import type { UpdateChecker } from './system/update-check.ts';
 import { HarnessTools, harnessMcpRoutes } from './tools/harness.ts';
 import type { Workspaces } from './workspace.ts';
 import { Worktrees } from './worktrees.ts';
@@ -33,6 +34,8 @@ export interface AppDeps {
   askLimit?: number;
   /** How long questions wait for approval before they count as unanswered (tests shorten it). */
   askApprovalTimeoutMs?: number;
+  /** Checks npm for a newer version (the npx package only); absent: GET /version reports nothing. */
+  updates?: UpdateChecker;
 }
 
 export interface RouteDeps extends AppDeps {
@@ -101,6 +104,8 @@ export function createApp(deps: AppDeps) {
       return c.json({ error: 'Something went wrong on the server' }, 500);
     })
     .get('/health', (c) => c.json({ ok: true, model: deps.llm.label }))
+    .get('/version', (c) =>
+      c.json<VersionInfo>(deps.updates?.info() ?? { current: null, latest: null, updateAvailable: false, checkedAt: null }))
     .get('/models', async (c) => c.json<ModelsResponse>({ provider: deps.llm.kind, canEdit: deps.llm.canEdit, ...(await loadModels(deps.llm)) }))
     .route('/projects', projectRoutes(routeDeps))
     .route('/nodes', nodeRoutes(routeDeps))

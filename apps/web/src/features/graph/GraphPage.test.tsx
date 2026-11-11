@@ -31,9 +31,10 @@ beforeAll(() => {
 const node = (id: string, projectId: string): NodeSummary => ({
   id, projectId, title: `Node ${id}`, titleSource: 'prompt', promptTitle: `Node ${id}`, parentIds: [], forkPoint: null,
   forkSession: null, status: 'open', result: null, resultUpto: null, mergeResults: null, mergePrompt: null,
-  filesFromProject: false, sessionId: null, readUpto: null, model: null, effort: null, gitBranch: null, filesChanged: null,
+  filesFromProject: false, targetBranch: null, compact: false, compactText: null, sessionId: null, readUpto: null, model: null,
+  effort: null, gitBranch: null, filesChanged: null,
   createdAt: '2026-10-06T00:00:00.000Z', messageCount: 0, lastMessage: null, lastRole: null, unread: 0, running: false,
-  run: null, titlePending: false, proposedBranches: 0, forkedAtEnd: false, merge: null,
+  run: null, titlePending: false, proposedBranches: 0, forkedAtEnd: false, merge: null, compacting: null,
 })
 
 const graphOf = (projectId: string): GraphResponse => ({

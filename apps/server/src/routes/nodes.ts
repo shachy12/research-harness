@@ -109,6 +109,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
         run: runs.status(node.id),
         titlePending: runs.isTitling(node.id),
         merge: runs.mergeState(node, messages.length),
+        compacting: runs.compactState(node),
         usage: runs.usage(),
       });
     })
@@ -237,6 +238,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
       const parent = requireNode(c.req.param('nodeId'));
       const busy = () => {
         if (runs.isRunning(parent.id)) throw conflict('Wait for the current reply to finish before forking.');
+        if (runs.compactState(parent)) throw conflict('This branch has not started yet (it waits for its compact), so there is nothing to fork from.');
         if (runs.isBusy(parent.id) || runs.mergeState(parent, repo.listMessages(parent.id).length)) {
           throw conflict('This merge has not started yet, so there is nothing to fork from.');
         }
@@ -245,22 +247,30 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
 
       const project = repo.getProject(parent.projectId)!;
       const { filesFromProject } = c.req.valid('json');
-      const branches: { prompt: string; title: string; attachments: Attachment[]; model: string | null; effort: Effort | null }[] = [];
-      for (const { prompt, title, attachments, model, effort } of c.req.valid('json').branches) {
+      const branches: { prompt: string; title: string; attachments: Attachment[]; model: string | null; effort: Effort | null; compact: boolean }[] = [];
+      for (const { prompt, title, attachments, model, effort, compact } of c.req.valid('json').branches) {
         const checked = workspaces.validate(project, attachments);
         if ('error' in checked) throw new HttpError(400, checked.error);
         // A branch keeps its parent's model and effort unless it was given its own.
         const settings = { model: model === undefined ? parent.model : model, effort: effort === undefined ? parent.effort : effort };
         if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
-        branches.push({ prompt, title: title ?? titleFromPrompt(prompt), attachments: checked, ...settings });
+        branches.push({ prompt, title: title ?? titleFromPrompt(prompt), attachments: checked, ...settings, compact });
       }
       busy();
-      // The parent stays open. Each branch inherits what it has now (its fork point) and forks its
-      // session as it is now; the parent's next message continues in a copy (`planSession`).
+      // A compact needs a conversation to summarize.
       const forkPoint = repo.listMessages(parent.id).length;
+      if (branches.some((b) => b.compact) && !inheritedItems(repo.snapshot(parent.projectId), parent.id).length && forkPoint === 0) {
+        throw new HttpError(400, `"${parent.title}" has no conversation yet, so there is nothing to compact.`);
+      }
+      // The parent stays open. Each branch inherits what it has now (its fork point) and forks its
+      // session as it is now; the parent's next message continues in a copy (`planSession`). It
+      // works against the parent's git branch. A compact branch starts from a compact instead.
       const children = repo.transaction(() =>
-        branches.map(({ title, model, effort }) =>
-          repo.createNode({ projectId: parent.projectId, title, parentIds: [parent.id], model, effort, forkPoint, forkSession: parent.sessionId, filesFromProject }),
+        branches.map(({ title, model, effort, compact }) =>
+          repo.createNode({
+            projectId: parent.projectId, title, parentIds: [parent.id], model, effort, forkPoint, forkSession: parent.sessionId,
+            filesFromProject, targetBranch: parent.targetBranch, compact,
+          }),
         ),
       );
       llm.release?.(parent.id); // its next message starts a new process on the copy
@@ -271,7 +281,14 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
           .fork(project, parent.id, children.map((child) => child.id), `${parent.title}: forked`)
           .catch((err: unknown) => console.error(`[git] fork ${parent.id}:`, err));
       }
-      children.forEach((child, i) => runs.start(child.id, branches[i].prompt, branches[i].attachments));
+      children.forEach((child, i) => {
+        const { prompt, attachments, compact } = branches[i];
+        if (!compact) return runs.start(child.id, prompt, attachments);
+        // Its first message is saved now and answered once the compact is written (one compact
+        // for all the compact branches of this fork).
+        repo.addMessage(child.id, 'user', prompt, { attachments });
+        runs.startCompact(child.id);
+      });
       return c.json(children, 201);
     })
 
@@ -280,7 +297,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
       const node = requireNode(c.req.param('nodeId'));
       if (!node.gitBranch) return c.json<NodeChanges | null>(null);
       try {
-        return c.json<NodeChanges | null>(await worktrees.changes(repo.getProject(node.projectId)!, node.id));
+        return c.json<NodeChanges | null>(await worktrees.changes(repo.getProject(node.projectId)!, node.id, node.targetBranch));
       } catch (err) {
         console.error(`[git] changes ${node.id}:`, err);
         throw new HttpError(500, err instanceof Error ? err.message : 'Could not read the changes');
@@ -341,16 +358,17 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
       return c.json({ ok: true });
     })
 
-    // Merge the node's branch into the project's current branch. Conflicts leave the project as it was.
+    // Merge the node's branch into its target branch (else the project's current branch). Conflicts
+    // leave everything as it was.
     .post('/:nodeId/apply', async (c) => {
       const node = requireNode(c.req.param('nodeId'));
       if (!node.gitBranch) throw new HttpError(400, 'This node has no file changes.');
       if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
       const project = repo.getProject(node.projectId)!;
       await worktrees.commit(project, node.id, `${node.title}: state when applied`);
-      const result = await worktrees.apply(project, node.id, node.title);
+      const result = await worktrees.apply(project, node.id, node.title, node.targetBranch);
       if (!result.ok) throw new HttpError(409, result.error);
-      repo.setGitInfo(node.id, node.gitBranch, await worktrees.countChanges(project, node.id));
+      repo.setGitInfo(node.id, node.gitBranch, await worktrees.countChanges(project, node.id, node.targetBranch));
       return c.json({ ok: true });
     });
 }

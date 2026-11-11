@@ -20,11 +20,22 @@ import type { GraphReader } from './graph.ts';
 export type Segment =
   | { kind: 'messages'; node: DagNode; messages: Message[] }
   | { kind: 'branch-start'; node: DagNode }
-  | { kind: 'results'; mergeNode: DagNode; results: { node: DagNode; result: BranchResult }[]; skipped: DagNode[] };
+  | { kind: 'results'; mergeNode: DagNode; results: { node: DagNode; result: BranchResult }[]; skipped: DagNode[] }
+  /**
+   * A compact branch's start: the compact of its parent (`source`; null once the parent is
+   * deleted) stands in for everything the parent knew. Includes the branch-start note.
+   */
+  | { kind: 'compact'; node: DagNode; source: DagNode | null; text: string };
 
 /** What the node inherits, before its own messages. */
 export function inheritedSegments(graph: GraphReader, nodeId: string): Segment[] {
   const node = graph.node(nodeId);
+  // A compact branch inherits only the compact (nothing until it is written).
+  if (node.compact) {
+    if (node.compactText === null) return [];
+    const source = node.parentIds.length === 1 ? graph.node(node.parentIds[0]) : null;
+    return [{ kind: 'compact', node, source, text: node.compactText }];
+  }
   if (node.parentIds.length === 0) return [];
   if (node.parentIds.length === 1) return fullSegments(graph, node.parentIds[0], node.forkPoint);
 
@@ -82,7 +93,7 @@ export function fullSegments(graph: GraphReader, nodeId: string, upto: number | 
   const messages = graph.messages(nodeId);
   return [
     ...inheritedSegments(graph, nodeId),
-    ...(node.parentIds.length === 1 ? [{ kind: 'branch-start', node } as const] : []),
+    ...(node.parentIds.length === 1 && !node.compact ? [{ kind: 'branch-start', node } as const] : []),
     { kind: 'messages', node, messages: upto === null ? messages : messages.slice(0, upto) },
   ];
 }
@@ -97,6 +108,8 @@ export function inheritedItems(graph: GraphReader, nodeId: string): ContextItem[
       }
     } else if (seg.kind === 'results') {
       for (const { node, result } of seg.results) items.push({ kind: 'result', nodeId: node.id, nodeTitle: node.title, result });
+    } else if (seg.kind === 'compact') {
+      items.push({ kind: 'compact', nodeId: seg.source?.id ?? seg.node.id, nodeTitle: seg.source?.title ?? 'its parent (deleted)', text: seg.text });
     }
   }
   return items;

@@ -133,6 +133,14 @@ export class PlaceholderProvider implements LLMProvider {
     return `Placeholder: ${prompt.split(/\s+/).slice(0, 4).join(' ')}`;
   }
 
+  async compact({ request }: ReplyContext, signal: AbortSignal): Promise<string> {
+    await pause(this.wordDelayMs * 25); // like a short model call, so "Compacting…" can be seen
+    if (signal.aborted) throw new Error('Stopped.');
+    const replies = request.turns.filter((t) => t.role === 'assistant').length;
+    const lastReply = request.turns.findLast((t) => t.role === 'assistant')?.content ?? '';
+    return `**Placeholder compact** of a conversation with ${request.turns.length - 1} turns (${replies} replies).\n\nLast reply began: ${lastReply.slice(0, 300) || '(no reply yet)'}`;
+  }
+
   async draftResult({ request }: ReplyContext): Promise<BranchResult> {
     await pause(this.wordDelayMs * 25); // like a short model call, so the "Merging…" state can be seen
     const lastReply = request.turns.findLast((t) => t.role === 'assistant')?.content ?? '';

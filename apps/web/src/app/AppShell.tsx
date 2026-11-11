@@ -4,6 +4,7 @@ import { useServerHealth } from '@/api/health'
 import { useProjects } from '@/api/queries'
 import { ProjectSidebar } from '@/features/projects/ProjectSidebar'
 import { rememberProject } from '@/features/projects/lastProject'
+import { UpdateNotice } from './UpdateNotice'
 
 // App layout: [projects sidebar] + [main view: a project's graph or a node's chat].
 export function AppShell() {
@@ -30,8 +31,11 @@ export function AppShell() {
           </span>
           <span className="font-semibold">Harness</span>
           {project && <span className="truncate text-sm text-muted-foreground">/ {project.name}</span>}
+          <div className="ml-auto flex min-w-0 items-center gap-2">
+            <UpdateNotice />
+          </div>
           <span
-            className={`ml-auto truncate rounded-full border px-2.5 py-0.5 text-xs ${health.isError ? 'text-destructive' : 'text-muted-foreground'}`}
+            className={`shrink-0 truncate rounded-full border px-2.5 py-0.5 text-xs ${health.isError ? 'text-destructive' : 'text-muted-foreground'}`}
           >
             {status}
           </span>

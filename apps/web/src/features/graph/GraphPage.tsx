@@ -11,7 +11,7 @@ import {
 } from '@xyflow/react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
-import { useGraph, useNewRoot, useRefreshAll } from '@/api/queries'
+import { useGraph, useRefreshAll } from '@/api/queries'
 import { api } from '@/api/client'
 import { UsageBanner } from '@/components/UsageBanner'
 import { Button } from '@/components/ui/button'
@@ -25,6 +25,7 @@ import { type CardData, type CardNode, NodeCard } from './NodeCard'
 import { StubCard, type StubNode } from './StubCard'
 import { DeleteNodeDialog } from './DeleteNodeDialog'
 import { DeletedNodesDialog } from './DeletedNodesDialog'
+import { NewRootDialog } from './NewRootDialog'
 import { ResetDialog } from './ResetDialog'
 import { forgetView, rememberView, rememberedView } from './viewMemory'
 
@@ -56,7 +57,7 @@ function GraphView({ projectId }: { projectId: string }) {
   const [retrying, setRetrying] = useState(false)
   const flow = useReactFlow()
   const refresh = useRefreshAll()
-  const newRoot = useNewRoot(projectId)
+  const [newRootOpen, setNewRootOpen] = useState(false)
 
   const summaries = useMemo(() => graph.data?.nodes ?? [], [graph.data])
   // Any node can be merged, except a merge node that hasn't started yet (it has nothing to give).
@@ -87,8 +88,10 @@ function GraphView({ projectId }: { projectId: string }) {
   )
   // Nodes whose last message got no reply (failed, stopped, or hit the limit), and merges that
   // stopped before their results were written (Retry starts them again).
-  const unanswered = summaries.filter((n) =>
-    (!n.running && !n.merge && n.lastRole === 'user') || (n.merge !== null && !n.merge.running))
+  const unanswered = summaries.filter((n) => {
+    const pending = n.merge ?? n.compacting
+    return pending ? !pending.running : !n.running && n.lastRole === 'user'
+  })
   const retryAll = async () => {
     setRetrying(true)
     await Promise.allSettled(unanswered.map((n) => api.post(`/nodes/${n.id}/retry`)))
@@ -176,18 +179,20 @@ function GraphView({ projectId }: { projectId: string }) {
             <svg width="26" height="8" aria-hidden="true"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--status-merge)" strokeWidth="2" strokeDasharray="5 4" /></svg>
             passes only its result
           </span>
+          <span className="flex items-center gap-2">
+            <svg width="26" height="8" aria-hidden="true"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--edge)" strokeWidth="2" strokeDasharray="2 3" /></svg>
+            starts from a compact
+          </span>
           </div>
           <Button
             variant="outline"
             size="sm"
             className="bg-card"
-            disabled={newRoot.isPending}
-            title="Start another independent conversation in this project (same folder, no shared context)"
-            onClick={() => newRoot.mutate()}
+            title="Start another independent conversation in this project (same folder, no shared context), on a git branch you choose"
+            onClick={() => setNewRootOpen(true)}
           >
             <PlusIcon /> New root
           </Button>
-          {newRoot.isError && <span className="rounded-lg bg-card px-2 py-1 text-xs text-destructive">{newRoot.error.message}</span>}
           <Button variant="outline" size="sm" className="bg-card" onClick={() => setResetOpen(true)}>
             <RotateCcwIcon /> Start over
           </Button>
@@ -254,6 +259,7 @@ function GraphView({ projectId }: { projectId: string }) {
         />
       )}
 
+      {newRootOpen && <NewRootDialog projectId={projectId} onClose={() => setNewRootOpen(false)} />}
       {renaming && <RenameDialog node={renaming} onClose={() => setRenaming(null)} />}
       {deletedOpen && <DeletedNodesDialog deleted={deleted} onClose={() => setDeletedOpen(false)} />}
       {deleting && (
@@ -326,16 +332,19 @@ function toFlow(
   const cardEdges: Edge[] = shown.visible.flatMap(({ summary: child, parentIds }) =>
     parentIds.map((parentId) => {
       const isMerge = child.parentIds.length > 1
+      // A compact branch gets a compact of its parent, not the whole conversation.
+      const isCompact = !isMerge && child.compact
       const color = isMerge ? 'var(--status-merge)' : 'var(--edge)'
+      const label = isMerge ? 'result' : isCompact ? 'compact' : null
       return {
         id: `${parentId}->${child.id}`,
         source: parentId,
         target: child.id,
-        style: { stroke: color, strokeWidth: 1.8, strokeDasharray: isMerge ? '6 5' : undefined },
+        style: { stroke: color, strokeWidth: 1.8, strokeDasharray: isMerge ? '6 5' : isCompact ? '2 3' : undefined },
         markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-        ...(isMerge && {
-          label: 'result',
-          labelStyle: { fill: 'var(--status-merge)', fontSize: 11, fontFamily: 'ui-monospace, monospace' },
+        ...(label && {
+          label,
+          labelStyle: { fill: isMerge ? 'var(--status-merge)' : 'var(--muted-foreground)', fontSize: 11, fontFamily: 'ui-monospace, monospace' },
           labelBgStyle: { fill: 'var(--canvas)' },
         }),
       }

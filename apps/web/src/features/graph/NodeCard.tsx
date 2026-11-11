@@ -1,7 +1,7 @@
 import type { NodeSummary } from '@harness/shared'
 import { Handle, type Node, type NodeProps, Position } from '@xyflow/react'
 import { FilePenIcon, FoldVerticalIcon, PencilIcon, Trash2Icon, UnfoldVerticalIcon } from 'lucide-react'
-import { MergeChip, StatusChip } from '@/components/StatusChip'
+import { BranchChip, MergeChip, StatusChip } from '@/components/StatusChip'
 import { formatElapsed } from '@harness/shared'
 import { useDrafts } from '@/features/chat/drafts'
 import { activityOf } from '@/lib/activity'
@@ -35,9 +35,10 @@ const hiddenHandle = '!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent'
 
 export function NodeCard({ data }: NodeProps<CardNode>) {
   const { summary: n, mergeSelected, shakeKey, limitReached, folded, foldable, branchFoldable, onRename, onDelete, onFold, onUnfold, onFoldBranches } = data
-  const merging = n.merge?.running === true
-  const now = useNow(n.running || merging)
-  const startedAt = n.run?.startedAt ?? n.merge?.startedAt
+  // A merge writing its results, or a compact branch waiting for its compact, before its reply.
+  const pending = n.merge ?? n.compacting
+  const now = useNow(n.running || pending?.running === true)
+  const startedAt = n.run?.startedAt ?? pending?.startedAt
   const elapsed = startedAt ? formatElapsed(now - Date.parse(startedAt)) : undefined
   const draft = useDrafts()[n.id]
 
@@ -63,8 +64,9 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
       >
         <Handle type="target" position={Position.Top} isConnectable={false} className={hiddenHandle} />
         <div className="flex items-center gap-1.5">
-          <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole, limitReached, n.forkedAtEnd, n.merge)} elapsed={elapsed} />
+          <StatusChip status={n.status} activity={activityOf(n.status, n.running, n.lastRole, limitReached, n.forkedAtEnd, n.merge, n.compacting)} elapsed={elapsed} />
           {n.parentIds.length > 1 && <MergeChip />}
+          {n.parentIds.length === 0 && n.targetBranch && <BranchChip branch={n.targetBranch} />}
           {n.unread > 0 && (
             <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] leading-none font-semibold text-primary-foreground">
               {n.unread} new
@@ -173,10 +175,10 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
           </div>
         ) : n.run ? (
           <div className="line-clamp-2 text-xs text-open italic">{n.run.activity}…</div>
-        ) : n.merge?.running ? (
-          <div className="line-clamp-2 text-xs text-merge italic">{n.merge.activity}…</div>
-        ) : n.merge ? (
-          <div className="line-clamp-2 text-xs text-destructive">{n.merge.error}</div>
+        ) : pending?.running ? (
+          <div className="line-clamp-2 text-xs text-merge italic">{pending.activity}…</div>
+        ) : pending ? (
+          <div className="line-clamp-2 text-xs text-destructive">{pending.error}</div>
         ) : (
           <div className="line-clamp-2 text-xs text-muted-foreground">{n.lastMessage ?? 'No messages yet'}</div>
         )}

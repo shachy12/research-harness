@@ -88,6 +88,20 @@ export interface DagNode {
    * parent's copy (chosen in the fork dialog; a root always does).
    */
   filesFromProject: boolean;
+  /**
+   * The git branch of the project's repository this node works against: Apply merges into it, its
+   * changes are compared with it, and a root (or a branch starting from the project's files) starts
+   * from its tip when it first runs. Null: whatever branch the project folder has checked out.
+   * Chosen when a root is created; every node below copies it (a merge node: its first parent's).
+   */
+  targetBranch: string | null;
+  /**
+   * A branch that starts from a compact of its parent (a summary written when it was forked)
+   * instead of the parent's full conversation (chosen per branch in the fork dialog).
+   */
+  compact: boolean;
+  /** The compact it starts from; null until it is written (`NodeSummary.compacting` shows the progress). */
+  compactText: string | null;
   /** The Claude Code session holding this node's conversation (claude-code provider only). */
   sessionId: string | null;
   /**
@@ -121,7 +135,8 @@ export interface MergedResult {
 
 /**
  * A merge node whose results are still being drafted (`running`), or whose drafting stopped
- * (`error`; Retry starts it again). Null once its first message was sent.
+ * (`error`; Retry starts it again). Null once its first message was sent. A compact branch waiting
+ * for its compact uses the same shape (`compacting`).
  */
 export interface MergeState {
   running: boolean;
@@ -211,7 +226,9 @@ export interface ToolCall {
 /** One entry of what a node inherits: an ancestor's message, or a merged node's result. */
 export type ContextItem =
   | { kind: 'message'; nodeId: string; nodeTitle: string; message: Message }
-  | { kind: 'result'; nodeId: string; nodeTitle: string; result: BranchResult };
+  | { kind: 'result'; nodeId: string; nodeTitle: string; result: BranchResult }
+  /** A compact branch's starting point: the summary of its parent's conversation (`nodeId`: the parent). */
+  | { kind: 'compact'; nodeId: string; nodeTitle: string; text: string };
 
 // ---- API responses ----
 
@@ -244,6 +261,8 @@ export interface NodeSummary extends DagNode {
   forkedAtEnd: boolean;
   /** A merge node still drafting its results (see MergeState). */
   merge: MergeState | null;
+  /** A compact branch whose compact is being written, or stopped before it was (Retry). */
+  compacting: MergeState | null;
 }
 
 export interface RunStatus {
@@ -315,6 +334,7 @@ export interface NodeDetail {
   run: RunStatus | null;
   titlePending: boolean;
   merge: MergeState | null;
+  compacting: MergeState | null;
   usage: UsageLimit | null;
 }
 
@@ -418,6 +438,27 @@ export interface FolderGit {
   branch: string | null;
   /** Uncommitted changes: nodes start from the last commit, so they won't see them. */
   uncommitted: boolean;
+}
+
+/** GET /api/projects/:id/branches: the git branches a new root can work against. */
+export interface GitBranches {
+  /** The project folder's checked-out branch (null: detached HEAD, or no repository yet). */
+  current: string | null;
+  /** Local branches, most recently committed first, without Harness's own `harness/…` branches. */
+  branches: string[];
+}
+
+/**
+ * GET /api/version: the running version and the latest one on npm (checked every 30 minutes).
+ * `current` is null when the app doesn't run from the npm package (`npm run dev`, the desktop app):
+ * then nothing is checked.
+ */
+export interface VersionInfo {
+  current: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  /** When npm last answered (null: not yet, or every check failed). */
+  checkedAt: string | null;
 }
 
 export interface ApiError {

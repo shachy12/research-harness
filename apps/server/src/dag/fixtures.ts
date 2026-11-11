@@ -4,7 +4,7 @@ import { GraphSnapshot } from './graph.ts';
 // Small builder for test graphs: node('A', ['root'], { messages: ['u: hi', 'a: hello'] }).
 type NodeSpec = {
   status?: DagNode['status']; result?: BranchResult; messages?: string[]; sessionId?: string;
-  forkPoint?: number; forkSession?: string;
+  forkPoint?: number; forkSession?: string; compactText?: string;
 };
 
 export function result(findings: string): BranchResult {
@@ -30,6 +30,9 @@ export function buildGraph(specs: Record<string, [parents: string[], spec?: Node
       mergeResults: null,
       mergePrompt: null,
       filesFromProject: false,
+      targetBranch: null,
+      compact: spec.compactText !== undefined,
+      compactText: spec.compactText ?? null,
       sessionId: spec.sessionId ?? null,
       readUpto: null,
       model: null,
