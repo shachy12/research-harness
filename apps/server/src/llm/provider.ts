@@ -49,6 +49,37 @@ export interface ReplyContext {
    * or null when the server doesn't offer it (tests). Providers without MCP support ignore it.
    */
   mcpUrl: string | null;
+  /**
+   * Run in a Docker container instead of on this machine (secure mode; see sandbox/service.ts).
+   * Null: on this machine. Paths in `message` are already the container's.
+   */
+  sandbox?: SandboxRun | null;
+}
+
+/** How to run the CLI in the sandbox: everything decided except the CLI's own arguments. */
+export interface SandboxRun {
+  docker: { command: string; prefixArgs?: string[] };
+  image: string;
+  /** Host folders the container sees (the project read-only, the node's copy writable, …). */
+  mounts: { source: string; target: string; readonly: boolean }[];
+  /** Variables with secrets (login token, user's variables): set on the docker process and passed by name only. */
+  secretEnv: Record<string, string>;
+  /** Other variables, on the command line. */
+  env: Record<string, string>;
+  /** The Docker network it runs on: internal, its only way out the egress proxy (null: tests). */
+  network: string | null;
+  /** The project folder inside the container: the CLI's working folder (its sessions belong to it). */
+  workDir: string;
+  /** The node's copy inside the container (null: read-only runs such as ask_node answers). */
+  editDir: string | null;
+  /** `uid:gid` on Linux and macOS, so files it makes belong to the user; null on Windows. */
+  user: string | null;
+  /** Host folder for each run's throwaway home folder (its Claude folder, with the session copied in). */
+  runsDir: string;
+  /** Host folder with the MCP stub (mounted read-only at /opt/harness). */
+  stubDir: string;
+  /** Marks this app's containers, so leftovers can be removed. */
+  label: string;
 }
 
 /** The models a provider offers and what a node without its own setting uses. */

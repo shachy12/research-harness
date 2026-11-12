@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { MANAGED_DIR, type Project } from '@harness/shared';
+import { DEFAULT_SANDBOX_SETTINGS, MANAGED_DIR, type Project } from '@harness/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Workspaces, safeFileName } from './workspace.ts';
 
 let dataDir: string;
 let workspaces: Workspaces;
-const project: Project = { id: 'p1', name: 'Test', folder: null, archived: false, createdAt: '' };
+const project: Project = { id: 'p1', name: 'Test', folder: null, archived: false, sandbox: DEFAULT_SANDBOX_SETTINGS, createdAt: '' };
 const bytes = (text: string) => new TextEncoder().encode(text);
 
 beforeEach(() => {

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MANAGED_DIR, type DagNode, type Project } from '@harness/shared';
@@ -298,6 +298,65 @@ describe('Worktrees', () => {
     const m = repo.createNode({ projectId: 'p', title: 'M', parentIds: [a.id, b.id] });
     const copy = await worktrees.ensure(project, repo.snapshot('p'), m);
     expect(readFileSync(path.join(copy.editDir, 'by-hand.txt'), 'utf8')).toBe('edited in VS Code\n');
+  });
+});
+
+describe('Worktrees with a copy a model tampered with', () => {
+  beforeEach(() => setup());
+
+  /**
+   * What a sandboxed model could leave in its copy: its `.git` file pointing at a git folder of its
+   * own whose config runs a program (core.fsmonitor) whenever git looks at the files, and a nested
+   * repository with the same trap.
+   */
+  function plantTraps(copyTop: string, editDir: string) {
+    const marker = path.join(folder, '..', `pwned-${path.basename(folder)}`);
+    const hook = `node -e "require('fs').writeFileSync(process.argv[1], 'x')" "${marker.replaceAll('\\', '/')}"`;
+    const evil = path.join(editDir, 'evil-git');
+    gitIn(editDir, 'init', '-q', '--bare', evil);
+    gitIn(evil, 'config', 'core.fsmonitor', hook);
+    // Git for Windows hides `.git`, and Node can't overwrite a hidden file: replace it.
+    rmSync(path.join(copyTop, '.git'));
+    writeFileSync(path.join(copyTop, '.git'), `gitdir:${evil.replaceAll('\\', '/')}\n`);
+    const nested = path.join(editDir, 'cloned');
+    mkdirSync(nested);
+    gitIn(nested, 'init', '-q');
+    writeFileSync(path.join(nested, 'file.txt'), 'x\n');
+    gitIn(nested, 'add', '-A');
+    gitIn(nested, 'commit', '-qm', 'cloned');
+    gitIn(nested, 'config', 'core.fsmonitor', hook);
+    return marker;
+  }
+
+  it('never reads the copy\'s .git file: commits, changes and file lists use the repository\'s own record', async () => {
+    const node = root();
+    const copy = await work(node, (dir) => writeFileSync(path.join(dir, 'a.txt'), 'a\n'));
+    const marker = plantTraps(copy.worktree, copy.editDir);
+    writeFileSync(path.join(copy.editDir, 'b.txt'), 'b\n');
+
+    expect(await worktrees.commit(project, node.id, 'after the traps')).toBe(true);
+    const changes = await worktrees.changes(project, node.id);
+    expect(changes?.files.map((f) => f.path)).toEqual(expect.arrayContaining(['a.txt', 'b.txt']));
+    const files = await worktrees.files(project, repo.snapshot('p'), repo.getNode(node.id)!);
+    expect(files.files).toContain('b.txt');
+    // The commit landed on the node's own branch, and no program ran.
+    expect(gitIn(folder, 'show', '--name-only', '--format=', copy.branch)).toContain('b.txt');
+    expect(existsSync(marker)).toBe(false);
+    // Control: plain git in the nested repository does run the trap.
+    gitIn(path.join(copy.editDir, 'cloned'), 'status');
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it('scrub puts the copy\'s .git file back and removes nested git folders, keeping their files', async () => {
+    const node = root();
+    const copy = await work(node, () => {});
+    const marker = plantTraps(copy.worktree, copy.editDir);
+    const removed = await worktrees.scrub(project, node.id);
+    expect(removed).toEqual(['cloned/.git']);
+    expect(existsSync(path.join(copy.editDir, 'cloned', 'file.txt'))).toBe(true);
+    // The user's own git (and VS Code) find the right repository again.
+    expect(gitIn(copy.editDir, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(copy.branch);
+    expect(existsSync(marker)).toBe(false);
   });
 });
 

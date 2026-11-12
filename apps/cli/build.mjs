@@ -23,6 +23,11 @@ await build({ ...common, entryPoints: ['src/cli.ts'], outfile: 'dist/cli.mjs', b
 // `electron` is provided by Electron itself.
 await build({ ...common, entryPoints: ['src/electron-main.ts'], outfile: 'dist/electron-main.mjs', external: ['electron'], banner: { js: requireShim } });
 
+// The Python programs Harness runs in containers (the sandbox's MCP stub and egress proxy) are
+// read at run time from container/ next to the bundle (see apps/server/src/sandbox/stub.ts).
+fs.rmSync('dist/container', { recursive: true, force: true });
+fs.cpSync('../server/src/sandbox/container', 'dist/container', { recursive: true });
+
 const webDist = new URL('../web/dist/', import.meta.url);
 if (!fs.existsSync(new URL('index.html', webDist))) {
   throw new Error('The web UI is not built. Run "npm run build -w @harness/web" or build with --web.');

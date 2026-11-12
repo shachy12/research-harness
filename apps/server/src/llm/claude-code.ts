@@ -1,5 +1,6 @@
-import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { type BranchResult, type Effort, type ModelOption, type ToolCall, branchResultSchema } from '@harness/shared';
@@ -7,7 +8,12 @@ import { z } from 'zod/v4';
 import { SYSTEM_PROMPT } from '../dag/prompt.ts';
 import { type SessionPlan, firstMessage } from '../dag/session.ts';
 import { classifyError, toIsoTime } from './errors.ts';
-import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent, TokenUsage } from './provider.ts';
+import { dockerEnv, runDocker } from '../sandbox/docker.ts';
+import { SESSION_ID, mountSpec } from '../sandbox/paths.ts';
+import { CONTAINER_HOME } from '../sandbox/service.ts';
+import { copySessionBack, copySessionIn, hostClaudeDir } from '../sandbox/sessions.ts';
+import { STUB_DIR, stubMcpConfig } from '../sandbox/stub.ts';
+import type { LLMProvider, ModelCatalog, ReplyContext, ReplyEvent, SandboxRun, TokenUsage } from './provider.ts';
 import { TITLE_SYSTEM_PROMPT, titleRequest } from './title.ts';
 
 /**
@@ -159,6 +165,7 @@ export class ClaudeCodeProvider implements LLMProvider {
   readonly kind = 'claude-code';
   readonly canEdit = true;
   private readonly live = new Map<string, LiveProcess>();
+  private version: Promise<string | null> | null = null;
 
   constructor(options: ClaudeCodeOptions) {
     this.options = options;
@@ -179,17 +186,20 @@ export class ClaudeCodeProvider implements LLMProvider {
   }
 
   async *streamReply(ctx: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
-    const flags = [...this.modelArgs(ctx), ...toolArgs(ctx.workDir, ctx.edit, ctx.mcpUrl)];
+    const sandbox = ctx.sandbox ?? null;
+    const flags = [...this.modelArgs(ctx), ...(sandbox ? sandboxToolArgs(sandbox.editDir !== null, true) : toolArgs(ctx.workDir, ctx.edit, ctx.mcpUrl))];
+    // The model, effort, tools and where it runs (this machine or which sandbox) are fixed when the
+    // process starts: after a change, restart it (the session resumes; a new model re-reads the
+    // history without the cache either way).
+    const key = [...flags, sandbox ? JSON.stringify({ image: sandbox.image, mounts: sandbox.mounts, env: Object.keys(sandbox.secretEnv) }) : 'host'].join(' ');
     let proc = this.live.get(ctx.nodeId);
-    // The model, effort and tools are fixed when the process starts: after a change, restart it (the
-    // session resumes; the new model re-reads the history without the cache either way).
-    if (proc && proc.flags !== flags.join(' ')) {
+    if (proc && proc.flags !== key) {
       this.release(ctx.nodeId);
       proc = undefined;
     }
     let text = ctx.message;
     if (!proc) {
-      proc = this.startProcess(ctx.nodeId, ctx.session, ctx.workDir, flags);
+      proc = this.startProcess(ctx, flags, key);
       // A resumed session already holds the context; otherwise send the preamble/transcript first.
       if (ctx.session.mode !== 'resume') text = firstMessage(ctx.session, ctx.message);
     }
@@ -222,7 +232,7 @@ export class ClaudeCodeProvider implements LLMProvider {
       ...this.modelArgs(ctx),
     ];
     const prompt = plan.mode === 'resume' ? ctx.message : firstMessage(plan, ctx.message);
-    const parsed = await runJson(this.options, ctx.workDir, args, prompt, signal);
+    const parsed = await runJson(this.launch(ctx, args, plan.sessionId), prompt, signal);
     if (parsed.is_error) throw classifyError(new Error(parsed.result || 'Claude Code could not draft the result.'));
     const value = parsed.structured_output ?? tryJson(parsed.result);
     const result = branchResultSchema.safeParse(value);
@@ -242,10 +252,10 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--output-format', 'json',
       ...this.commonArgs(),
       ...this.modelArgs(ctx),
-      ...answerToolArgs(ctx.mcpUrl),
+      ...(ctx.sandbox ? sandboxToolArgs(true, false) : answerToolArgs(ctx.mcpUrl)),
     ];
     const prompt = plan.mode === 'resume' ? ctx.message : firstMessage(plan, ctx.message);
-    const parsed = await runJson(this.options, ctx.workDir, args, prompt, signal);
+    const parsed = await runJson(this.launch(ctx, args, plan.sessionId), prompt, signal);
     if (parsed.is_error) throw classifyError(new Error(parsed.result || 'Claude Code could not answer the question.'));
     return { answer: parsed.result ?? '', usage: parsed.usage ? toUsage(parsed.usage) : null };
   }
@@ -271,9 +281,24 @@ export class ClaudeCodeProvider implements LLMProvider {
       '--setting-sources', '',
       '--strict-mcp-config',
     ];
-    const parsed = await runJson(this.options, workDir, args, titleRequest(prompt, reply), signal);
+    const parsed = await runJson(this.hostLaunch(workDir, args), titleRequest(prompt, reply), signal);
     if (parsed.is_error) throw classifyError(new Error(parsed.result || 'Claude Code could not suggest a title.'));
     return parsed.result ?? '';
+  }
+
+  /** The installed CLI's version (e.g. "2.1.287"), for the sandbox image; null if it can't be run. */
+  cliVersion(): Promise<string | null> {
+    this.version ??= new Promise((resolve) => {
+      execFile(this.options.command, [...(this.options.prefixArgs ?? []), '--version'], { windowsHide: true, timeout: 30_000 }, (err, stdout) => {
+        resolve(err ? null : (/(\d+\.\d+\.\d+)/.exec(stdout)?.[1] ?? null));
+      });
+    });
+    const version = this.version;
+    // Not cached when it failed: the CLI may get installed while Harness runs.
+    void version.then((v) => {
+      if (v === null && this.version === version) this.version = null;
+    });
+    return version;
   }
 
   release(nodeId: string): void {
@@ -301,22 +326,32 @@ export class ClaudeCodeProvider implements LLMProvider {
     return ['--model', model, ...(takesEffort ? ['--effort', ctx.effort ?? this.options.effort] : [])];
   }
 
-  private startProcess(nodeId: string, plan: SessionPlan, workDir: string, flags: string[]): LiveProcess {
+  private startProcess(ctx: ReplyContext, flags: string[], key: string): LiveProcess {
     const args = [
       '-p',
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
-      ...sessionArgs(plan),
+      ...sessionArgs(ctx.session),
       ...this.commonArgs(),
       ...flags,
     ];
-    const proc = new LiveProcess(this.options, workDir, args, flags.join(' '), () => {
+    const nodeId = ctx.nodeId;
+    const proc = new LiveProcess(this.launch(ctx, args, ctx.session.sessionId), this.options, key, () => {
       if (this.live.get(nodeId) === proc) this.live.delete(nodeId);
     });
     this.live.set(nodeId, proc);
     return proc;
+  }
+
+  /** How to start the CLI for this call: on this machine, or in the node's sandbox. */
+  private launch(ctx: ReplyContext, args: string[], sessionId: string | null): Launch {
+    return ctx.sandbox ? sandboxLaunch(ctx.sandbox, args, sessionId, ctx.workDir) : this.hostLaunch(ctx.workDir, args);
+  }
+
+  private hostLaunch(workDir: string, args: string[]): Launch {
+    return { command: this.options.command, args: [...(this.options.prefixArgs ?? []), ...args], cwd: workDir, env: cliEnv() };
   }
 }
 
@@ -351,6 +386,100 @@ export function answerToolArgs(mcpUrl: string | null): string[] {
   return ['--tools', `${TOOLS},${EDIT_TOOLS}`, '--allowedTools', PRE_APPROVED + (mcpUrl ? `,${HARNESS_ALLOWED}` : ''), ...mcpArgs(mcpUrl)];
 }
 
+/**
+ * Tools in the sandbox: the same list as outside (so the prompt, and its cache, stay the same),
+ * all of them allowed without path rules (the container's mounts are the limit: only the node's
+ * copy is writable), and the harness tools served by the stand-in that refuses them
+ * (sandbox/stub.ts). `edit` false: read-only (ask_node answers, compacts).
+ * `editing`: the run has a copy (a reply); its tool list then has the edit tools like outside.
+ */
+export function sandboxToolArgs(edit: boolean, editing: boolean): string[] {
+  const allowed = edit && editing ? `${PRE_APPROVED},Read,Glob,Grep,Edit,Write,Bash,${HARNESS_ALLOWED}` : `${PRE_APPROVED},Read,Glob,Grep,${HARNESS_ALLOWED}`;
+  return ['--tools', edit ? `${TOOLS},${EDIT_TOOLS}` : TOOLS, '--allowedTools', allowed, '--mcp-config', stubMcpConfig(HARNESS_TOOL_TIMEOUT_MS)];
+}
+
+/** The `docker run` arguments for one sandboxed CLI (`home`: its throwaway home folder). */
+export function dockerRunArgs(run: SandboxRun, options: { name: string; home: string; cliArgs: string[] }): string[] {
+  const mounts = [
+    { source: options.home, target: CONTAINER_HOME, readonly: false },
+    { source: run.stubDir, target: STUB_DIR, readonly: true },
+    ...run.mounts,
+  ];
+  return [
+    'run', '-i', '--rm', '--init',
+    '--name', options.name,
+    '--label', `harness.sandbox=${run.label}`,
+    ...(run.user ? ['--user', run.user] : []),
+    ...(run.network ? ['--network', run.network] : []),
+    // No way to gain privileges, no raw sockets (no spoofing on the sandbox network), no device files.
+    '--security-opt', 'no-new-privileges', '--cap-drop', 'NET_RAW', '--cap-drop', 'MKNOD',
+    '-w', run.workDir,
+    ...mounts.flatMap((m) => ['--mount', mountSpec(m)]),
+    ...Object.entries(run.env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    // Secrets by name only: docker reads their values from its own environment, so they never
+    // show in the command line (visible to every program on the machine).
+    ...Object.keys(run.secretEnv).flatMap((k) => ['-e', k]),
+    run.image,
+    'claude',
+    ...options.cliArgs,
+  ];
+}
+
+/** How to start one CLI process, and what to do around it. */
+interface Launch {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  /** After each turn and when the process ends (the sandbox: copy the session back). */
+  afterTurn?: (sessionId: string | null) => void;
+  /** When the process is stopped or ends (the sandbox: remove the container and its home folder). */
+  cleanup?: () => void;
+}
+
+/**
+ * Start the CLI in a container: a throwaway home folder with only the session it continues copied
+ * in; after every turn that session (validated) is copied back to this machine's Claude folder, so
+ * forks, merges and later runs outside the sandbox find it.
+ */
+function sandboxLaunch(run: SandboxRun, cliArgs: string[], sessionId: string | null, hostWorkDir: string): Launch {
+  mkdirSync(run.runsDir, { recursive: true });
+  const home = mkdtempSync(path.join(run.runsDir, 'run-'));
+  const claudeDir = path.join(home, '.claude');
+  mkdirSync(claudeDir, { recursive: true });
+  const host = { claudeDir: hostClaudeDir(), workDir: hostWorkDir };
+  const inside = { claudeDir, workDir: run.workDir };
+  // A missing session file: the CLI says it found no conversation, and the run fails as it would outside.
+  if (sessionId) copySessionIn(sessionId, host, inside);
+  const name = `harness-${randomBytes(6).toString('hex')}`;
+  let cleaned = false;
+  return {
+    command: run.docker.command,
+    args: [...(run.docker.prefixArgs ?? []), ...dockerRunArgs(run, { name, home, cliArgs })],
+    cwd: hostWorkDir,
+    env: dockerEnv(run.docker.command, { ...process.env, ...run.secretEnv }),
+    afterTurn: (id) => {
+      if (!id) return;
+      try {
+        if (!copySessionBack(id, inside, host)) console.error(`[sandbox] could not bring session ${id} back from the sandbox`);
+      } catch (err) {
+        console.error(`[sandbox] copying session ${id} back:`, err);
+      }
+    },
+    cleanup: () => {
+      if (cleaned) return;
+      cleaned = true;
+      void runDocker(run.docker, ['rm', '-f', name], { timeoutMs: 60_000 }).finally(() => {
+        try {
+          rmSync(home, { recursive: true, force: true });
+        } catch {
+          // still in use (Windows); removed at the next start
+        }
+      });
+    },
+  };
+}
+
 function mcpArgs(url: string | null): string[] {
   if (!url) return [];
   const config = { mcpServers: { [HARNESS_MCP]: { type: 'http', url, timeout: HARNESS_TOOL_TIMEOUT_MS, alwaysLoad: true } } };
@@ -382,26 +511,32 @@ class LiveProcess {
   private idleTimer: NodeJS.Timeout | null = null;
   private stderr = '';
   private exited = false;
+  private readonly launch: Launch;
+  /** The session the process writes to (from its init event). */
+  private sessionId: string | null = null;
 
-  constructor(options: ClaudeCodeOptions, cwd: string, args: string[], flags: string, onExit: () => void) {
+  constructor(launch: Launch, options: ClaudeCodeOptions, flags: string, onExit: () => void) {
     this.flags = flags;
+    this.launch = launch;
     this.idleMs = options.idleMs ?? 10 * 60_000;
-    this.child = spawn(options.command, [...(options.prefixArgs ?? []), ...args], {
-      cwd,
-      env: cliEnv(),
+    this.child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       windowsHide: true,
     });
     this.child.stderr.on('data', (d: Buffer) => {
       this.stderr = (this.stderr + d.toString()).slice(-2000);
     });
     createInterface({ input: this.child.stdout }).on('line', (line) => this.handleLine(line));
-    this.child.on('error', (err) => this.finishTurn(spawnError(err, options.command)));
+    this.child.on('error', (err) => this.finishTurn(spawnError(err, launch.command)));
     // Writing to a CLI that already exited fails with EPIPE (on Linux and macOS); unhandled, that
     // would crash the server. The 'close' handler reports the failure instead.
     this.child.stdin.on('error', () => {});
     this.child.on('close', (code) => {
       this.exited = true;
       this.clearIdle();
+      this.launch.afterTurn?.(this.sessionId);
+      this.launch.cleanup?.();
       onExit();
       const detail = this.stderr.trim().split('\n').at(-1);
       const error = classifyError(new Error(detail || 'no details'), this.turnState.resetsAt);
@@ -424,6 +559,7 @@ class LiveProcess {
   kill(): void {
     this.clearIdle();
     if (!this.exited) this.child.kill();
+    this.launch.cleanup?.();
   }
 
   private handleLine(line: string): void {
@@ -432,6 +568,9 @@ class LiveProcess {
       event = JSON.parse(line) as CliEvent;
     } catch {
       return; // not JSON (shouldn't happen in stream-json mode)
+    }
+    if (event.type === 'system' && 'session_id' in event && typeof event.session_id === 'string' && SESSION_ID.test(event.session_id)) {
+      this.sessionId = event.session_id;
     }
     const turn = this.turn;
     if (!turn) return;
@@ -452,6 +591,8 @@ class LiveProcess {
   private finishTurn(error?: unknown): void {
     const turn = this.turn;
     this.turn = null;
+    // Before the reply counts as finished: a fork right after must find the session.
+    if (turn && !this.exited) this.launch.afterTurn?.(this.sessionId);
     turn?.close(error);
     if (!this.exited && !error) this.idleTimer = setTimeout(() => this.kill(), this.idleMs);
   }
@@ -537,8 +678,9 @@ export const newTurnState = (): TurnState => ({ wroteText: false, calls: new Map
 export function mapEvent(event: CliEvent, state: TurnState): ReplyEvent[] {
   if (event.type === 'system' && 'subtype' in event && event.subtype === 'init') {
     const init = event as { session_id?: string; model?: string };
+    // Session ids end up in command lines (--resume): only accept what they look like.
     return [
-      ...(init.session_id ? [{ type: 'session' as const, sessionId: init.session_id }] : []),
+      ...(init.session_id && SESSION_ID.test(init.session_id) ? [{ type: 'session' as const, sessionId: init.session_id }] : []),
       ...(init.model ? [{ type: 'model' as const, model: init.model }] : []),
     ];
   }
@@ -633,8 +775,8 @@ export function parseSearchLinks(text: string): { title: string; url: string }[]
 type OneShotResult = { is_error?: boolean; result?: string; structured_output?: unknown; usage?: CliUsage };
 
 /** Run the CLI once in `--output-format json` mode and parse its answer. */
-async function runJson(options: ClaudeCodeOptions, cwd: string, args: string[], prompt: string, signal: AbortSignal): Promise<OneShotResult> {
-  const output = await runOnce(options, cwd, args, prompt, signal);
+async function runJson(launch: Launch, prompt: string, signal: AbortSignal): Promise<OneShotResult> {
+  const output = await runOnce(launch, prompt, signal);
   try {
     return JSON.parse(output) as OneShotResult;
   } catch {
@@ -643,23 +785,27 @@ async function runJson(options: ClaudeCodeOptions, cwd: string, args: string[], 
 }
 
 /** Run the CLI once with the prompt on stdin and return its stdout. */
-function runOnce(options: ClaudeCodeOptions, cwd: string, args: string[], prompt: string, signal: AbortSignal): Promise<string> {
+function runOnce(launch: Launch, prompt: string, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(options.command, [...(options.prefixArgs ?? []), ...args], {
-      cwd,
-      env: cliEnv(),
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       windowsHide: true,
     });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
     child.stderr.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-2000)));
-    const onAbort = () => child.kill();
+    const onAbort = () => {
+      child.kill();
+      launch.cleanup?.();
+    };
     signal.addEventListener('abort', onAbort, { once: true });
-    child.on('error', (err) => reject(spawnError(err, options.command)));
+    child.on('error', (err) => reject(spawnError(err, launch.command)));
     child.stdin.on('error', () => {}); // EPIPE if the CLI exits early; 'close' reports it
     child.on('close', (code) => {
       signal.removeEventListener('abort', onAbort);
+      launch.cleanup?.();
       // A failed run may still print its JSON answer (is_error: true) on stdout; the caller reads it.
       if (stdout.trim().startsWith('{')) resolve(stdout);
       else {

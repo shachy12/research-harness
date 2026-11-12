@@ -1,9 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { type Dirent, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { type DagNode, type FileChange, type FolderGit, type GitBranches, MANAGED_DIR, type MergePreview, type NodeChanges, type NodeFiles, type Project } from '@harness/shared';
 import type { GraphReader } from './dag/graph.ts';
-import { KeyedQueue, commitArgs, git, gitBytes, identityArgs, runGit } from './git.ts';
+import { type GitOutput, KeyedQueue, commitArgs, git, gitBytes, identityArgs, runGit } from './git.ts';
 import type { Workspaces } from './workspace.ts';
 
 /** Prefix of Harness's branches: the managed folder's name without its dot (git refuses `.harness/…`). */
@@ -24,6 +24,28 @@ interface RepoInfo {
   rel: string;
 }
 
+/**
+ * Settings for every git command Harness runs in a node's copy. The copy's files may have been
+ * written by a model (in the sandbox: by untrusted code), so nothing in them may make git run a
+ * program: no file system monitor, and no recursing into nested repositories (git would run
+ * itself there, with that repository's config).
+ */
+const COPY_SAFETY = ['-c', 'core.fsmonitor=false', '-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all', '-c', 'status.submoduleSummary=false'];
+
+/**
+ * git in one node's copy. Every command names the copy's git folder (in the repository's
+ * `.git/worktrees/`) explicitly, so the `.git` file inside the copy, which the model can rewrite
+ * (e.g. to point at a folder with its own config), is never read.
+ */
+interface CopyGit {
+  /** The copy's git folder (`.git/worktrees/<name>` of the project's repository). */
+  admin: string;
+  run(args: string[], options?: { cwd?: string; input?: string; env?: Record<string, string> }): Promise<GitOutput>;
+  git(args: string[], options?: { cwd?: string; input?: string; env?: Record<string, string> }): Promise<string>;
+  /** Identity and no signing, from the repository's own config (see `commitArgs`). */
+  commitArgs: string[];
+}
+
 /** A node's editable copy, ready for a run. */
 export interface NodeWorktree {
   branch: string;
@@ -33,6 +55,9 @@ export interface NodeWorktree {
   editDir: string;
   /** The worktree was created for this run (the model hasn't been told about it yet). */
   created: boolean;
+  /** The copy's git folder (`.git/worktrees/<name>`), and the repository's (both stay read-only in the sandbox). */
+  gitAdmin: string;
+  gitCommon: string;
   /** For a merge node: what each merged branch changed, and files left with conflict markers. */
   merged: { title: string; files: string[] }[];
   conflicts: string[];
@@ -116,9 +141,14 @@ export class Worktrees {
       const repo = (await this.findRepo(folder)) ?? (await this.initRepo(folder));
       const branch = Worktrees.branchOf(node.id);
       const worktree = this.worktreeOf(project, node.id);
-      const result = (created: boolean, merged: NodeWorktree['merged'] = [], conflicts: string[] = [], fromProject: string | null = null): NodeWorktree => ({
-        branch, worktree, editDir: path.join(worktree, repo.rel), created, merged, conflicts, fromProject,
-      });
+      const result = async (created: boolean, merged: NodeWorktree['merged'] = [], conflicts: string[] = [], fromProject: string | null = null): Promise<NodeWorktree> => {
+        const copy = await this.copyGit(repo.top, worktree);
+        if (!copy) throw new Error(`git doesn't know the copy at ${worktree} (its folder in .git/worktrees is missing).`);
+        return {
+          branch, worktree, editDir: path.join(worktree, repo.rel), created, merged, conflicts, fromProject,
+          gitAdmin: copy.admin, gitCommon: await this.commonDir(repo.top),
+        };
+      };
 
       if (existsSync(path.join(worktree, '.git'))) return result(false);
       mkdirSync(path.dirname(worktree), { recursive: true });
@@ -140,7 +170,7 @@ export class Worktrees {
 
       // The merged nodes' copies may hold changes the user made there (in VS Code) since their last reply.
       if (node.parentIds.length > 1) {
-        for (const id of node.parentIds) await this.commitCopy(this.worktreeOf(project, id), 'Saved before a merge');
+        for (const id of node.parentIds) await this.commitCopy(folder, this.worktreeOf(project, id), 'Saved before a merge');
       }
       // Named like the merged results in the prompt (by the title they were created with).
       const starts = node.parentIds.map((id) => ({ title: graph.node(id).promptTitle, ref: this.startOf(graph, id) }));
@@ -154,18 +184,19 @@ export class Worktrees {
       const merged: NodeWorktree['merged'] = [];
       const conflicts = new Set<string>();
       if (node.parentIds.length > 1) {
+        const copy = (await this.copyGit(repo.top, worktree))!;
         const refs = [...new Set(starts.flatMap((s) => (s.ref ? [s.ref] : [])))];
         const base = refs.length > 1 ? (await git(repo.top, ['merge-base', '--octopus', ...refs])).trim() : first;
         for (const { title, ref } of starts) {
           if (ref) merged.push({ title, files: await this.changedFiles(repo.top, base, ref) });
           if (!ref || ref === first) continue;
-          const out = await runGit(worktree, [...(await commitArgs(worktree)), 'merge', '--no-ff', '--no-edit', '--no-verify', '-m', `Merge "${title}"`, ref]);
+          const out = await copy.run([...copy.commitArgs, 'merge', '--no-ff', '--no-edit', '--no-verify', '-m', `Merge "${title}"`, ref]);
           if (out.code === 0) continue;
-          const unmerged = (await git(worktree, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
+          const unmerged = (await copy.git(['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
           if (unmerged.length === 0) throw new Error(`Could not merge the files of "${title}": ${out.stderr.trim()}`);
           unmerged.forEach((f) => conflicts.add(f));
-          await git(worktree, ['add', '-A']);
-          await git(worktree, [...(await commitArgs(worktree)), 'commit', '--no-edit', '--no-verify', '-m', `Merge "${title}" (conflicts left in ${unmerged.join(', ')})`]);
+          await copy.git(['add', '-A']);
+          await copy.git([...copy.commitArgs, 'commit', '--no-edit', '--no-verify', '-m', `Merge "${title}" (conflicts left in ${unmerged.join(', ')})`]);
         }
       }
       return result(true, merged, [...conflicts]);
@@ -175,7 +206,38 @@ export class Worktrees {
   /** Commit whatever the model changed in the node's worktree. Returns whether anything was committed. */
   commit(project: Project, nodeId: string, message: string): Promise<boolean> {
     const folder = this.workspaces.folderOf(project);
-    return this.queue.run(folder, () => this.commitCopy(this.worktreeOf(project, nodeId), message));
+    return this.queue.run(folder, () => this.commitCopy(folder, this.worktreeOf(project, nodeId), message));
+  }
+
+  /**
+   * After a sandboxed reply: undo what could make host programs run code from the copy. The
+   * copy's `.git` file gets its proper content back (VS Code and the user's own git read it), and
+   * git folders the model made inside the copy (nested repositories: their config could run
+   * programs once git or VS Code looks at them) are removed. Their files stay. Returns the paths
+   * removed, relative to the copy.
+   */
+  scrub(project: Project, nodeId: string): Promise<string[]> {
+    const folder = this.workspaces.folderOf(project);
+    const worktree = this.worktreeOf(project, nodeId);
+    return this.queue.run(folder, async () => {
+      const repo = await this.findRepo(folder);
+      if (!repo || !existsSync(worktree)) return [];
+      const copy = await this.copyGit(repo.top, worktree);
+      if (!copy) return [];
+      const dotGit = path.join(worktree, '.git');
+      const expected = `gitdir: ${copy.admin.split(path.sep).join('/')}\n`;
+      let current: string | null = null;
+      try {
+        current = lstatSync(dotGit).isFile() ? readFileSync(dotGit, 'utf8') : null;
+      } catch {
+        // missing
+      }
+      if (current?.trim() !== expected.trim()) {
+        rmSync(dotGit, { recursive: true, force: true });
+        writeFileSync(dotGit, expected);
+      }
+      return removeNestedGit(worktree);
+    });
   }
 
   /**
@@ -186,7 +248,7 @@ export class Worktrees {
   fork(project: Project, parentId: string, childIds: string[], message: string): Promise<void> {
     const folder = this.workspaces.folderOf(project);
     return this.queue.run(folder, async () => {
-      await this.commitCopy(this.worktreeOf(project, parentId), message);
+      await this.commitCopy(folder, this.worktreeOf(project, parentId), message);
       const repo = await this.findRepo(folder);
       const from = Worktrees.branchOf(parentId);
       if (!repo || !(await this.branchExists(repo.top, from))) return;
@@ -208,7 +270,9 @@ export class Worktrees {
       if (!source) return { source: 'start', folder: null, files: [], inRepo: '', truncated: false };
       let files: string[];
       if (source.dir !== null) {
-        const listed = await git(source.dir, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+        const copy = await this.copyGit(source.repo.top, this.worktreeOf(project, node.id));
+        if (!copy) return { source: 'start', folder: null, files: [], inRepo: '', truncated: false };
+        const listed = await copy.git(['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: source.dir });
         // Tracked files deleted in the copy are still in git's index: list only what is there.
         files = [...new Set(listed.split('\0').filter(Boolean))].filter((f) => existsSync(path.join(source.dir!, f)));
       } else {
@@ -277,30 +341,74 @@ export class Worktrees {
    * index, so the copy's own index, HEAD and branch stay untouched: the model may be using git
    * there meanwhile.
    */
-  private async onDisk(worktree: string, branch: string): Promise<string> {
+  private async onDisk(top: string, worktree: string, branch: string): Promise<string> {
     if (!existsSync(path.join(worktree, '.git'))) return branch;
+    const copy = await this.copyGit(top, worktree);
+    if (!copy) return branch;
     const dir = mkdtempSync(path.join(tmpdir(), 'harness-index-'));
     try {
       const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
       // Start from a copy of the copy's index: its file times let `git add` skip unchanged files.
-      const index = path.resolve(worktree, (await git(worktree, ['rev-parse', '--git-path', 'index'])).trim());
+      const index = path.join(copy.admin, 'index');
       if (existsSync(index)) copyFileSync(index, env.GIT_INDEX_FILE);
-      else await git(worktree, ['read-tree', branch], undefined, env);
-      await git(worktree, ['add', '-A'], undefined, env);
-      const tree = (await git(worktree, ['write-tree'], undefined, env)).trim();
-      if (tree === (await git(worktree, ['rev-parse', `${branch}^{tree}`])).trim()) return branch;
-      return (await git(worktree, [...(await commitArgs(worktree)), 'commit-tree', tree, '-p', branch, '-m', 'Uncommitted changes'])).trim();
+      else await copy.git(['read-tree', branch], { env });
+      await copy.git(['add', '-A'], { env });
+      const tree = (await copy.git(['write-tree'], { env })).trim();
+      if (tree === (await copy.git(['rev-parse', `${branch}^{tree}`])).trim()) return branch;
+      return (await copy.git([...copy.commitArgs, 'commit-tree', tree, '-p', branch, '-m', 'Uncommitted changes'])).trim();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
 
-  private async commitCopy(worktree: string, message: string): Promise<boolean> {
+  private async commitCopy(folder: string, worktree: string, message: string): Promise<boolean> {
     if (!existsSync(path.join(worktree, '.git'))) return false;
-    await git(worktree, ['add', '-A']);
-    if ((await runGit(worktree, ['diff', '--cached', '--quiet'])).code === 0) return false;
-    await git(worktree, [...(await commitArgs(worktree)), 'commit', '--no-verify', '-m', message]);
+    const repo = await this.findRepo(folder);
+    const copy = repo && (await this.copyGit(repo.top, worktree));
+    if (!copy) return false;
+    await copy.git(['add', '-A']);
+    if ((await copy.run(['diff', '--cached', '--quiet'])).code === 0) return false;
+    await copy.git([...copy.commitArgs, 'commit', '--no-verify', '-m', message]);
     return true;
+  }
+
+  /** The repository's git folder (`.git`, or wherever a `.git` file at its top points). */
+  private async commonDir(top: string): Promise<string> {
+    const out = (await git(top, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    return path.resolve(out);
+  }
+
+  /**
+   * git for a node's copy (see `CopyGit`), or null if the repository has no worktree there. The
+   * copy's git folder is found from the repository's side: the `.git/worktrees/<name>/gitdir`
+   * file that points back at the copy (written by git, out of the model's reach).
+   */
+  private async copyGit(top: string, worktree: string): Promise<CopyGit | null> {
+    const common = await this.commonDir(top);
+    const want = normalizePath(path.join(worktree, '.git'));
+    const list = path.join(common, 'worktrees');
+    let admin: string | null = null;
+    for (const name of existsSync(list) ? readdirSync(list) : []) {
+      try {
+        const target = readFileSync(path.join(list, name, 'gitdir'), 'utf8').trim();
+        if (normalizePath(path.resolve(list, name, target)) === want) {
+          admin = path.join(list, name);
+          break;
+        }
+      } catch {
+        // not a worktree folder
+      }
+    }
+    if (!admin) return null;
+    const found = admin;
+    const prefix = ['--git-dir', found, '--work-tree', worktree, ...COPY_SAFETY];
+    const commit = await commitArgs(top);
+    return {
+      admin: found,
+      run: (args, o = {}) => runGit(o.cwd ?? worktree, [...prefix, ...args], o.input, o.env),
+      git: (args, o = {}) => git(o.cwd ?? worktree, [...prefix, ...args], o.input, o.env),
+      commitArgs: commit,
+    };
   }
 
   /**
@@ -337,7 +445,7 @@ export class Worktrees {
       if (!repo || !(await this.branchExists(repo.top, branch))) return null;
       const target = await this.targetName(repo.top, targetBranch);
       const base = await this.targetCommit(repo.top, targetBranch);
-      const head = await this.onDisk(this.worktreeOf(project, nodeId), branch);
+      const head = await this.onDisk(repo.top, this.worktreeOf(project, nodeId), branch);
       const range = `${base}...${head}`;
       const files = parseNumstat(
         await git(repo.top, ['diff', '--numstat', '-z', '-M', range]),
@@ -598,6 +706,40 @@ export class BranchError extends Error {}
 /** One of Harness's own node branches (`harness/<id>`). */
 export function isHarnessBranch(name: string): boolean {
   return name.startsWith(`${BRANCH_PREFIX}/`);
+}
+
+/** A path for comparing: absolute, and on Windows case-insensitive with one kind of slash. */
+function normalizePath(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === 'win32' ? resolved.toLowerCase().replaceAll('/', '\\') : resolved;
+}
+
+/**
+ * Remove every `.git` (folder or file) inside a copy except its own top-level `.git` file.
+ * Links are not followed. Returns the removed paths, relative to the copy.
+ */
+export function removeNestedGit(top: string): string[] {
+  const removed: string[] = [];
+  const walk = (dir: string) => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.name.toLowerCase() === '.git') {
+        if (dir === top) continue;
+        rmSync(full, { recursive: true, force: true });
+        removed.push(path.relative(top, full).split(path.sep).join('/'));
+      } else if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        walk(full);
+      }
+    }
+  };
+  walk(top);
+  return removed;
 }
 
 /** Folders before files, then by name (case-insensitive), level by level: the order of a file tree. */

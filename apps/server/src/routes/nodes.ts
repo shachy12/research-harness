@@ -15,6 +15,7 @@ import {
   modelSettingsSchema,
   openInEditorSchema,
   renameNodeSchema,
+  sandboxToggleSchema,
   sendMessageSchema,
   titleFromPrompt,
 } from '@harness/shared';
@@ -22,7 +23,7 @@ import path from 'node:path';
 import { type Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { RouteDeps } from '../app.ts';
-import { inheritedItems } from '../dag/context.ts';
+import { inheritedItems, untrustedContext } from '../dag/context.ts';
 import { classifyError } from '../llm/errors.ts';
 import { cleanTitle } from '../llm/title.ts';
 import type { RunManager } from '../runs.ts';
@@ -111,6 +112,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
         merge: runs.mergeState(node, messages.length),
         compacting: runs.compactState(node),
         usage: runs.usage(),
+        untrusted: untrustedContext(graph, node.id),
       });
     })
 
@@ -128,6 +130,15 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
       const { model, effort } = c.req.valid('json');
       await checkModel(model, effort);
       repo.setModelSettings(node.id, model, effort);
+      return c.json(repo.getNode(node.id)!);
+    })
+
+    // Secure mode on or off for the node's next replies (the UI asks first when turning it off for
+    // a conversation that ran in the sandbox).
+    .put('/:nodeId/sandbox', zValidator('json', sandboxToggleSchema), (c) => {
+      const node = requireNode(c.req.param('nodeId'));
+      if (runs.isRunning(node.id)) throw conflict('Wait for the current reply to finish.');
+      repo.setSandboxed(node.id, c.req.valid('json').sandboxed);
       return c.json(repo.getNode(node.id)!);
     })
 
@@ -247,6 +258,8 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
 
       const project = repo.getProject(parent.projectId)!;
       const { filesFromProject } = c.req.valid('json');
+      // The branches run where the parent does, unless the fork dialog said otherwise.
+      const sandboxed = c.req.valid('json').sandboxed ?? parent.sandboxed;
       const branches: { prompt: string; title: string; attachments: Attachment[]; model: string | null; effort: Effort | null; compact: boolean }[] = [];
       for (const { prompt, title, attachments, model, effort, compact } of c.req.valid('json').branches) {
         const checked = workspaces.validate(project, attachments);
@@ -269,7 +282,7 @@ export function nodeRoutes({ repo, llm, runs, workspaces, worktrees, checkModel,
         branches.map(({ title, model, effort, compact }) =>
           repo.createNode({
             projectId: parent.projectId, title, parentIds: [parent.id], model, effort, forkPoint, forkSession: parent.sessionId,
-            filesFromProject, targetBranch: parent.targetBranch, compact,
+            filesFromProject, targetBranch: parent.targetBranch, compact, sandboxed,
           }),
         ),
       );

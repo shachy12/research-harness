@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "check:cache": "tsx src/scripts/check-cache.ts"
+    "check:cache": "tsx src/scripts/check-cache.ts",
+    "check:sandbox": "tsx src/scripts/check-sandbox.ts"
   },
   "dependencies": {
     "@harness/shared": "^0.0.0",

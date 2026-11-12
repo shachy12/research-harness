@@ -81,6 +81,10 @@ On the graph, a solid line means "inherits the full context" and a dashed line l
 - **Attachments:** attach files or whole folders (or drop them on the chat). They are copied into the project, and later branches inherit what was read.
 - **File editing:** each node works on its own git branch in its own copy of the project, so branches never overwrite each other. A changes panel shows the diff, and **Apply** merges a node's changes into the branch you have checked out. The model can also run shell commands (for example to build a LaTeX document) in its copy.
 
+### Sandbox (secure mode)
+- The lock button under the message box runs a node's replies in a **Docker container** that sees only the project folder (read-only) and the node's own copy. Its internet access goes through a proxy that refuses your machine and your local network. Needs Docker, and a Claude token from `claude setup-token` (Sandbox settings, in the project's menu).
+- **Warning: the sandbox has not had a security audit.** It is a layer that reduces risk, not a guarantee. Don't rely on it alone to protect your machine, your files or your credentials from untrusted content: anything it is given (the login token, shared folders, `~/.aws`) is readable by the model inside it, and mistakes in its design or in Docker's configuration could let code escape.
+
 ### Models
 - Pick the model and effort per node, from the composer. Branches start with their parent's setting; the fork and merge dialogs let you choose others.
 - Harness warns before a switch that would lose the prompt cache and cost more of your usage limit.

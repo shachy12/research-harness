@@ -82,7 +82,11 @@ class FakeProvider implements LLMProvider {
     yield { type: 'text', text: 'there' };
   }
 
-  async draftResult({ request }: ReplyContext): Promise<BranchResult> {
+  drafted: ReplyContext[] = [];
+
+  async draftResult(ctx: ReplyContext): Promise<BranchResult> {
+    this.drafted.push(ctx);
+    const { request } = ctx;
     this.requests.push(request);
     return { findings: 'drafted', evidence: '', openQuestions: '', confidence: 'medium' };
   }
@@ -531,6 +535,82 @@ describe('API', () => {
     await chat(second.id, 'A separate question');
     expect(llm.contexts.at(-1)!.session).toMatchObject({ mode: 'new', transcript: [] });
     expect(llm.requests.at(-1)!.turns.map((t) => t.content)).toEqual(['A separate question']);
+  });
+
+  describe('secure mode', () => {
+    const sandbox = (nodeId: string, sandboxed: boolean) => call<DagNode>('PUT', `/nodes/${nodeId}/sandbox`, { sandboxed });
+
+    it('runs a sandboxed node in the sandbox, tells the model when it switches sides, and marks its replies', async () => {
+      expect((await sandbox(rootId, true)).data.sandboxed).toBe(true);
+      await chat(rootId, 'first');
+      expect(llm.contexts[0].sandbox).not.toBeNull();
+      expect(llm.contexts[0].message.startsWith('[You are now running inside docker container.')).toBe(true);
+      await chat(rootId, 'second');
+      expect(llm.contexts[1].message).toBe('second'); // still in the sandbox: nothing to say
+      let d = await detail(rootId);
+      expect(d.messages.filter((m) => m.role === 'assistant').map((m) => m.sandboxed)).toEqual([true, true]);
+      expect(d.untrusted).toBe(true);
+
+      await sandbox(rootId, false);
+      await chat(rootId, 'third');
+      expect(llm.contexts[2].sandbox ?? null).toBeNull();
+      expect(llm.contexts[2].message.startsWith('[You are now running without sandbox.')).toBe(true);
+      d = await detail(rootId);
+      expect(d.messages.at(-1)?.sandboxed).toBe(false);
+      expect(d.untrusted).toBe(true); // what ran in the sandbox stays in the conversation
+    });
+
+    it('refuses to switch while a reply runs', async () => {
+      const res = app.request(`/api/nodes/${rootId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'slow' }) });
+      await untilRunning(rootId);
+      expect((await sandbox(rootId, true)).status).toBe(409);
+      llm.release();
+      await (await res).text();
+    });
+
+    it("branches take their parent's setting unless the fork says otherwise; their context counts as untrusted", async () => {
+      await sandbox(rootId, true);
+      await chat(rootId, 'start');
+      const [a] = await fork(rootId, ['A']);
+      expect(a.sandboxed).toBe(true);
+      const { data: [b] } = await call<DagNode[]>('POST', `/nodes/${rootId}/fork`, { sandboxed: false, branches: [{ prompt: 'B' }] });
+      await settle(b.id);
+      expect(b.sandboxed).toBe(false);
+      expect((await detail(b.id)).untrusted).toBe(true);
+      const graph = (await call<GraphResponse>('GET', '/projects/default/graph')).data;
+      expect(graph.nodes.find((n) => n.id === b.id)?.untrusted).toBe(true);
+    });
+
+    it('a merge is sandboxed if any merged node is, and drafts their results in the sandbox', async () => {
+      await chat(rootId, 'start');
+      const [a, b] = await fork(rootId, ['A', 'B']);
+      await sandbox(a.id, true);
+      const { data: merged } = await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Combine' });
+      expect(merged.sandboxed).toBe(true);
+      await settle(merged.id);
+      const drafts = new Map(llm.drafted.map((c) => [c.nodeId, c.sandbox ?? null]));
+      expect(drafts.get(a.id)).not.toBeNull();
+      expect(drafts.get(b.id)).toBeNull();
+      const { data: unsandboxed } = await call<DagNode>('POST', '/projects/default/merge', { parentIds: [a.id, b.id], prompt: 'Again', sandboxed: false });
+      expect(unsandboxed.sandboxed).toBe(false);
+    });
+
+    it("saves the project's sandbox settings; new roots follow its default", async () => {
+      const settings = { image: { kind: 'dockerfile', dockerfile: 'FROM harness-sandbox' }, shareAws: true, env: ['AWS_REGION'], mounts: [], newNodes: true };
+      const { status, data } = await call<Project>('PUT', '/projects/default/sandbox', settings);
+      expect(status).toBe(200);
+      expect(data.sandbox).toEqual(settings);
+      expect((await call<DagNode>('POST', '/projects/default/roots', {})).data.sandboxed).toBe(true);
+      expect((await call('PUT', '/projects/default/sandbox', { ...settings, mounts: [{ path: 'relative/dir' }] })).status).toBe(400);
+      expect((await call('PUT', '/projects/default/sandbox', { ...settings, env: ['NOT VALID'] })).status).toBe(400);
+    });
+
+    it('reports whether sandboxes can run, and keeps the login token out of every answer', async () => {
+      expect((await call('PUT', '/sandbox/token', { token: 'sk-ant-oat01-abcdefghijk' })).status).toBe(200);
+      const { data } = await call<{ supported: boolean; docker: { state: string }; token: string | null }>('GET', '/sandbox');
+      expect(data).toMatchObject({ supported: true, docker: { state: 'ready' }, token: 'saved' });
+      expect(JSON.stringify(data)).not.toContain('abcdefghijk');
+    });
   });
 
   describe('compact forks', () => {

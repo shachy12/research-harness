@@ -73,9 +73,18 @@ export async function git(cwd: string, args: string[], input?: string, env?: Rec
   const out = await runGit(cwd, args, input, env);
   if (out.code !== 0) {
     const detail = (out.stderr || out.stdout).trim().split('\n').slice(-3).join(' ');
-    throw new Error(`git ${args.find((a) => !a.startsWith('-') && !a.includes('=')) ?? ''} failed: ${detail}`);
+    throw new Error(`git ${subcommand(args)} failed: ${detail}`);
   }
   return out.stdout;
+}
+
+/** The git command among the arguments (`commit`), past options and their values (`-c x=y`, `--git-dir <dir>`). */
+function subcommand(args: string[]): string {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-c' || args[i] === '--git-dir' || args[i] === '--work-tree') i++;
+    else if (!args[i].startsWith('-')) return args[i];
+  }
+  return '';
 }
 
 /** Run git and return its raw output (file contents, which may be binary); throws if it fails. */

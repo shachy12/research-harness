@@ -16,6 +16,9 @@ import type {
   NodeFiles,
   Project,
   ProjectSummary,
+  SandboxBuild,
+  SandboxSettings,
+  SandboxStatus,
 } from '@harness/shared'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -30,6 +33,77 @@ export const keys = {
   changes: (nodeId: string) => ['changes', nodeId] as const,
   files: (nodeId: string) => ['files', nodeId] as const,
   branches: (projectId: string) => ['branches', projectId] as const,
+  sandbox: ['sandbox'] as const,
+  sandboxBuild: (projectId: string) => ['sandbox-build', projectId] as const,
+}
+
+/**
+ * Can sandboxes run on this machine (Docker running, a Claude login token)? Asked again every
+ * 30 seconds, and every 5 while Docker isn't ready (the user may be starting it).
+ */
+export function useSandboxStatus() {
+  return useQuery({
+    queryKey: keys.sandbox,
+    queryFn: ({ signal }) => api.get<SandboxStatus>('/sandbox', signal),
+    staleTime: 10_000,
+    refetchInterval: (query) => (query.state.data?.docker.state === 'ready' ? 30_000 : 5_000),
+  })
+}
+
+/** Turn secure mode on or off for a node's next replies. */
+export function useSetSandboxed() {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: ({ nodeId, sandboxed }: { nodeId: string; sandboxed: boolean }) =>
+      api.put<DagNode>(`/nodes/${nodeId}/sandbox`, { sandboxed }),
+    onSuccess: refresh,
+  })
+}
+
+/** Save or remove the Claude login token sandboxes use. */
+export function useSetSandboxToken() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (token: string | null) => api.put<{ ok: true }>('/sandbox/token', { token }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.sandbox }),
+  })
+}
+
+/** Leave these certificates of this machine out of the sandbox image (all others go in). */
+export function useSetSandboxCertificates() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (excluded: string[]) => api.put<{ ok: true }>('/sandbox/certificates', { excluded }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.sandbox }),
+  })
+}
+
+/** Save a project's sandbox settings. */
+export function useSetProjectSandbox(projectId: string) {
+  const refresh = useRefreshAll()
+  return useMutation({
+    mutationFn: (settings: SandboxSettings) => api.put<Project>(`/projects/${projectId}/sandbox`, settings),
+    onSuccess: refresh,
+  })
+}
+
+/** The project's sandbox image build (polled while it runs). */
+export function useSandboxBuild(projectId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.sandboxBuild(projectId),
+    queryFn: ({ signal }) => api.get<SandboxBuild>(`/projects/${projectId}/sandbox/build`, signal),
+    enabled,
+    refetchInterval: (query) => (query.state.data?.state === 'building' ? 1500 : false),
+  })
+}
+
+/** Start building the project's sandbox image now. */
+export function useBuildSandbox(projectId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post<SandboxBuild>(`/projects/${projectId}/sandbox/build`),
+    onSuccess: (data) => qc.setQueryData(keys.sandboxBuild(projectId), data),
+  })
 }
 
 /**
@@ -254,7 +328,7 @@ export function useMergePreview(projectId: string, parentIds: string[], enabled:
 export function useFork() {
   const refresh = useRefreshAll()
   return useMutation({
-    mutationFn: ({ nodeId, ...body }: { nodeId: string; branches: ForkBody['branches']; filesFromProject: boolean }) =>
+    mutationFn: ({ nodeId, ...body }: { nodeId: string; branches: ForkBody['branches']; filesFromProject: boolean; sandboxed?: boolean }) =>
       api.post<DagNode[]>(`/nodes/${nodeId}/fork`, body),
     onSuccess: refresh,
   })

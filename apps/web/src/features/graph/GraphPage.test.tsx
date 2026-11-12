@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { GraphResponse, NodeSummary } from '@harness/shared'
+import { type GraphResponse, type NodeSummary, DEFAULT_SANDBOX_SETTINGS } from '@harness/shared'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { useEffect } from 'react'
@@ -32,13 +32,13 @@ const node = (id: string, projectId: string): NodeSummary => ({
   id, projectId, title: `Node ${id}`, titleSource: 'prompt', promptTitle: `Node ${id}`, parentIds: [], forkPoint: null,
   forkSession: null, status: 'open', result: null, resultUpto: null, mergeResults: null, mergePrompt: null,
   filesFromProject: false, targetBranch: null, compact: false, compactText: null, sessionId: null, readUpto: null, model: null,
-  effort: null, gitBranch: null, filesChanged: null,
+  effort: null, gitBranch: null, filesChanged: null, sandboxed: false, untrusted: false,
   createdAt: '2026-10-06T00:00:00.000Z', messageCount: 0, lastMessage: null, lastRole: null, unread: 0, running: false,
   run: null, titlePending: false, proposedBranches: 0, forkedAtEnd: false, merge: null, compacting: null,
 })
 
 const graphOf = (projectId: string): GraphResponse => ({
-  project: { id: projectId, name: projectId, folder: null, archived: false, createdAt: '2026-10-06T00:00:00.000Z' },
+  project: { id: projectId, name: projectId, folder: null, archived: false, sandbox: DEFAULT_SANDBOX_SETTINGS, createdAt: '2026-10-06T00:00:00.000Z' },
   nodes: [node(`${projectId}-root`, projectId)],
   deleted: [],
   usage: null,

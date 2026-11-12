@@ -1,3 +1,5 @@
+import type { SandboxSettings } from './sandbox.ts';
+
 // Core domain types shared by the server and the web UI.
 
 export interface Project {
@@ -10,6 +12,8 @@ export interface Project {
   folder: string | null;
   /** Listed in the sidebar's "Archives" group (collapsed by default) instead of with the others. */
   archived: boolean;
+  /** How its sandboxed nodes run (image, credentials, extra folders); see `DagNode.sandboxed`. */
+  sandbox: SandboxSettings;
   createdAt: string;
 }
 
@@ -122,6 +126,12 @@ export interface DagNode {
   gitBranch: string | null;
   /** How many files its branch changes compared with the project, as of its last reply (null: no branch). */
   filesChanged: number | null;
+  /**
+   * Secure mode: its next replies run in a Docker container that sees only the project folder
+   * (read-only) and its own copy. Branches copy it from their parent; a merge node is sandboxed
+   * if any merged node is.
+   */
+  sandboxed: boolean;
   createdAt: string;
 }
 
@@ -188,6 +198,8 @@ export interface Message {
   model: string | null;
   /** Branches the model proposed with its fork_branches tool while writing this reply (null: none). */
   forkProposal: ForkProposal | null;
+  /** The reply was written in the sandbox (assistant messages). */
+  sandboxed: boolean;
   createdAt: string;
 }
 
@@ -263,6 +275,8 @@ export interface NodeSummary extends DagNode {
   merge: MergeState | null;
   /** A compact branch whose compact is being written, or stopped before it was (Retry). */
   compacting: MergeState | null;
+  /** Its context includes replies written in the sandbox (see `NodeDetail.untrusted`). */
+  untrusted: boolean;
 }
 
 export interface RunStatus {
@@ -336,6 +350,12 @@ export interface NodeDetail {
   merge: MergeState | null;
   compacting: MergeState | null;
   usage: UsageLimit | null;
+  /**
+   * The node or something it inherits had replies written in the sandbox: its conversation may
+   * hold instructions from untrusted content (pages, files) that ran there. Turning the sandbox
+   * off for it asks the user first.
+   */
+  untrusted: boolean;
 }
 
 /**

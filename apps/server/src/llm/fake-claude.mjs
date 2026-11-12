@@ -7,7 +7,10 @@ import { createInterface } from 'node:readline';
 const argv = process.argv.slice(2);
 const flag = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
 const resume = flag('--resume');
-const sessionId = resume ? (argv.includes('--fork-session') ? `fork-of-${resume}` : resume) : 'new-session';
+// Session ids are UUIDs, like the real CLI's (the provider refuses anything else): 'new' for a new
+// session, 'f' + the source id for a fork (see fakeSessionId in claude-code.test.ts).
+const uuid = (tag) => `00000000-0000-4000-8000-${Buffer.from(tag).toString('hex').slice(0, 12).padStart(12, '0')}`;
+const sessionId = resume ? (argv.includes('--fork-session') ? uuid(`f${resume}`) : resume) : uuid('new');
 const log = (entry) => appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(entry) + '\n');
 const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');
 

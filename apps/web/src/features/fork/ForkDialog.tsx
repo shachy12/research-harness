@@ -16,6 +16,7 @@ import { composeBranchPrompt } from '@/lib/listItems'
 import { formatTokens } from '@/lib/tokens'
 import { useDropZone } from '@/lib/useDropZone'
 import { cn } from '@/lib/utils'
+import { SandboxSwitch } from '@/features/sandbox/SandboxSwitch'
 
 /** A list item picked in the chat: the branch it becomes starts from its text and is named after it. */
 export interface ForkItem {
@@ -66,9 +67,11 @@ function initialBranches(settings: ModelSettings, items?: ForkItem[], proposal?:
  * With `proposal` (branches the model proposed with its fork_branches tool) the fields start with
  * the proposed messages and titles, for the user to edit before starting them.
  */
-export function ForkDialog({ node, inheritedTokens, existingBranches, items, proposal, onClose }: {
+export function ForkDialog({ node, inheritedTokens, existingBranches, items, proposal, untrusted = false, onClose }: {
   node: DagNode
   inheritedTokens: number
+  /** The node's context has replies written in the sandbox (`NodeDetail.untrusted`). */
+  untrusted?: boolean
   /** Branches the node already has; forking again adds to them. */
   existingBranches: number
   items?: ForkItem[]
@@ -80,6 +83,8 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
   const [branches, setBranches] = useState<Branch[]>(() => initialBranches(parentSettings, items, proposal))
   // The branches' copies of the files start from the project folder's branch, not this node's copy.
   const [filesFromProject, setFilesFromProject] = useState(false)
+  // The branches run where this node does, unless switched here.
+  const [sandboxed, setSandboxed] = useState(node.sandboxed)
   const fork = useFork()
   const catalog = useModels().data
   const navigate = useNavigate()
@@ -96,6 +101,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
       {
         nodeId: node.id,
         filesFromProject,
+        sandboxed,
         branches: filled.map((b) => ({
           prompt: promptOf(b).trim(),
           title: b.item?.title ?? b.title ?? undefined,
@@ -199,6 +205,7 @@ export function ForkDialog({ node, inheritedTokens, existingBranches, items, pro
               </span>
             </label>
           )}
+          <SandboxSwitch checked={sandboxed} onChange={setSandboxed} untrusted={untrusted} what="the branches" />
           {fork.isError && <p className="text-sm text-destructive">{fork.error.message}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>

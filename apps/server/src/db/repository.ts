@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Attachment, BranchResult, DagNode, DeletedNode, Effort, ForkProposal, MergedResult, Message, NodeStatus, Project, Role, TitleSource, ToolCall } from '@harness/shared';
+import { type Attachment, type BranchResult, type DagNode, type DeletedNode, type Effort, type ForkProposal, type MergedResult, type Message, type NodeStatus, type Project, type Role, type SandboxSettings, type TitleSource, type ToolCall, DEFAULT_SANDBOX_SETTINGS, sandboxSettingsSchema } from '@harness/shared';
 import { GraphSnapshot } from '../dag/graph.ts';
 import { transaction } from './database.ts';
 
-interface ProjectRow { id: string; name: string; folder: string | null; archived: number; created_at: string }
+interface ProjectRow { id: string; name: string; folder: string | null; archived: number; sandbox: string | null; created_at: string }
 interface NodeRow {
   id: string; project_id: string; title: string; parent_ids: string;
   status: NodeStatus; result: string | null; session_id: string | null; created_at: string;
@@ -13,7 +13,7 @@ interface NodeRow {
   fork_point: number | null; fork_session: string | null;
   result_upto: number | null; merge_results: string | null; merge_prompt: string | null; files_from_project: number;
   deleted_at: string | null; deleted_links: string | null;
-  target_branch: string | null; compact: number; compact_text: string | null;
+  target_branch: string | null; compact: number; compact_text: string | null; sandboxed: number;
 }
 
 /** How a child of a deleted node was attached before it became a root (restoring puts it back). */
@@ -22,11 +22,24 @@ interface DeletedLink {
 }
 interface MessageRow {
   id: string; node_id: string; role: Role; content: string; tool_calls: string; attachments: string;
-  model: string | null; fork_proposal: string | null; created_at: string;
+  model: string | null; fork_proposal: string | null; sandboxed: number; created_at: string;
 }
 
 // projects.editing (migration 8) was a per-project switch for file editing, dropped the same day: editing is always on.
-const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, folder: r.folder, archived: r.archived === 1, createdAt: r.created_at });
+const toProject = (r: ProjectRow): Project => ({
+  id: r.id, name: r.name, folder: r.folder, archived: r.archived === 1, sandbox: parseSandbox(r.sandbox), createdAt: r.created_at,
+});
+
+/** Stored sandbox settings, with defaults for anything missing (or for unreadable JSON). */
+function parseSandbox(json: string | null): SandboxSettings {
+  if (!json) return DEFAULT_SANDBOX_SETTINGS;
+  try {
+    const parsed = sandboxSettingsSchema.safeParse(JSON.parse(json));
+    return parsed.success ? parsed.data : DEFAULT_SANDBOX_SETTINGS;
+  } catch {
+    return DEFAULT_SANDBOX_SETTINGS;
+  }
+}
 const toNode = (r: NodeRow): DagNode => ({
   id: r.id,
   projectId: r.project_id,
@@ -51,6 +64,7 @@ const toNode = (r: NodeRow): DagNode => ({
   effort: r.effort,
   gitBranch: r.git_branch,
   filesChanged: r.files_changed,
+  sandboxed: r.sandboxed === 1,
   createdAt: r.created_at,
 });
 const toMessage = (r: MessageRow): Message => ({
@@ -62,6 +76,7 @@ const toMessage = (r: MessageRow): Message => ({
   attachments: JSON.parse(r.attachments) as Attachment[],
   model: r.model,
   forkProposal: r.fork_proposal ? (JSON.parse(r.fork_proposal) as ForkProposal) : null,
+  sandboxed: r.sandboxed === 1,
   createdAt: r.created_at,
 });
 
@@ -116,6 +131,10 @@ export class Repository {
 
   setProjectArchived(id: string, archived: boolean): void {
     this.db.prepare('UPDATE projects SET archived = ? WHERE id = ?').run(archived ? 1 : 0, id);
+  }
+
+  setProjectSandbox(id: string, settings: SandboxSettings): void {
+    this.db.prepare('UPDATE projects SET sandbox = ? WHERE id = ?').run(JSON.stringify(settings), id);
   }
 
   /** Delete a project with all its nodes and messages (they cascade). Its folder on disk is left alone. */
@@ -179,15 +198,18 @@ export class Repository {
     targetBranch?: string | null;
     /** A branch starting from a compact of its parent (written later, `setCompactText`). */
     compact?: boolean;
+    /** Its replies run in the sandbox. */
+    sandboxed?: boolean;
   }): DagNode {
     const id = randomUUID();
     this.db
       .prepare(`INSERT INTO nodes (id, project_id, title, title_source, prompt_title, parent_ids, status, result, model, effort,
-                  fork_point, fork_session, merge_prompt, files_from_project, target_branch, compact, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                  fork_point, fork_session, merge_prompt, files_from_project, target_branch, compact, sandboxed, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, input.projectId, input.title, input.titleSource ?? 'prompt', input.title, JSON.stringify(input.parentIds),
         input.model ?? null, input.effort ?? null, input.forkPoint ?? null, input.forkSession ?? null,
-        input.mergePrompt ?? null, input.filesFromProject ? 1 : 0, input.targetBranch ?? null, input.compact ? 1 : 0, now());
+        input.mergePrompt ?? null, input.filesFromProject ? 1 : 0, input.targetBranch ?? null, input.compact ? 1 : 0,
+        input.sandboxed ? 1 : 0, now());
     return this.getNode(id)!;
   }
 
@@ -247,6 +269,11 @@ export class Repository {
   /** The model and effort the node's next replies use (null: the provider's default). */
   setModelSettings(id: string, model: string | null, effort: Effort | null): void {
     this.db.prepare('UPDATE nodes SET model = ?, effort = ? WHERE id = ?').run(model, effort, id);
+  }
+
+  /** Whether the node's next replies run in the sandbox. */
+  setSandboxed(id: string, sandboxed: boolean): void {
+    this.db.prepare('UPDATE nodes SET sandboxed = ? WHERE id = ?').run(sandboxed ? 1 : 0, id);
   }
 
   /** Rename a node. `prompt_title` stays as it was, so the model's context doesn't change. */
@@ -322,14 +349,15 @@ export class Repository {
       attachments = [],
       model = null,
       forkProposal = null,
-    }: { toolCalls?: ToolCall[]; attachments?: Attachment[]; model?: string | null; forkProposal?: ForkProposal | null } = {},
+      sandboxed = false,
+    }: { toolCalls?: ToolCall[]; attachments?: Attachment[]; model?: string | null; forkProposal?: ForkProposal | null; sandboxed?: boolean } = {},
   ): Message {
     const id = randomUUID();
     this.db
-      .prepare(`INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, model, fork_proposal, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .prepare(`INSERT INTO messages (id, node_id, role, content, tool_calls, attachments, model, fork_proposal, sandboxed, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, nodeId, role, content, JSON.stringify(toolCalls), JSON.stringify(attachments), model,
-        forkProposal ? JSON.stringify(forkProposal) : null, now());
+        forkProposal ? JSON.stringify(forkProposal) : null, sandboxed ? 1 : 0, now());
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as unknown as MessageRow;
     return toMessage(row);
   }

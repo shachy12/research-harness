@@ -16,6 +16,11 @@
     --color-merge: var(--status-merge);
     --color-merge-soft: var(--status-merge-soft);
     --color-frozen: var(--status-frozen);
+    /* Secure mode: the lock button (green: sandboxed, amber: runs on this machine). */
+    --color-secure: var(--status-secure);
+    --color-secure-soft: var(--status-secure-soft);
+    --color-exposed: var(--status-exposed);
+    --color-exposed-soft: var(--status-exposed-soft);
     --color-canvas: var(--canvas);
     --color-edge: var(--edge);
 }
@@ -119,6 +124,10 @@
     --status-merge: oklch(0.58 0.14 55);
     --status-merge-soft: oklch(0.95 0.04 70);
     --status-frozen: oklch(0.55 0.02 265);
+    --status-secure: oklch(0.52 0.15 150);
+    --status-secure-soft: oklch(0.95 0.05 150);
+    --status-exposed: oklch(0.58 0.15 50);
+    --status-exposed-soft: oklch(0.96 0.035 65);
     --canvas: oklch(0.98 0.003 265);
     --edge: oklch(0.72 0.02 265);
     /* Syntax colours of the Files view (CodeMirror; features/files/codeTheme.ts) */
@@ -174,6 +183,10 @@
     --status-merge: oklch(0.76 0.12 65);
     --status-merge-soft: oklch(0.29 0.04 65);
     --status-frozen: oklch(0.65 0.02 265);
+    --status-secure: oklch(0.78 0.16 150);
+    --status-secure-soft: oklch(0.29 0.06 150);
+    --status-exposed: oklch(0.78 0.13 60);
+    --status-exposed-soft: oklch(0.3 0.05 60);
     --canvas: oklch(0.17 0.005 265);
     --edge: oklch(0.45 0.02 265);
     --syntax-keyword: oklch(0.75 0.14 305);
