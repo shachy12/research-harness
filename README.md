@@ -28,7 +28,7 @@ You need:
 
 Then run:
 ```bash
-npx research-harness --app
+npx research-harness@latest --app
 ```
 
 The first `--app` start downloads Electron (about 100 MB); later starts are instant. Closing the window stops Harness.
@@ -38,8 +38,6 @@ The first `--app` start downloads Electron (about 100 MB); later starts are inst
 | `--app` | Open in a desktop window instead of a browser tab |
 | `--no-open` | Start the server without opening anything |
 | `--port <n>` | Use another port (default 47831) |
-
-Update with `npx research-harness@latest`. Each version keeps its own copy of the database, so going back to an older version never loses work.
 
 ## How it works
 
