@@ -10,6 +10,7 @@ import { ModelFields } from '@/features/model/ModelFields'
 import { type ModelSettings, describeSettings } from '@/features/model/modelSettings'
 import { contextTokens, estimateTokens, formatTokens } from '@/lib/tokens'
 import { useMergeSelection } from './selection'
+import { SandboxSwitch } from '@/features/sandbox/SandboxSwitch'
 
 const DEFAULT_FRAMING = 'Synthesize these results into a recommendation and list what still needs research.'
 
@@ -47,6 +48,8 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
   // What the user picked in the dropdowns; null: still the rule's choice.
   const [picked, setPicked] = useState<ModelSettings | null>(null)
   const settings: ModelSettings | undefined = picked ?? (rule ? { model: rule.model, effort: rule.effort } : undefined)
+  // Sandboxed if any merged node is (the server's rule), unless switched here.
+  const [sandboxed, setSandboxed] = useState(() => parents.some((p) => p.sandboxed))
 
   // The base node's full context (what the merged node starts from, besides the results).
   const base = useNodeDetail(baseId ?? '', Boolean(baseId)).data
@@ -67,6 +70,7 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
         prompt: framing.trim(),
         // Left out, the server applies the same rule.
         ...(picked ?? {}),
+        sandboxed,
       },
       {
         // The merge node is on the graph now, writing the results in the background.
@@ -141,6 +145,8 @@ export function MergeDialog({ projectId, nodes, parentIds, onClose }: {
             )}
           </div>
         )}
+
+        <SandboxSwitch checked={sandboxed} onChange={setSandboxed} untrusted={parents.some((p) => p.untrusted)} what="the merged node" />
 
         <div className="grid gap-1.5">
           <Label htmlFor="merge-title">Node title</Label>

@@ -7,6 +7,8 @@ import { ClaudeCodeProvider, absoluteRule, cliEnv, findClaudeExecutable, mapEven
 import type { ReplyContext, ReplyEvent } from './provider.ts';
 
 const FAKE_CLI = path.join(import.meta.dirname, 'fake-claude.mjs');
+/** The session id the fake CLI reports for a tag ('new', or 'f' + the forked session's id). */
+const fakeSessionId = (tag: string) => `00000000-0000-4000-8000-${Buffer.from(tag).toString('hex').slice(0, 12).padStart(12, '0')}`;
 
 let dir: string;
 let logFile: string;
@@ -53,7 +55,7 @@ const replyText = (events: ReplyEvent[]) =>
 describe('ClaudeCodeProvider', () => {
   it('streams a reply and reports the session id', async () => {
     const events = await collect(provider.streamReply(ctx('hello', NEW), new AbortController().signal));
-    expect(events[0]).toEqual({ type: 'session', sessionId: 'new-session' });
+    expect(events[0]).toEqual({ type: 'session', sessionId: fakeSessionId('new') });
     expect(events).toContainEqual({ type: 'thinking' });
     expect(replyText(events)).toBe('echo: hello');
   });
@@ -202,7 +204,7 @@ describe('ClaudeCodeProvider', () => {
   it('forks the source session and sends the preamble with the first message', async () => {
     const plan: SessionPlan = { mode: 'fork', sessionId: 'S0', preamble: '[branch note]', transcript: [] };
     const events = await collect(provider.streamReply(ctx('question', plan), new AbortController().signal));
-    expect(events[0]).toEqual({ type: 'session', sessionId: 'fork-of-S0' });
+    expect(events[0]).toEqual({ type: 'session', sessionId: fakeSessionId('fS0') });
 
     const [start, first] = log();
     expect(start.argv).toEqual(expect.arrayContaining(['--resume', 'S0', '--fork-session']));

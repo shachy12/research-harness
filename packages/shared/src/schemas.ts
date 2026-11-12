@@ -92,6 +92,8 @@ export const modelSettingsSchema = z.object({
  */
 export const forkSchema = z.object({
   filesFromProject: z.boolean().default(false),
+  /** Run the branches in the sandbox; left out: the parent's setting. */
+  sandboxed: z.boolean().optional(),
   branches: z
     .array(z.object({
       prompt: z.string().trim().min(1),
@@ -117,6 +119,8 @@ export const mergeSchema = z.object({
   prompt: z.string().trim().min(1, 'Write the first message'),
   model: modelField.optional(),
   effort: effortField.optional(),
+  /** Run the merged node in the sandbox; left out: sandboxed if any merged node is. */
+  sandboxed: z.boolean().optional(),
 });
 
 /**

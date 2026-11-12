@@ -144,6 +144,8 @@ export class HarnessTools {
       mcpUrl: this.mcpUrl(target.id, chargeTo),
     };
     try {
+      // A sandboxed node answers from inside its sandbox, like its replies.
+      ctx.sandbox = await this.runs.sandboxFor(target);
       const answer = (await this.llm.askNode(ctx, signal)).answer.trim();
       return `${answer || `"${target.title}" gave no answer.`}\n\n${left}`;
     } catch (err) {
@@ -199,6 +201,31 @@ export function harnessMcpRoutes(tools: ToolHandlers, hasNode: (id: string) => b
       await server.close();
     }
   });
+}
+
+/**
+ * The harness tools' definitions exactly as the MCP server lists them (`tools/list`), for the
+ * sandbox's stand-in server (sandbox/stub.ts), so a sandboxed model sees the same tools.
+ */
+export async function harnessToolDefinitions(): Promise<unknown[]> {
+  const refuse = () => {
+    throw new ToolError('unused');
+  };
+  const server = serverFor({ proposeBranches: refuse, ask: refuse }, 'definitions', 'definitions', new AbortController().signal);
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  await server.connect(transport);
+  try {
+    const res = await transport.handleRequest(new Request('http://localhost/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    }));
+    const body = (await res.json()) as { result?: { tools: unknown[] } };
+    if (!body.result) throw new Error('The harness MCP server listed no tools.');
+    return body.result.tools;
+  } finally {
+    await server.close();
+  }
 }
 
 /**

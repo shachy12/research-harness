@@ -141,6 +141,15 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (node_id, upto)
   );
   `,
+  // 16: secure mode. `nodes.sandboxed`: the node's replies run in a Docker container;
+  // `messages.sandboxed`: the reply was written there (its context may hold untrusted
+  // instructions); `projects.sandbox`: the project's sandbox settings (JSON SandboxSettings, NULL:
+  // the defaults).
+  `
+  ALTER TABLE nodes ADD COLUMN sandboxed INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE messages ADD COLUMN sandboxed INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE projects ADD COLUMN sandbox TEXT;
+  `,
 ];
 
 /** Where backups of a database file go: `backups/` next to it. */

@@ -6,8 +6,9 @@ import { cn } from '@/lib/utils'
 import { AttachmentChip } from './AttachmentChip'
 import { Markdown } from './Markdown'
 import { ToolCalls } from './ToolCalls'
+import { SandboxMark } from '@/features/sandbox/SandboxToggle'
 
-export function MessageView({ id, role, text, toolCalls = [], attachments = [], streaming }: {
+export function MessageView({ id, role, text, toolCalls = [], attachments = [], streaming, sandboxed }: {
   /** Saved messages carry their id so the chat can scroll to them and track what was read. */
   id?: string
   role: Role
@@ -15,11 +16,14 @@ export function MessageView({ id, role, text, toolCalls = [], attachments = [], 
   toolCalls?: ToolCall[]
   attachments?: Attachment[]
   streaming?: boolean
+  /** The reply was written in the sandbox. */
+  sandboxed?: boolean
 }) {
   return (
     <div className="flex min-w-0 scroll-mt-4 flex-col gap-1.5" data-message-id={id} data-role={role}>
-      <div className="text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
+      <div className="flex items-center gap-1 text-[10px] font-semibold tracking-wider text-muted-foreground uppercase">
         {role === 'user' ? 'You' : 'Assistant'}
+        {sandboxed && <SandboxMark title="Written in the sandbox" />}
       </div>
       {role === 'user' ? (
         <div className="flex flex-col gap-2 rounded-lg bg-open-soft px-3 py-2">

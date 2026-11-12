@@ -5,6 +5,8 @@ directories:
 # Everything the main process needs is bundled into dist/main.mjs (server included), so no node_modules.
 files:
   - dist/main.mjs
+  # The sandbox's Python programs, read from the app's archive at run time.
+  - dist/container/**
   - package.json
   - "!**/node_modules/**"
 extraResources:

@@ -12,6 +12,7 @@ import { ChangesPanel } from '@/features/editing/ChangesPanel'
 import { ForkDialog } from '@/features/fork/ForkDialog'
 import { ProposalBox } from '@/features/fork/ProposalBox'
 import { NodeModelPicker } from '@/features/model/NodeModelPicker'
+import { SandboxToggle } from '@/features/sandbox/SandboxToggle'
 import { DeleteNodeDialog } from '@/features/graph/DeleteNodeDialog'
 import { RenameDialog } from '@/features/rename/RenameDialog'
 import { describeReset, limitName } from '@/lib/limit'
@@ -190,6 +191,7 @@ function ChatView({ projectId, nodeId }: { projectId: string; nodeId: string }) 
               : undefined
           }
           proposal={typeof dialog === 'object' ? dialog : undefined}
+          untrusted={detail.data.untrusted}
           onClose={() => setDialog(null)}
         />
       )}
@@ -371,7 +373,7 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
           {forkMarker(0)}
           {messages.map((m, i) => (
             <Fragment key={m.id}>
-              <MessageView id={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} />
+              <MessageView id={m.id} role={m.role} text={m.content} toolCalls={m.toolCalls} attachments={m.attachments} sandboxed={m.sandboxed} />
               {/* A proposal waits until it's reviewed: a fork after this reply dealt with it. */}
               {m.forkProposal && canWrite && !forks.some((f) => f.at > i) && (
                 <ProposalBox proposal={m.forkProposal} disabled={working} onReview={() => onDialog(m.forkProposal)} />
@@ -492,6 +494,7 @@ function Conversation({ detail, onDialog, hidden, onWorking }: {
                 ✓ {done ? 'Done' : 'Mark done'}
               </Button>
             )}
+            {canWrite && <SandboxToggle node={node} untrusted={detail.untrusted} disabled={working} />}
             {canWrite && (
               <NodeModelPicker
                 node={node}

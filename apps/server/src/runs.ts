@@ -11,16 +11,19 @@ import {
   type UsageLimit,
   toolActivity,
 } from '@harness/shared';
-import { fullSegments } from './dag/context.ts';
-import { COMPACT_INSTRUCTION, DRAFT_RESULT_INSTRUCTION, SYSTEM_PROMPT, buildChatRequest, editNote, segmentTurns, withAttachments } from './dag/prompt.ts';
+import { fullSegments, lastReplySandboxed } from './dag/context.ts';
+import { COMPACT_INSTRUCTION, DRAFT_RESULT_INSTRUCTION, SYSTEM_PROMPT, buildChatRequest, editNote, hostNote, sandboxNote, segmentTurns, withAttachments } from './dag/prompt.ts';
 import { type SessionPlan, planSession } from './dag/session.ts';
 import type { Repository } from './db/repository.ts';
-import { type ProviderError, classifyError } from './llm/errors.ts';
+import { ProviderError, classifyError } from './llm/errors.ts';
 import type { LLMProvider, ReplyContext } from './llm/index.ts';
+import type { SandboxRun } from './llm/provider.ts';
 import { cleanTitle } from './llm/title.ts';
 import { conflict, notFound } from './routes/errors.ts';
+import { containerPath } from './sandbox/paths.ts';
+import { FakeSandbox, type Sandbox } from './sandbox/service.ts';
 import type { Workspaces } from './workspace.ts';
-import type { Worktrees } from './worktrees.ts';
+import type { NodeWorktree, Worktrees } from './worktrees.ts';
 
 type Listener = (event: ChatStreamEvent) => void;
 
@@ -42,6 +45,8 @@ interface Run {
   asksLeft: number;
   /** Questions waiting for the user's approval (see allowAsk). */
   waiting: WaitingAsks | null;
+  /** The reply runs in the sandbox (decided when it starts). */
+  sandboxed: boolean;
   listeners: Set<Listener>;
   abort: AbortController;
 }
@@ -72,6 +77,14 @@ export interface RunOptions {
   askLimit?: number;
   /** How long a question waits for the user's approval before it counts as unanswered. */
   approvalTimeoutMs?: number;
+  /** Runs sandboxed nodes (default: the stand-in that runs nothing, for tests). */
+  sandbox?: Sandbox;
+}
+
+/** A user message waiting for its reply: its text and files (the note telling the model about them is added when the run starts). */
+interface Pending {
+  content: string;
+  attachments: Attachment[];
 }
 
 export const DEFAULT_ASK_LIMIT = 3;
@@ -110,6 +123,7 @@ export class RunManager {
   private readonly mcpUrl: (nodeId: string) => string | null;
   readonly askLimit: number;
   private readonly approvalTimeoutMs: number;
+  readonly sandbox: Sandbox;
 
   constructor(repo: Repository, llm: LLMProvider, workspaces: Workspaces, worktrees: Worktrees, options: RunOptions = {}) {
     this.repo = repo;
@@ -119,6 +133,16 @@ export class RunManager {
     this.mcpUrl = options.mcpUrl ?? (() => null);
     this.askLimit = options.askLimit ?? DEFAULT_ASK_LIMIT;
     this.approvalTimeoutMs = options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS;
+    this.sandbox = options.sandbox ?? new FakeSandbox();
+  }
+
+  /**
+   * Where a one-off run on the node's conversation (a result draft, a compact, an ask_node answer)
+   * runs: in the sandbox if the node's replies do, so its conversation never runs outside with tools.
+   */
+  async sandboxFor(node: DagNode): Promise<SandboxRun | null> {
+    if (!node.sandboxed) return null;
+    return this.sandbox.prepare(this.repo.getProject(node.projectId)!, node, null, () => {});
   }
 
   isRunning(nodeId: string): boolean {
@@ -241,8 +265,8 @@ export class RunManager {
       mcpUrl: null,
     };
     const upto = messages.length;
-    const draft = this.llm
-      .draftResult(ctx, signal)
+    const draft = this.sandboxFor(node)
+      .then((sandbox) => this.llm.draftResult({ ...ctx, sandbox }, signal))
       .then((result) => {
         this.repo.setResult(nodeId, result, upto);
         return { nodeId, upto, result };
@@ -345,8 +369,8 @@ export class RunManager {
         mcpUrl: this.mcpUrl(parent.id),
       };
       const abort = new AbortController();
-      const promise = this.llm
-        .compact(ctx, abort.signal)
+      const promise = this.sandboxFor(parent)
+        .then((sandbox) => this.llm.compact({ ...ctx, sandbox }, abort.signal))
         .then((text) => {
           this.repo.saveCompact(parent.id, upto, text);
           return text;
@@ -479,7 +503,7 @@ export class RunManager {
     // Plan the provider session before saving the message (it depends on what the node had so far).
     const session = planSession(this.repo.snapshot(node.projectId), nodeId);
     const userMessage = this.repo.addMessage(nodeId, 'user', content, { attachments });
-    this.launch(node, session, withAttachments(content, attachments));
+    this.launch(node, session, { content, attachments });
     return userMessage;
   }
 
@@ -500,7 +524,7 @@ export class RunManager {
     const graph = this.repo.snapshot(node.projectId);
     const last = graph.messages(nodeId).at(-1);
     if (last?.role !== 'user') throw conflict('The last message already has a reply.');
-    this.launch(node, planSession(graph, nodeId, { retry: true }), withAttachments(last.content, last.attachments));
+    this.launch(node, planSession(graph, nodeId, { retry: true }), { content: last.content, attachments: last.attachments });
   }
 
   /**
@@ -557,7 +581,7 @@ export class RunManager {
   }
 
   /** Start answering the node's last (already saved) user message. A node marked done is open again. */
-  private launch(node: DagNode, session: SessionPlan, message: string): void {
+  private launch(node: DagNode, session: SessionPlan, pending: Pending): void {
     if (node.status === 'finished') this.repo.setStatus(node.id, 'open');
     const workDir = this.workspaces.prepare(this.repo.getProject(node.projectId)!);
     const request = buildChatRequest(this.repo.snapshot(node.projectId), node.id);
@@ -573,32 +597,64 @@ export class RunManager {
       proposal: null,
       asksLeft: this.askLimit,
       waiting: null,
+      sandboxed: node.sandboxed,
       listeners: new Set(),
       abort: new AbortController(),
     };
     this.runs.set(node.id, run);
-    void this.execute(run, { nodeId: node.id, workDir, request, message, session, model: node.model, effort: node.effort, edit: null, mcpUrl: this.mcpUrl(node.id) });
+    const ctx: ReplyContext = {
+      nodeId: node.id, workDir, request, message: withAttachments(pending.content, pending.attachments), session,
+      model: node.model, effort: node.effort, edit: null, mcpUrl: this.mcpUrl(node.id), sandbox: null,
+    };
+    void this.execute(run, ctx, pending);
   }
 
   /**
-   * Give the run the node's own editable copy of the project (creating it if needed; a provider
-   * that can't edit runs read-only). The first message that runs
-   * with it tells the model where it is.
+   * Get the run ready: the node's own editable copy of the project (created if needed; a provider
+   * that can't edit runs read-only), the sandbox if the node runs in one, and the message with the
+   * notes the model needs: where its copy is (the first message that runs with it), and that the
+   * reply now runs in the sandbox, or outside it again (paths differ between the two).
    */
-  private async prepareEdit(run: Run, ctx: ReplyContext): Promise<ReplyContext> {
+  private async prepare(run: Run, ctx: ReplyContext, pending: Pending): Promise<ReplyContext> {
     const node = this.repo.getNode(ctx.nodeId)!;
-    if (!this.llm.canEdit) return ctx;
-    run.activity = 'Preparing files';
     const project = this.repo.getProject(node.projectId)!;
-    const copy = await this.worktrees.ensure(project, this.repo.snapshot(node.projectId), node).catch((err: unknown) => {
-      throw new Error(`Could not prepare this node's copy of the project: ${err instanceof Error ? err.message : String(err)}`);
-    });
-    if (!node.gitBranch) this.repo.setGitInfo(node.id, copy.branch, null);
-    const firstReply = !this.repo.listMessages(node.id).some((m) => m.role === 'assistant');
-    const message = copy.created || firstReply
-      ? `${editNote({ dir: copy.editDir, branch: copy.branch, merged: copy.merged, conflicts: copy.conflicts, fromProject: copy.fromProject })}\n\n${ctx.message}`
-      : ctx.message;
-    return { ...ctx, message, edit: { dir: copy.editDir } };
+    let copy: NodeWorktree | null = null;
+    if (this.llm.canEdit) {
+      run.activity = 'Preparing files';
+      copy = await this.worktrees.ensure(project, this.repo.snapshot(node.projectId), node).catch((err: unknown) => {
+        throw new Error(`Could not prepare this node's copy of the project: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      if (!node.gitBranch) this.repo.setGitInfo(node.id, copy.branch, null);
+    }
+    const sandbox = run.sandboxed
+      ? await this.sandbox.prepare(project, node, copy, (text) => (run.activity = text))
+      : null;
+    // In the sandbox, paths are the container's.
+    const local = (p: string) => (sandbox ? containerPath(p) : p);
+
+    const graph = this.repo.snapshot(node.projectId);
+    const notes: string[] = [];
+    const wasSandboxed = lastReplySandboxed(graph, node.id);
+    if (sandbox && !wasSandboxed) notes.push(sandboxNote({ hostWorkDir: ctx.workDir, workDir: sandbox.workDir, editDir: sandbox.editDir }));
+    if (!sandbox && wasSandboxed) notes.push(hostNote({ hostWorkDir: ctx.workDir, workDir: containerPath(ctx.workDir), editDir: copy?.editDir ?? null }));
+    const firstReply = !graph.messages(node.id).some((m) => m.role === 'assistant');
+    if (copy && (copy.created || firstReply)) {
+      notes.push(editNote({ dir: local(copy.editDir), branch: copy.branch, merged: copy.merged, conflicts: copy.conflicts, fromProject: copy.fromProject }));
+    }
+    const attachments = pending.attachments.map((a) => ({ ...a, path: local(a.path) }));
+    const message = [...notes, withAttachments(pending.content, attachments)].join('\n\n');
+    return { ...ctx, message, edit: copy ? { dir: copy.editDir } : null, sandbox };
+  }
+
+  private async scrubCopy(nodeId: string): Promise<void> {
+    const node = this.repo.getNode(nodeId, { includeDeleted: true });
+    if (!node?.gitBranch) return;
+    try {
+      const removed = await this.worktrees.scrub(this.repo.getProject(node.projectId)!, nodeId);
+      if (removed.length) console.warn(`[sandbox] node ${nodeId}: removed git folders the model made in its copy: ${removed.join(', ')}`);
+    } catch (err) {
+      console.error(`[sandbox] node ${nodeId}: checking the copy failed:`, err);
+    }
   }
 
   /** Save what the model changed in the node's copy as a commit, and the count for the graph card. */
@@ -615,13 +671,13 @@ export class RunManager {
     }
   }
 
-  private async execute(run: Run, baseCtx: ReplyContext): Promise<void> {
+  private async execute(run: Run, baseCtx: ReplyContext, pending: Pending): Promise<void> {
     const emit = (event: ChatStreamEvent) => this.emit(run, event);
     let failure: ProviderError | null = null;
     let ctx = baseCtx;
 
     try {
-      ctx = await this.prepareEdit(run, baseCtx);
+      ctx = await this.prepare(run, baseCtx, pending);
       // Stopped while the files were being prepared: the provider would never see that abort.
       if (run.abort.signal.aborted) throw new Error('Stopped before the model started.');
       for await (const event of this.llm.streamReply(ctx, run.abort.signal)) {
@@ -655,14 +711,21 @@ export class RunManager {
       if (!run.abort.signal.aborted) {
         console.error(`[run] node ${run.nodeId}:`, err);
         failure = classifyError(err, this.limit?.resetsAt ?? null);
+        // In the sandbox the login is the token from Sandbox settings, not this machine's.
+        if (failure.kind === 'auth' && ctx.sandbox) {
+          failure = new ProviderError('auth', 'The sandbox\'s Claude login was refused: the token in Sandbox settings is invalid or expired. Run `claude setup-token` and save the new token there (or check the Bedrock/Vertex variables passed in).');
+        }
       }
     }
 
     // Questions still waiting for approval can't be answered any more (the reply ended or was stopped).
     this.settleAsks(run, 'denied');
 
+    // What a sandboxed model left in its copy that could run code outside (its git link rewritten,
+    // nested repositories) is undone before anything on this machine touches the copy.
+    if (ctx.edit && ctx.sandbox) await this.scrubCopy(run.nodeId);
     // Commit file changes before the run counts as finished, so a fork right after starts from them.
-    if (ctx.edit) await this.commitEdits(run.nodeId, baseCtx.message);
+    if (ctx.edit) await this.commitEdits(run.nodeId, pending.content);
 
     // Save the reply, or whatever arrived before a failure or Stop (also on a node deleted
     // mid-reply, so restoring it brings the reply back; not if the node is gone, e.g. the project
@@ -674,7 +737,7 @@ export class RunManager {
     // anything leaves no session behind, so a retry starts that conversation over cleanly.
     if (node && run.sessionId && (hasContent || !failure)) this.repo.setSessionId(run.nodeId, run.sessionId);
     const saved = hasContent && node
-      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()], model: run.model, forkProposal: run.proposal })
+      ? this.repo.addMessage(run.nodeId, 'assistant', run.text, { toolCalls: [...run.toolCalls.values()], model: run.model, forkProposal: run.proposal, sandboxed: ctx.sandbox != null })
       : null;
 
     if (failure) {

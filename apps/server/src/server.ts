@@ -6,7 +6,10 @@ import { createApp } from './app.ts';
 import { backupDatabase, dailyBackup } from './db/backup.ts';
 import { backupDirOf, openDatabase } from './db/database.ts';
 import { Repository } from './db/repository.ts';
+import { ClaudeCodeProvider } from './llm/claude-code.ts';
 import { providerFromEnv } from './llm/index.ts';
+import { DockerSandbox, FakeSandbox, type Sandbox } from './sandbox/service.ts';
+import { harnessToolDefinitions } from './tools/harness.ts';
 import { DEFAULT_ASK_LIMIT } from './runs.ts';
 import { staticFiles } from './static.ts';
 import { UpdateChecker } from './system/update-check.ts';
@@ -58,6 +61,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
   const llm = providerFromEnv();
   const workspaces = new Workspaces(dataDir);
+  // Secure mode runs Claude Code in Docker; the placeholder provider only pretends.
+  const sandbox: Sandbox = llm instanceof ClaudeCodeProvider
+    ? new DockerSandbox({ dataDir, workspaces, cliVersion: () => llm.cliVersion(), toolDefinitions: harnessToolDefinitions })
+    : new FakeSandbox();
   // ask_node questions one user message allows before the user must approve more (until a settings page exists).
   const askLimit = Number(process.env.HARNESS_ASK_LIMIT ?? DEFAULT_ASK_LIMIT);
   if (!Number.isInteger(askLimit) || askLimit < 0) throw new Error('HARNESS_ASK_LIMIT must be a whole number, 0 or more');
@@ -79,6 +86,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     askLimit,
     pickFolder: options.pickFolder,
     updates,
+    sandbox,
   });
   let app: Hono = api;
   if (options.webDir) {
@@ -106,6 +114,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     close: async () => {
       updates?.stop();
       llm.dispose?.();
+      sandbox.dispose?.();
       if ('closeAllConnections' in server) server.closeAllConnections(); // open event streams would keep it alive
       await new Promise<void>((resolve) => server.close(() => resolve()));
       db.close();

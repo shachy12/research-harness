@@ -6,6 +6,7 @@ import {
   type GraphResponse,
   type MergePreview,
   type ProjectSummary,
+  type SandboxBuild,
   createProjectSchema,
   checkFolderSchema,
   mergePreviewSchema,
@@ -18,9 +19,13 @@ import {
   mergeModelSettings,
   mergeSchema,
   newRootSchema,
+  sandboxSettingsSchema,
   unreadCount,
 } from '@harness/shared';
+import path from 'node:path';
 import { Hono } from 'hono';
+import { untrustedContext } from '../dag/context.ts';
+import { DockerSocketError, assertNoDockerSocket } from '../sandbox/isolation.ts';
 import type { RouteDeps } from '../app.ts';
 import { BranchError } from '../worktrees.ts';
 import { HttpError, notFound } from './errors.ts';
@@ -171,6 +176,7 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
           forkedAtEnd: forkPoints.includes(messages.length),
           merge: runs.mergeState(node, messages.length),
           compacting: runs.compactState(node),
+          untrusted: untrustedContext(graph, node.id),
         };
       });
       return c.json<GraphResponse>({ project, nodes, deleted: repo.listDeleted(project.id), usage: runs.usage() });
@@ -191,7 +197,7 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
     // background (RunManager.startMerge), then starts working on its first message.
     .post('/:projectId/merge', zValidator('json', mergeSchema), async (c) => {
       const projectId = c.req.param('projectId');
-      const { title, prompt, model, effort } = c.req.valid('json');
+      const { title, prompt, model, effort, sandboxed } = c.req.valid('json');
       const parentIds = [...new Set(c.req.valid('json').parentIds)];
       if (parentIds.length < 2) throw new HttpError(400, 'Select at least two different nodes');
 
@@ -207,7 +213,11 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
       const settings = { model: model === undefined ? rule.model : model, effort: effort === undefined ? rule.effort : effort };
       if (model !== undefined || effort !== undefined) await checkModel(settings.model, settings.effort);
       // Its files start from the first merged node's, so it works against that node's branch too.
-      const common = { projectId, parentIds, mergePrompt: prompt, targetBranch: parents[0].targetBranch, ...settings };
+      // Sandboxed if any merged node is, unless the dialog said otherwise.
+      const common = {
+        projectId, parentIds, mergePrompt: prompt, targetBranch: parents[0].targetBranch, ...settings,
+        sandboxed: sandboxed ?? parents.some((p) => p.sandboxed),
+      };
       // A title the user wrote is final; the default one may be replaced by a model-written title.
       const node = title
         ? repo.createNode({ ...common, title, titleSource: 'user' })
@@ -241,8 +251,42 @@ export function projectRoutes({ repo, llm, runs, workspaces, worktrees, backup, 
         }
       }
       const first = repo.listNodes(project.id).find((n) => n.parentIds.length === 0);
-      const root = repo.createNode({ projectId: project.id, title: 'New thread', parentIds: [], model: first?.model ?? null, effort: first?.effort ?? null, targetBranch });
+      const root = repo.createNode({
+        projectId: project.id, title: 'New thread', parentIds: [], model: first?.model ?? null, effort: first?.effort ?? null, targetBranch,
+        sandboxed: project.sandbox.newNodes,
+      });
       return c.json(root, 201);
+    })
+
+    // The project's sandbox settings (image, credentials, extra folders, default for new roots).
+    .put('/:projectId/sandbox', zValidator('json', sandboxSettingsSchema), (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      const settings = c.req.valid('json');
+      for (const m of settings.mounts) {
+        if (!path.isAbsolute(m.path)) throw new HttpError(400, `"${m.path}" is not a full path.`);
+      }
+      try {
+        assertNoDockerSocket(settings.mounts.map((m) => path.resolve(m.path)));
+      } catch (err) {
+        if (err instanceof DockerSocketError) throw new HttpError(400, err.message);
+        throw err;
+      }
+      repo.setProjectSandbox(project.id, settings);
+      return c.json(repo.getProject(project.id)!);
+    })
+
+    // Build the project's sandbox image now (it is otherwise built when a sandboxed node first runs).
+    .post('/:projectId/sandbox/build', (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      runs.sandbox.build(project);
+      return c.json<SandboxBuild>(runs.sandbox.buildState(project.id));
+    })
+    .get('/:projectId/sandbox/build', (c) => {
+      const project = repo.getProject(c.req.param('projectId'));
+      if (!project) throw notFound('Project');
+      return c.json<SandboxBuild>(runs.sandbox.buildState(project.id));
     })
 
     // Start over: delete all nodes and messages, keep the project with a fresh root.

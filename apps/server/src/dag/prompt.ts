@@ -125,6 +125,33 @@ export function editNote(edit: {
   return `${lines.join('\n')}]`;
 }
 
+/** The first words of the note when a reply moves into the sandbox (the user's wording). */
+export const INTO_SANDBOX = 'You are now running inside docker container.';
+/** The first words of the note when a reply moves out of the sandbox (the user's wording). */
+export const OUT_OF_SANDBOX = 'You are now running without sandbox.';
+
+/**
+ * In front of the first message whose reply runs in the sandbox after the sandbox was switched on
+ * (the reply before it ran outside, or there is none): that it runs in a container now, where
+ * things are there, and how the user's paths in the conversation map.
+ */
+export function sandboxNote(s: { hostWorkDir: string; workDir: string; editDir: string | null }): string {
+  const copy = s.editDir ? `, and your own copy at ${s.editDir}, the only place where you can change files` : '';
+  const mapping = s.hostWorkDir === s.workDir
+    ? ''
+    : ` Paths of the user's machine earlier in this conversation map to it: ${s.hostWorkDir} is ${s.workDir} here (with forward slashes).`;
+  return `[${INTO_SANDBOX} This reply runs in a sandbox: a Linux container (Ubuntu) that sees the project folder, read-only, at ${s.workDir}${copy}, and nothing else of the user's machine.${mapping} ` +
+    "Internet access goes through a proxy that refuses the user's machine and local network. " +
+    'Shell commands run in the container; software you install there is gone once the sandbox stops. ' +
+    'Asking other nodes (ask_node) and proposing branches (fork_branches) are not available in the sandbox.]';
+}
+
+/** In front of the first message whose reply runs outside the sandbox after it was switched off. */
+export function hostNote(s: { hostWorkDir: string; workDir: string; editDir: string | null }): string {
+  const copy = s.editDir ? ` Your copy is at ${s.editDir}; make every change there.` : '';
+  return `[${OUT_OF_SANDBOX} This reply runs on the user's machine again, outside the sandbox: the project folder is ${s.hostWorkDir} (it was ${s.workDir} in the sandbox).${copy} Asking other nodes and proposing branches work again.]`;
+}
+
 /** A path as the shell needs it, quoted; forward slashes work in Git Bash on Windows too. */
 function shellPath(p: string): string {
   return `"${p.replaceAll('\\', '/')}"`;

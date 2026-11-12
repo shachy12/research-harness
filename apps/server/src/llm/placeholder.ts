@@ -44,8 +44,9 @@ export class PlaceholderProvider implements LLMProvider {
     };
   }
 
-  async *streamReply({ request, model, effort, edit, mcpUrl }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
+  async *streamReply({ request, model, effort, edit, mcpUrl, sandbox }: ReplyContext, signal: AbortSignal): AsyncIterable<ReplyEvent> {
     yield { type: 'model', model: model ?? 'claude-opus-5-5' };
+    if (sandbox) yield { type: 'text', text: '*(Placeholder: this reply would run in the sandbox.)*\n\n' };
     const question = request.turns.at(-1)?.content ?? '';
     if (question.includes('[test:limit]')) {
       const resetsAt = new Date(Date.now() + 2 * 3600_000).toISOString();

@@ -124,3 +124,26 @@ export function formatResult(title: string, r: BranchResult): string {
     `Confidence: ${r.confidence}`,
   ].join('\n');
 }
+
+/**
+ * The node or something it descends from had replies written in the sandbox, so its conversation
+ * may hold instructions from untrusted content that ran there (see `NodeDetail.untrusted`).
+ * Conservative: an ancestor counts even if its sandboxed replies came after the fork.
+ */
+export function untrustedContext(graph: GraphReader, nodeId: string): boolean {
+  const ids = [nodeId, ...ancestors((id) => graph.node(id), nodeId)];
+  return ids.some((id) => graph.messages(id).some((m) => m.sandboxed));
+}
+
+/**
+ * Whether the latest reply the node's model has seen (its own, else the last one it inherits) was
+ * written in the sandbox: when the next reply runs on the other side, the model is told.
+ */
+export function lastReplySandboxed(graph: GraphReader, nodeId: string): boolean {
+  for (const seg of fullSegments(graph, nodeId).reverse()) {
+    if (seg.kind !== 'messages') continue;
+    const reply = seg.messages.findLast((m) => m.role === 'assistant');
+    if (reply) return reply.sandboxed;
+  }
+  return false;
+}

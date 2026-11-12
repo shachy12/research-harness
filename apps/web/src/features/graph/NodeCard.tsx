@@ -4,6 +4,7 @@ import { FilePenIcon, FoldVerticalIcon, PencilIcon, Trash2Icon, UnfoldVerticalIc
 import { BranchChip, MergeChip, StatusChip } from '@/components/StatusChip'
 import { formatElapsed } from '@harness/shared'
 import { useDrafts } from '@/features/chat/drafts'
+import { SandboxMark } from '@/features/sandbox/SandboxToggle'
 import { activityOf } from '@/lib/activity'
 import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
@@ -88,15 +89,16 @@ export function NodeCard({ data }: NodeProps<CardNode>) {
               ⑂ {n.proposedBranches} proposed
             </span>
           )}
+          {n.sandboxed && <SandboxMark className={cn(!n.filesChanged && 'ml-auto')} />}
           {n.filesChanged ? (
             <span
-              className="ml-auto flex items-center gap-0.5 font-mono text-[11px] text-open"
+              className={cn('flex items-center gap-0.5 font-mono text-[11px] text-open', !n.sandboxed && 'ml-auto')}
               title={`Its branch changes ${n.filesChanged} ${n.filesChanged === 1 ? 'file' : 'files'} compared with the project`}
             >
               <FilePenIcon className="size-3" /> {n.filesChanged}
             </span>
           ) : null}
-          <span className={cn('font-mono text-[11px] text-muted-foreground', !n.filesChanged && 'ml-auto')}>{n.messageCount} msg</span>
+          <span className={cn('font-mono text-[11px] text-muted-foreground', !n.filesChanged && !n.sandboxed && 'ml-auto')}>{n.messageCount} msg</span>
         </div>
         <div className="flex min-w-0 items-center gap-1">
           <div className="line-clamp-1 min-w-0 text-sm font-semibold" title={n.title}>{n.title}</div>

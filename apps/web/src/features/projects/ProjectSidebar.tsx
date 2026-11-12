@@ -5,6 +5,7 @@ import {
   ChevronRightIcon,
   EllipsisVerticalIcon,
   FolderIcon,
+  LockIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PencilIcon,
@@ -16,6 +17,7 @@ import { Link, useNavigate } from 'react-router'
 import { useArchiveProject, useProjects } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { SandboxSettingsDialog } from '@/features/sandbox/SandboxSettingsDialog'
 import { cn } from '@/lib/utils'
 import { DeleteProjectDialog } from './DeleteProjectDialog'
 import { NewProjectDialog } from './NewProjectDialog'
@@ -52,6 +54,7 @@ export function ProjectSidebar({ currentId }: { currentId: string | undefined })
   const [creating, setCreating] = useState(false)
   const [renaming, setRenaming] = useState<ProjectSummary | null>(null)
   const [deleting, setDeleting] = useState<ProjectSummary | null>(null)
+  const [sandboxing, setSandboxing] = useState<ProjectSummary | null>(null)
 
   const toggle = () => {
     setCollapsed(!collapsed)
@@ -65,7 +68,7 @@ export function ProjectSidebar({ currentId }: { currentId: string | undefined })
   const active = projects.data?.filter((p) => !p.archived) ?? []
   const archived = projects.data?.filter((p) => p.archived) ?? []
   const row = (p: ProjectSummary) => (
-    <ProjectRow key={p.id} project={p} current={p.id === currentId} onRename={setRenaming} onDelete={setDeleting} />
+    <ProjectRow key={p.id} project={p} current={p.id === currentId} onRename={setRenaming} onDelete={setDeleting} onSandbox={setSandboxing} />
   )
 
   return (
@@ -121,6 +124,7 @@ export function ProjectSidebar({ currentId }: { currentId: string | undefined })
 
       {creating && <NewProjectDialog onClose={() => setCreating(false)} />}
       {renaming && <RenameProjectDialog project={renaming} onClose={() => setRenaming(null)} />}
+      {sandboxing && <SandboxSettingsDialog projectId={sandboxing.id} onClose={() => setSandboxing(null)} />}
       {deleting && (
         <DeleteProjectDialog
           project={deleting}
@@ -134,11 +138,12 @@ export function ProjectSidebar({ currentId }: { currentId: string | undefined })
   )
 }
 
-function ProjectRow({ project: p, current, onRename, onDelete }: {
+function ProjectRow({ project: p, current, onRename, onDelete, onSandbox }: {
   project: ProjectSummary
   current: boolean
   onRename: (p: ProjectSummary) => void
   onDelete: (p: ProjectSummary) => void
+  onSandbox: (p: ProjectSummary) => void
 }) {
   const archive = useArchiveProject()
 
@@ -165,16 +170,19 @@ function ProjectRow({ project: p, current, onRename, onDelete }: {
             <button
               type="button"
               aria-label={`Actions for ${p.name}`}
-              title="Rename, archive, delete"
+              title="Rename, sandbox settings, archive, delete"
               className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-background hover:text-foreground focus-visible:opacity-100 data-[popup-open]:opacity-100"
             />
           }
         >
           <EllipsisVerticalIcon className="size-3.5" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-40">
+        <DropdownMenuContent align="start" className="w-48">
           <DropdownMenuItem onClick={() => onRename(p)}>
             <PencilIcon /> Rename
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onSandbox(p)}>
+            <LockIcon /> Sandbox settings…
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => archive.mutate({ projectId: p.id, archived: !p.archived })}>
             {p.archived ? <><ArchiveRestoreIcon /> Unarchive</> : <><ArchiveIcon /> Archive</>}

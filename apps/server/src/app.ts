@@ -1,4 +1,5 @@
-import type { Effort, ModelsResponse, VersionInfo } from '@harness/shared';
+import { type Effort, type ModelsResponse, type SandboxStatus, type VersionInfo, sandboxCertificatesSchema, sandboxTokenSchema } from '@harness/shared';
+import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import type { Repository } from './db/repository.ts';
 import type { LLMProvider, ModelCatalog } from './llm/index.ts';
@@ -8,6 +9,7 @@ import { nodeRoutes } from './routes/nodes.ts';
 import { projectRoutes } from './routes/projects.ts';
 import { RunManager } from './runs.ts';
 import { systemRoutes } from './routes/system.ts';
+import type { Sandbox } from './sandbox/service.ts';
 import { type OpenInEditor, openInEditor } from './system/editor.ts';
 import { pickFolder } from './system/folder-picker.ts';
 import type { UpdateChecker } from './system/update-check.ts';
@@ -36,6 +38,8 @@ export interface AppDeps {
   askApprovalTimeoutMs?: number;
   /** Checks npm for a newer version (the npx package only); absent: GET /version reports nothing. */
   updates?: UpdateChecker;
+  /** Runs sandboxed nodes (Docker; tests and the placeholder provider: a stand-in that runs nothing). */
+  sandbox?: Sandbox;
 }
 
 export interface RouteDeps extends AppDeps {
@@ -85,6 +89,7 @@ export function createApp(deps: AppDeps) {
     mcpUrl,
     askLimit: deps.askLimit,
     approvalTimeoutMs: deps.askApprovalTimeoutMs,
+    sandbox: deps.sandbox,
   });
   const tools = new HarnessTools({ repo: deps.repo, llm: deps.llm, runs, workspaces: deps.workspaces, mcpUrl });
   const routeDeps: RouteDeps = {
@@ -107,6 +112,17 @@ export function createApp(deps: AppDeps) {
     .get('/version', (c) =>
       c.json<VersionInfo>(deps.updates?.info() ?? { current: null, latest: null, updateAvailable: false, checkedAt: null }))
     .get('/models', async (c) => c.json<ModelsResponse>({ provider: deps.llm.kind, canEdit: deps.llm.canEdit, ...(await loadModels(deps.llm)) }))
+    // Secure mode: can sandboxes run here (Docker, login token), and the token they log in with.
+    .get('/sandbox', async (c) => c.json<SandboxStatus>(await runs.sandbox.status()))
+    .put('/sandbox/token', zValidator('json', sandboxTokenSchema), (c) => {
+      runs.sandbox.setToken(c.req.valid('json').token);
+      return c.json({ ok: true });
+    })
+    // Certificates of this machine to leave out of the sandbox image (the image is rebuilt when the set changes).
+    .put('/sandbox/certificates', zValidator('json', sandboxCertificatesSchema), (c) => {
+      runs.sandbox.setExcludedCertificates(c.req.valid('json').excluded);
+      return c.json({ ok: true });
+    })
     .route('/projects', projectRoutes(routeDeps))
     .route('/nodes', nodeRoutes(routeDeps))
     .route('/system', systemRoutes(routeDeps))
